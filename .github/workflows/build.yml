@@ -19,6 +19,10 @@ on:
         description: 'run ID of a dry run of the other version: the action test installs both side by side'
         required: false
         default: ''
+      binutils-only:
+        description: 'only build the GNU binutils (to check or warm their cache)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -122,6 +126,8 @@ jobs:
         with:
           path: ${{ runner.temp }}/xb
           key: ${{ steps.plan.outputs.key }}-${{ hashFiles('scripts/build-binutils.sh') }}
+          # another target list (the other version) still saves the triples both share
+          restore-keys: binutils-2.42-${{ matrix.host }}-
       - name: llvm-mingw
         if: steps.plan.outputs.ship == 'true' && matrix.cross != '' && steps.cache.outputs.cache-hit != 'true'
         run: |
@@ -136,7 +142,10 @@ jobs:
           host=; [ -z '${{ matrix.cross }}' ] || host='--host ${{ matrix.cross }}'
           # shellcheck disable=SC2086
           scripts/build-binutils.sh $host "$RUNNER_TEMP/xb" ${{ steps.plan.outputs.triples }}
-          tar -C "$RUNNER_TEMP/xb" -cf "$RUNNER_TEMP/binutils-${{ matrix.host }}.tar" bin
+          # ship only this version's triples (a restored cache may hold more)
+          files=$(for t in ${{ steps.plan.outputs.triples }}; do (cd "$RUNNER_TEMP/xb" && ls -d bin/"$t"-*); done)
+          # shellcheck disable=SC2086
+          tar -C "$RUNNER_TEMP/xb" -cf "$RUNNER_TEMP/binutils-${{ matrix.host }}.tar" $files
       - if: steps.plan.outputs.ship == 'true'
         uses: actions/upload-artifact@v4
         with: { name: 'binutils-${{ matrix.host }}', path: '${{ runner.temp }}/binutils-${{ matrix.host }}.tar' }
@@ -147,6 +156,7 @@ jobs:
   # Canonical build: native x86_64-linux, every cross target with its units archive, both Windows hosts.
   linux-x86_64:
     needs: [source, binutils]
+    if: ${{ !inputs.binutils-only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     steps:
@@ -196,6 +206,7 @@ jobs:
   # Other Unix hosts: native toolchain, its cross compilers and binutils; units come from the canonical archives.
   native:
     needs: [source, binutils]
+    if: ${{ !inputs.binutils-only }}
     strategy:
       fail-fast: false
       matrix:

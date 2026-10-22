@@ -10,7 +10,9 @@ set -euo pipefail
 BINUTILS_VERSION=2.42
 BINUTILS_SHA256=f6e4d41fd5fc778b06b7891457b3620da5ecea1006c6a4a41ae998109f85a800
 hostopt=()
-if [ "${1:-}" = --host ]; then hostopt=(--host="$2" --build="$(uname -m)-linux-gnu"); export LDFLAGS="${LDFLAGS:-} -static -s"; shift 2; fi
+# macOS: link the SDK's zlib instead of building the bundled copy
+case $(uname -s) in Darwin) hostopt+=(--with-system-zlib) ;; esac
+if [ "${1:-}" = --host ]; then hostopt+=(--host="$2" --build="$(uname -m)-linux-gnu"); export LDFLAGS="${LDFLAGS:-} -static -s"; shift 2; fi
 out=${1:?usage: build-binutils.sh [--host TRIPLE] OUT TRIPLE...}; shift
 [ $# -gt 0 ] || { echo "build-binutils.sh: no triples" >&2; exit 2; }
 mkdir -p "$out"; out=$(cd "$out" && pwd)
@@ -34,7 +36,10 @@ for t in "$@"; do
      > "$out/configure-$t.log" 2>&1 \
    && make -j"$jobs" MAKEINFO=true all-gas all-ld all-binutils > "$out/make-$t.log" 2>&1 \
    && make MAKEINFO=true install-strip-gas install-strip-ld install-strip-binutils >> "$out/make-$t.log" 2>&1) \
-   || { tail -n 30 "$out/make-$t.log" "$out/configure-$t.log" 2>/dev/null; exit 1; }
+   || { echo "binutils $t: failed; the first errors (serial make):"
+        (cd "$b" && make -k MAKEINFO=true all-gas all-ld all-binutils > "$out/make1-$t.log" 2>&1) || true
+        grep -n -E -i '(error|undefined|fatal)[: ]' "$out/make1-$t.log" | head -n 40
+        tail -n 15 "$out/make1-$t.log"; exit 1; }
   rm -rf "$b"
 done
 # only the prefixed tools are shipped; drop the target directories and docs
