@@ -1,0 +1,30 @@
+From c118291bbde00708229f10f653ca2f4a506292e0 Mon Sep 17 00:00:00 2001
+From: mattias <nc-gaertnma@netcologne.de>
+Date: Mon, 12 Oct 2026 11:31:49 +0200
+Subject: [PATCH 2/2] fcl-process: fixed deadlock on unix when opening
+ /dev/null in forked child converting filename codepage
+
+---
+ packages/fcl-process/src/unix/process.inc | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/packages/fcl-process/src/unix/process.inc b/packages/fcl-process/src/unix/process.inc
+index 657254ad93..35d5cde049 100644
+--- a/packages/fcl-process/src/unix/process.inc
++++ b/packages/fcl-process/src/unix/process.inc
+@@ -421,7 +421,11 @@ begin
+               end
+             else if poNoConsole in Options then
+               begin
+-                fd:=FileOpen('/dev/null',fmOpenReadWrite or fmShareDenyNone);
++                // do not use FileOpen, it converts the filename codepage, risk of
++                // deadlock with other thread also converting strings
++                repeat
++                  fd:=fpopen(PAnsiChar('/dev/null'),O_RDWR);
++                until (fd<>-1) or (fpgeterrno<>ESysEINTR);
+                 safefpdup2(fd,0);
+                 safefpdup2(fd,1);
+                 safefpdup2(fd,2);
+-- 
+2.56.0
+

@@ -1,0 +1,283 @@
+# Build the toolchain for every host platform with all of its cross compilers, verify every archive on every
+# host OS, and for a release tag publish the complete set (never a partial release).
+#
+# Tag = <FPC_VERSION><FPC_UPSTREAM_MINORPATCH>-b<N>, e.g. 3.3.1-b1 or 3.2.4-rc2-b1. The compiler's build
+# identity (`fpc -iW`) is the same string with +N: 3.3.1+1, 3.2.4-rc2+1.
+# workflow_dispatch builds and verifies without publishing, with build number 0.
+name: build
+
+on:
+  push:
+    tags: ['*-b[0-9]*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WASMTIME: v49.0.3
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    outputs:
+      identity: ${{ steps.id.outputs.identity }}
+      build: ${{ steps.id.outputs.build }}
+      windows: ${{ steps.id.outputs.windows }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: id
+        run: |
+          . ./toolchain.conf
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            build=${GITHUB_REF_NAME##*-b}
+            want="${FPC_VERSION}${FPC_UPSTREAM_MINORPATCH}-b${build}"
+            [ "$GITHUB_REF_NAME" = "$want" ] || { echo "::error::tag $GITHUB_REF_NAME does not match toolchain.conf ($want)"; exit 1; }
+          else
+            build=0
+          fi
+          win=$(for h in $TOOLCHAIN_HOSTS; do case $h in *-win64) printf '%s,' "$h" ;; esac; done)
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "identity=${FPC_VERSION}${FPC_UPSTREAM_MINORPATCH}+${build}" >> "$GITHUB_OUTPUT"
+          echo "windows=${win%,}" >> "$GITHUB_OUTPUT"
+      - name: Fetch FPC source + carried patches (checks the pinned tree)
+        run: scripts/fetch-source.sh "$RUNNER_TEMP/fpc-src"
+      - name: Source archives (complete corresponding source for the GPL)
+        run: |
+          name="fpc-$(echo '${{ steps.id.outputs.identity }}' | sed 's/+/-b/')-source"
+          mkdir -p dist
+          tar -C "$RUNNER_TEMP" --exclude=.git --transform "s,^fpc-src,$name," -cf - fpc-src | xz -T0 -6 > "dist/$name.tar.xz"
+          tar -cf - patches | xz -6 > "dist/$name-patches.tar.xz"
+      - uses: actions/upload-artifact@v4
+        with: { name: dist-source, path: dist/ }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fpc-src-tree
+          path: ${{ runner.temp }}/fpc-src
+          include-hidden-files: true
+
+  # Canonical build: native x86_64-linux, every cross target it ships (compiler + one units archive per
+  # target, shared by all hosts), and the Windows-hosted toolchains (canadian cross).
+  linux-x86_64:
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - name: Disk space (units of ~70 targets need ~25 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo mkdir -p /mnt/w && sudo chown "$USER" /mnt/w
+          df -h / /mnt
+      - uses: actions/download-artifact@v4
+        with: { name: fpc-src-tree, path: '${{ runner.temp }}/fpc-src' }
+      - name: Cross tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang lld llvm nasm xz-utils zip \
+            $(awk -F'\t' '$0 !~ /^#/ && $2!="excluded" && $4 ~ /-$/ {print $4}' targets/targets.tsv | sort -u | scripts/binutils-packages.sh)
+      - name: Bootstrap
+        run: |
+          boot=$(scripts/bootstrap.sh "$RUNNER_TEMP/boot")
+          echo "BOOT=$boot" >> "$GITHUB_ENV"
+      - name: Build
+        run: |
+          scripts/build-toolchain.sh --src "$RUNNER_TEMP/fpc-src" --work /mnt/w --bootstrap "$BOOT" \
+            --build ${{ needs.source.outputs.build }} --lanes 2 --jobs 3 --keep-going \
+            --canadian "${{ needs.source.outputs.windows }}" --unit-archives \
+            native cross canadian finish package
+          cat /mnt/w/cross-status.tsv >> "$GITHUB_STEP_SUMMARY"
+          scripts/check-status.sh targets/targets.tsv /mnt/w/cross-status.tsv
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-x86_64-linux
+          path: |
+            /mnt/w/logs
+            /mnt/w/cross-status.tsv
+      - uses: actions/upload-artifact@v4
+        with: { name: dist-x86_64-linux, path: /mnt/w/dist/ }
+
+  # Other Unix hosts: native toolchain + the cross compilers they ship; cross units come from the canonical
+  # units archives.
+  native:
+    needs: source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: aarch64-linux, os: ubuntu-24.04-arm }
+          - { host: aarch64-darwin, os: macos-15 }
+          - { host: x86_64-darwin, os: macos-15-intel }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: fpc-src-tree, path: '${{ runner.temp }}/fpc-src' }
+      - name: Tools
+        run: |
+          if command -v apt-get >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends xz-utils zip
+          else brew install xz; fi
+      - name: Bootstrap
+        run: |
+          boot=$(scripts/bootstrap.sh "$RUNNER_TEMP/boot")
+          echo "BOOT=$boot" >> "$GITHUB_ENV"
+      - name: Build
+        run: |
+          scripts/build-toolchain.sh --src "$RUNNER_TEMP/fpc-src" --work "$RUNNER_TEMP/w" --bootstrap "$BOOT" \
+            --build ${{ needs.source.outputs.build }} --jobs 3 \
+            native compilers finish package
+          test -f "$RUNNER_TEMP/w/dist/fpc-$(echo '${{ needs.source.outputs.identity }}' | sed 's/+/-b/')-${{ matrix.host }}.tar.xz"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'logs-${{ matrix.host }}', path: '${{ runner.temp }}/w/logs' }
+      - uses: actions/upload-artifact@v4
+        with: { name: 'dist-${{ matrix.host }}', path: '${{ runner.temp }}/w/dist/' }
+
+  # Install the archives exactly as users will, on every host OS, and smoke-test every shipped target.
+  verify-posix:
+    needs: [source, linux-x86_64, native]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: x86_64-linux, os: ubuntu-24.04, wasmtime: x86_64-linux }
+          - { host: aarch64-linux, os: ubuntu-24.04-arm, wasmtime: aarch64-linux }
+          - { host: aarch64-darwin, os: macos-15, wasmtime: aarch64-macos }
+          - { host: x86_64-darwin, os: macos-15-intel, wasmtime: x86_64-macos }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'dist-*', merge-multiple: true, path: dist }
+      - name: Emulators and cross binutils
+        run: |
+          if command -v apt-get >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends qemu-user-static clang lld xz-utils \
+              $(awk -F'\t' '$0 !~ /^#/ && $2!="excluded" && $4 ~ /-$/ {print $4}' targets/targets.tsv | sort -u | scripts/binutils-packages.sh)
+          else
+            brew install xz x86_64-linux-gnu-binutils arm-linux-gnueabihf-binutils mips-linux-gnu-binutils \
+              mipsel-linux-gnu-binutils arm-none-eabi-binutils
+          fi
+          curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/$WASMTIME/wasmtime-$WASMTIME-${{ matrix.wasmtime }}.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/wasmtime-$WASMTIME-${{ matrix.wasmtime }}" >> "$GITHUB_PATH"
+      - name: Install (every target this host ships)
+        run: |
+          sh scripts/install.sh --root "$RUNNER_TEMP/fpc-toolchains" --from "$(ls dist/*-${{ matrix.host }}.tar.xz)" --targets all
+          echo "$RUNNER_TEMP/fpc-toolchains/bin" >> "$GITHUB_PATH"
+      - name: Smoke
+        run: |
+          v=$(. ./toolchain.conf; echo $FPC_VERSION)
+          test "$(fpc-$v -iW)" = '${{ needs.source.outputs.identity }}'
+          scripts/smoke.sh --fpc "$RUNNER_TEMP/fpc-toolchains/bin/fpc-$v" --out "$RUNNER_TEMP/smoke" --emulators
+          cat "$RUNNER_TEMP/smoke/smoke.tsv" >> "$GITHUB_STEP_SUMMARY"
+          scripts/check-smoke.sh targets/targets.tsv "$RUNNER_TEMP/smoke/smoke.tsv"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'smoke-${{ matrix.host }}', path: '${{ runner.temp }}/smoke/smoke.tsv' }
+
+  verify-windows:
+    needs: [source, linux-x86_64]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: x86_64-win64, os: windows-latest, wasmtime: x86_64-windows }
+          - { host: aarch64-win64, os: windows-11-arm, wasmtime: aarch64-windows }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip hosts this release does not ship
+        id: ship
+        run: |
+          "ship=$(('${{ needs.source.outputs.windows }}' -split ',') -contains '${{ matrix.host }}')" >> $env:GITHUB_OUTPUT
+      - uses: actions/download-artifact@v4
+        if: steps.ship.outputs.ship == 'True'
+        with: { name: dist-x86_64-linux, path: dist }
+      - name: clang (assembler of aarch64-win64 and the Darwin targets)
+        if: steps.ship.outputs.ship == 'True'
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path (Join-Path $llvm 'clang.exe'))) { choco install llvm -y --no-progress }
+          Add-Content $env:GITHUB_PATH $llvm
+      - name: Install + hello world for every shipped target
+        if: steps.ship.outputs.ship == 'True'
+        run: |
+          clang --version | Select-Object -First 1
+          Invoke-WebRequest "https://github.com/bytecodealliance/wasmtime/releases/download/$env:WASMTIME/wasmtime-$env:WASMTIME-${{ matrix.wasmtime }}.zip" -OutFile wt.zip
+          Expand-Archive wt.zip -DestinationPath $env:RUNNER_TEMP
+          $env:PATH = "$env:RUNNER_TEMP\wasmtime-$env:WASMTIME-${{ matrix.wasmtime }};$env:PATH"
+          $root = Join-Path $env:RUNNER_TEMP 'fpc-toolchains'
+          $zip = (Get-ChildItem dist -Filter "*-${{ matrix.host }}.zip" | Where-Object { $_.Name -notlike '*-units-*' }).FullName
+          ./scripts/install.ps1 -Root $root -From $zip -Targets all
+          $v = (Select-String -Path toolchain.conf -Pattern '^FPC_VERSION=(.*)').Matches[0].Groups[1].Value
+          $fpc = Join-Path $root "bin\fpc-$v.cmd"
+          $id = (& $fpc -iW).Trim(); if ($id -ne '${{ needs.source.outputs.identity }}') { throw "identity $id" }
+          ./scripts/smoke.ps1 -Fpc $fpc -Tree (Join-Path $root "toolchains\$v") -Out (Join-Path $env:RUNNER_TEMP 'smoke') -HostId '${{ matrix.host }}'
+          Get-Content (Join-Path $env:RUNNER_TEMP 'smoke\smoke.tsv') | Add-Content $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.ship.outputs.ship == 'True'
+        with: { name: 'smoke-${{ matrix.host }}', path: '${{ runner.temp }}/smoke/smoke.tsv' }
+
+  release:
+    needs: [source, linux-x86_64, native, verify-posix, verify-windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.c.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'dist-*', merge-multiple: true, path: out }
+      - name: Collect and check completeness
+        id: c
+        run: |
+          cd out && rm -f SHA256SUMS.* && sha256sum ./* | sed 's# \./#  #' > SHA256SUMS && cd ..
+          scripts/check-release.sh out ${{ needs.source.outputs.build }}
+          ls -la out >> "$GITHUB_STEP_SUMMARY"
+          echo "tag=$(echo '${{ needs.source.outputs.identity }}' | sed 's/+/-b/')" >> "$GITHUB_OUTPUT"
+      - name: Draft release (tags only; published after the action test)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=; case "$GITHUB_REF_NAME" in *-rc*|3.3.*) pre=--prerelease ;; esac
+          scripts/release-notes.sh "$GITHUB_REF_NAME" > notes.md
+          gh release create "$GITHUB_REF_NAME" $pre --draft --verify-tag --title "FPC $GITHUB_REF_NAME" --notes-file notes.md out/*
+
+  # The action, from this checkout, on every host: on a tag against the draft release, otherwise against
+  # this run's archives.
+  action-test:
+    needs: release
+    permissions:
+      contents: write
+    uses: ./.github/workflows/action-test.yml
+    with:
+      release: ${{ needs.release.outputs.tag }}
+      artifacts: ${{ github.ref_type != 'tag' }}
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [release, action-test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish the release and move v<version> (fast-forward only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "$GITHUB_REF_NAME" --draft=false
+          v=$(. ./toolchain.conf; echo "$FPC_VERSION")
+          git push origin "HEAD:refs/heads/v$v"

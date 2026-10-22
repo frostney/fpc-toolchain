@@ -1,0 +1,52 @@
+From d3f0905b5878bf048dba1fbfeecd9a6374519561 Mon Sep 17 00:00:00 2001
+From: mattias <nc-gaertnma@netcologne.de>
+Date: Wed, 22 Jul 2026 14:49:05 +0200
+Subject: [PATCH 1/2] fcl-process: fixed deadlock on unix when
+ FCurrentDirectory codepage is converted
+
+---
+ packages/fcl-process/src/unix/process.inc | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/packages/fcl-process/src/unix/process.inc b/packages/fcl-process/src/unix/process.inc
+index b4744e7dd1..657254ad93 100644
+--- a/packages/fcl-process/src/unix/process.inc
++++ b/packages/fcl-process/src/unix/process.inc
+@@ -317,6 +317,7 @@ Var
+   res      : cint;
+   FoundName,
+   PName    : String;
++  SysCurrentDir: String;
+ 
+ begin
+   If (poUsePipes in Options) then
+@@ -347,6 +348,13 @@ begin
+             raise EProcess.CreateFmt(SErrNoSuchProgram,[PName]);
+         end;
+ 
++        // convert FCurrentDirectory codepage before fpFork, otherwise risk of deadlock with
++        // other thread also converting strings
++        if (FCurrentDirectory<>'') then
++          SysCurrentDir:=ToSingleByteFileSystemEncodedFileName(FCurrentDirectory)
++        else
++          SysCurrentDir:='';
++
+ {$if (defined(DARWIN) or defined(SUNOS))}
+         { can't use vfork in case the child has to be
+           suspended immediately, because with vfork the
+@@ -382,10 +390,10 @@ begin
+         else
+           begin
+             { We're in the child }
+-            if (FCurrentDirectory<>'') then
++            if (SysCurrentDir<>'') then
+                begin
+ {$push}{$i-}
+-                 ChDir(FCurrentDirectory);
++                 ChDir(SysCurrentDir);
+                  { exit if the requested working directory does not exist (can
+                    use DirectoryExists, that would not be atomic; cannot change
+                    before forking because that would also change the CWD of the
+-- 
+2.56.0
+

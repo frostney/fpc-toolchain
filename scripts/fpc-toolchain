@@ -1,0 +1,72 @@
+#!/bin/sh
+# fpc-toolchain — select and check side-by-side FPC toolchains installed by install.sh.
+#
+#   fpc-toolchain list                      installed builds (* = active for its version)
+#   fpc-toolchain env VERSION|IDENTITY      print `export PATH=...` putting that build's bin/ first
+#   fpc-toolchain env --lock FILE           same, for the build a toolchain.lock pins (must be installed)
+#   fpc-toolchain which VERSION|IDENTITY    print the build's bin directory
+#   fpc-toolchain check --lock FILE         exit 0 iff `fpc` on PATH is exactly the pinned identity
+#   fpc-toolchain doctor [VERSION]          report config shadowing and missing cross binutils
+#
+# Usage in a shell or CI step:  eval "$(fpc-toolchain env --lock toolchain.lock)"
+set -eu
+root=${FPC_TOOLCHAIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
+
+die() { echo "fpc-toolchain: $*" >&2; exit 1; }
+lockval() { sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*$/\1/p" "$1" | head -n 1; }
+resolve() { # VERSION, IDENTITY (3.3.1+1) or release tag (3.3.1-b1) -> tree dir
+  set -- "$(echo "$1" | sed 's/-b\([0-9][0-9]*\)$/+\1/')"
+  [ -d "$root/toolchains/$1" ] || die "$1 is not installed under $root (install.sh $1)"
+  (cd "$root/toolchains/$1" && pwd -P)
+}
+arg_tree() {
+  if [ "${1:-}" = --lock ]; then
+    [ -f "${2:-}" ] || die "no lock file ${2:-}"
+    resolve "$(lockval "$2" identity)"
+  else
+    [ -n "${1:-}" ] || die "which version?"
+    resolve "$1"
+  fi
+}
+
+cmd=${1:-list}; [ $# -gt 0 ] && shift
+case $cmd in
+  list)
+    for d in "$root"/toolchains/*; do
+      [ -d "$d" ] && [ ! -L "$d" ] || continue
+      id=$(basename "$d"); v=${id%%[-+]*}; mark=' '
+      [ "$(readlink "$root/toolchains/$v" 2>/dev/null)" = "$id" ] && mark='*'
+      echo "$mark $id  ($(sed -n 's/^host=//p' "$d/share/fpc-toolchain/BUILDINFO"))"
+    done ;;
+  env)
+    t=$(arg_tree "$@")
+    echo "export PATH=\"$t/bin:\$PATH\"" ;;
+  which)
+    t=$(arg_tree "$@"); echo "$t/bin" ;;
+  check)
+    [ "${1:-}" = --lock ] && [ -f "${2:-}" ] || die "usage: check --lock FILE"
+    want=$(lockval "$2" identity | sed 's/-b\([0-9][0-9]*\)$/+\1/')
+    got=$(fpc -iW 2>/dev/null) || die "no fpc on PATH"
+    [ "$got" = "$want" ] || die "fpc on PATH is $got ($(command -v fpc)), toolchain.lock wants $want"
+    echo "ok $got" ;;
+  doctor)
+    for c in "$HOME/.fpc.cfg" ./fpc.cfg; do
+      [ -f "$c" ] && echo "shadowing: $c is read before the toolchain's fpc.cfg by plain fpc/ppc* (front-ends fpc-<ver> use -n)"
+    done
+    for d in "$root"/toolchains/*; do
+      [ -L "$d" ] || continue
+      [ -n "${1:-}" ] && [ "$(basename "$d")" != "$1" ] && continue
+      echo "== $(basename "$d") -> $(readlink "$d")"
+      awk -F'\t' '$0 !~ /^#/ && NF>=4 && $2!="excluded" {print $1, $2, $4}' "$d/share/fpc-toolchain/targets.tsv" |
+      while read -r t cls bu; do
+        [ -d "$d/lib/fpc/$(basename "$d")/units/$t" ] || continue
+        case $bu in
+          -) echo "  $t: internal" ;;
+          clang:*) command -v clang >/dev/null 2>&1 && echo "  $t: clang ok" || echo "  $t: MISSING clang" ;;
+          *) if command -v "${bu}as" >/dev/null 2>&1 && command -v "${bu}ld" >/dev/null 2>&1; then echo "  $t: ${bu}as/ld ok ($cls)"
+             else echo "  $t: MISSING ${bu}as/${bu}ld ($cls)"; fi ;;
+        esac
+      done
+    done ;;
+  *) sed -n '2,12p' "$0"; exit 2 ;;
+esac

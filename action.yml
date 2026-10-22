@@ -1,0 +1,123 @@
+name: 'Free Pascal toolchain'
+description: 'Install a cached Free Pascal toolchain from this repository''s releases, with the cross targets you ask for.'
+author: 'Johannes Stein'
+branding:
+  icon: 'package'
+  color: 'blue'
+
+inputs:
+  targets:
+    description: 'Cross targets to add, comma separated (for example x86_64-win64,wasm32-wasip1). Default: native only.'
+    required: false
+    default: ''
+  release:
+    description: 'Release to install (tag 3.3.1-b1 or identity 3.3.1+1). Default: the tag the action is used at, else the newest release.'
+    required: false
+    default: ''
+  repository:
+    description: 'Repository whose releases to install. Default: the action''s own repository.'
+    required: false
+    default: ''
+  fpc:
+    description: 'Put the plain fpc, instantfpc, fpcres, ... of this build first on PATH. fpc-<version> is always added.'
+    required: false
+    default: 'true'
+  cache:
+    description: 'Cache the installed toolchain (and sysroots) with actions/cache.'
+    required: false
+    default: 'true'
+  sysroots:
+    description: 'Linux targets to fetch a glibc sysroot for (for example aarch64-linux), for programs that link libc.'
+    required: false
+    default: ''
+  sysroot-packages:
+    description: 'Extra Ubuntu packages to put into each sysroot (for example libicu74 libstdc++6).'
+    required: false
+    default: ''
+  archives:
+    description: 'Directory with already downloaded release assets (offline use and tests). Default: download from the release.'
+    required: false
+    default: ''
+  token:
+    description: 'Token for the GitHub API (release lookup and download).'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  path:
+    description: 'Directory of the installed build (bin/, lib/fpc/<version>/ on Linux and macOS; bin\<host>\, units\ on Windows).'
+    value: ${{ steps.install.outputs.path }}
+  root:
+    description: 'Install root (its bin/ holds fpc-<version>).'
+    value: ${{ steps.install.outputs.root }}
+  version:
+    description: 'FPC version, as fpc -iV prints it (for example 3.3.1).'
+    value: ${{ steps.resolve.outputs.version }}
+  identity:
+    description: 'Build identity, as fpc -iW prints it (for example 3.3.1+1).'
+    value: ${{ steps.resolve.outputs.identity }}
+  tag:
+    description: 'Release tag that was installed.'
+    value: ${{ steps.resolve.outputs.tag }}
+  cache-hit:
+    description: 'true when the toolchain came from the cache (actions/cache or the runner tool cache).'
+    value: ${{ steps.cache.outputs.cache-hit == 'true' || steps.install.outputs.tool-cache-hit == 'true' }}
+  sysroot-dir:
+    description: 'Directory with one sysroot per requested target; <dir>/<target>/fpc-options holds its FPC options.'
+    value: ${{ steps.sysroots.outputs.sysroot-dir }}
+  sysroot-options:
+    description: 'FPC options for the sysroot when exactly one was requested (-XR... -Fl... -k--sysroot=...).'
+    value: ${{ steps.sysroots.outputs.sysroot-options }}
+
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        INPUT_TARGETS: ${{ inputs.targets }}
+        INPUT_RELEASE: ${{ inputs.release }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_REPOSITORY: ${{ github.action_repository }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action.sh" resolve
+    - id: cache
+      if: inputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.resolve.outputs.dir }}
+        key: ${{ steps.resolve.outputs.key }}
+    - id: install
+      shell: bash
+      env:
+        INPUT_DIR: ${{ steps.resolve.outputs.dir }}
+        INPUT_HOST: ${{ steps.resolve.outputs.host }}
+        INPUT_TAG: ${{ steps.resolve.outputs.tag }}
+        INPUT_IDENTITY: ${{ steps.resolve.outputs.identity }}
+        INPUT_REPO: ${{ steps.resolve.outputs.repo }}
+        INPUT_TARGETS: ${{ steps.resolve.outputs.targets }}
+        INPUT_FPC: ${{ inputs.fpc }}
+        INPUT_ARCHIVES: ${{ inputs.archives }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action.sh" install
+    - id: sysroot-key
+      if: inputs.sysroots != ''
+      shell: bash
+      env:
+        INPUT_SYSROOTS: ${{ inputs.sysroots }}
+        INPUT_SYSROOT_PACKAGES: ${{ inputs.sysroot-packages }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action.sh" sysroot-key
+    - id: sysroot-cache
+      if: inputs.sysroots != '' && inputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.sysroot-key.outputs.sysroot-paths }}
+        key: ${{ steps.sysroot-key.outputs.sysroot-key }}
+    - id: sysroots
+      if: inputs.sysroots != ''
+      shell: bash
+      env:
+        INPUT_SYSROOTS: ${{ inputs.sysroots }}
+        INPUT_SYSROOT_PACKAGES: ${{ inputs.sysroot-packages }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action.sh" sysroots

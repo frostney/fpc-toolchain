@@ -1,0 +1,143 @@
+# Install a published release with the installers on every host platform, side by side with the sibling
+# version's latest release, and smoke-test it: build identity, version selection, hello world for every target.
+name: smoke
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      identity:
+        description: 'release to test, e.g. 3.3.1-b1 or 3.3.1+1 (default: latest release)'
+        required: false
+  schedule:
+    - cron: '17 4 * * 1'   # weekly: catches runner image drift (glibc, Xcode, Windows SDK)
+
+permissions:
+  contents: read
+
+env:
+  WASMTIME: v49.0.3
+  # the sibling toolchain installed next to this one to prove side-by-side installs
+  SIBLING_REPO: ${{ github.repository == 'frostney/fpc-toolchain-3.2.4' && 'frostney/fpc-toolchain-3.3.1' || 'frostney/fpc-toolchain-3.2.4' }}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      identity: ${{ steps.r.outputs.identity }}
+      sibling: ${{ steps.r.outputs.sibling }}
+      hosts: ${{ steps.r.outputs.hosts }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id='${{ inputs.identity || github.event.release.tag_name }}'
+          [ -n "$id" ] || id=$(gh release view -R "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          sib=$(gh release view -R "$SIBLING_REPO" --json tagName -q .tagName 2>/dev/null || true)
+          # release tags are <ver>-bN; the identity fpc -iW prints is <ver>+N
+          id=$(echo "$id" | sed 's/-b\([0-9][0-9]*\)$/+\1/'); sib=$(echo "$sib" | sed 's/-b\([0-9][0-9]*\)$/+\1/')
+          echo "identity=$id" >> "$GITHUB_OUTPUT"; echo "sibling=$sib" >> "$GITHUB_OUTPUT"
+          echo "hosts=$(. ./toolchain.conf; echo "$TOOLCHAIN_HOSTS")" >> "$GITHUB_OUTPUT"
+
+  posix:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: x86_64-linux, os: ubuntu-24.04, wasmtime: x86_64-linux }
+          - { host: aarch64-linux, os: ubuntu-24.04-arm, wasmtime: aarch64-linux }
+          - { host: aarch64-darwin, os: macos-15, wasmtime: aarch64-macos }
+          - { host: x86_64-darwin, os: macos-15-intel, wasmtime: x86_64-macos }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Emulators, cross binutils, wasmtime
+        run: |
+          if command -v apt-get >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends qemu-user-static clang lld xz-utils \
+              $(awk -F'\t' '$0 !~ /^#/ && $2!="excluded" && $4 ~ /-$/ {print $4}' targets/targets.tsv | sort -u | scripts/binutils-packages.sh)
+          else
+            brew install xz x86_64-linux-gnu-binutils arm-linux-gnueabihf-binutils mips-linux-gnu-binutils \
+              mipsel-linux-gnu-binutils arm-none-eabi-binutils
+          fi
+          curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/$WASMTIME/wasmtime-$WASMTIME-${{ matrix.wasmtime }}.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/wasmtime-$WASMTIME-${{ matrix.wasmtime }}" >> "$GITHUB_PATH"
+      - name: Install (this release + sibling) from the public release URLs
+        run: |
+          root=$RUNNER_TEMP/fpc-toolchains
+          sh scripts/install.sh --root "$root" --targets all "${{ needs.resolve.outputs.identity }}"
+          [ -z "${{ needs.resolve.outputs.sibling }}" ] || sh scripts/install.sh --root "$root" "${{ needs.resolve.outputs.sibling }}"
+          echo "$root/bin" >> "$GITHUB_PATH"
+      - name: Side by side + identity
+        run: |
+          id='${{ needs.resolve.outputs.identity }}'; v=${id%%[-+]*}
+          test "$(fpc-$v -iW)" = "$id"
+          test "$(fpc-$v -iV)" = "$v"
+          # FPC's own multi-version selection: any fpc driver + ppc<cpu>-<version> on PATH
+          printf 'program v; begin writeln({$I %%FPCVERSION%%}); end.\n' > "$RUNNER_TEMP/v.pas"
+          "$RUNNER_TEMP/fpc-toolchains/toolchains/$v/bin/fpc" -V$v -FE"$RUNNER_TEMP" "$RUNNER_TEMP/v.pas"
+          test "$("$RUNNER_TEMP/v")" = "$v"
+          sib='${{ needs.resolve.outputs.sibling }}'
+          if [ -n "$sib" ]; then sv=${sib%%[-+]*}; test "$(fpc-$sv -iW)" = "$sib"
+            "$RUNNER_TEMP/fpc-toolchains/toolchains/$v/bin/fpc" -V$sv -FE"$RUNNER_TEMP" "$RUNNER_TEMP/v.pas"
+            test "$("$RUNNER_TEMP/v")" = "$sv"; fi
+          fpc-toolchain list
+          eval "$(fpc-toolchain env $v)"; test "$(fpc -iW)" = "$id"
+      - name: Hello world, every target
+        run: |
+          id='${{ needs.resolve.outputs.identity }}'; v=${id%%[-+]*}
+          scripts/smoke.sh --fpc "$RUNNER_TEMP/fpc-toolchains/bin/fpc-$v" --out "$RUNNER_TEMP/smoke" --emulators
+          cat "$RUNNER_TEMP/smoke/smoke.tsv" >> "$GITHUB_STEP_SUMMARY"
+          scripts/check-smoke.sh targets/targets.tsv "$RUNNER_TEMP/smoke/smoke.tsv"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'smoke-${{ matrix.host }}', path: '${{ runner.temp }}/smoke/smoke.tsv' }
+
+  windows:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: x86_64-win64, os: windows-latest, wasmtime: x86_64-windows }
+          - { host: aarch64-win64, os: windows-11-arm, wasmtime: aarch64-windows }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip hosts this release does not ship
+        id: ship
+        run: |
+          "ship=$(('${{ needs.resolve.outputs.hosts }}' -split ' ') -contains '${{ matrix.host }}')" >> $env:GITHUB_OUTPUT
+      - name: clang + wasmtime
+        if: steps.ship.outputs.ship == 'True'
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path (Join-Path $llvm 'clang.exe'))) { choco install llvm -y --no-progress }
+          Add-Content $env:GITHUB_PATH $llvm
+          Invoke-WebRequest "https://github.com/bytecodealliance/wasmtime/releases/download/$env:WASMTIME/wasmtime-$env:WASMTIME-${{ matrix.wasmtime }}.zip" -OutFile wt.zip
+          Expand-Archive wt.zip -DestinationPath $env:RUNNER_TEMP
+          Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\wasmtime-$env:WASMTIME-${{ matrix.wasmtime }}"
+      - name: Install (this release + sibling) from the public release URLs
+        if: steps.ship.outputs.ship == 'True'
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'fpc-toolchains'
+          ./scripts/install.ps1 -Root $root -Identity '${{ needs.resolve.outputs.identity }}' -Targets all
+          if ('${{ needs.resolve.outputs.sibling }}') { try { ./scripts/install.ps1 -Root $root -Identity '${{ needs.resolve.outputs.sibling }}' } catch { Write-Warning "sibling: $_" } }
+          Add-Content $env:GITHUB_PATH (Join-Path $root 'bin')
+      - name: Identity + hello world for every target
+        if: steps.ship.outputs.ship == 'True'
+        run: |
+          $id = '${{ needs.resolve.outputs.identity }}'; $v = ($id -split '[-+]')[0]
+          $root = Join-Path $env:RUNNER_TEMP 'fpc-toolchains'
+          $fpc = Join-Path $root "bin\fpc-$v.cmd"
+          $got = (& $fpc -iW).Trim(); if ($got -ne $id) { throw "identity $got != $id" }
+          ./scripts/smoke.ps1 -Fpc $fpc -Tree (Join-Path $root "toolchains\$v") -Out (Join-Path $env:RUNNER_TEMP 'smoke') -HostId '${{ matrix.host }}'
+          Get-Content (Join-Path $env:RUNNER_TEMP 'smoke\smoke.tsv') | Add-Content $env:GITHUB_STEP_SUMMARY

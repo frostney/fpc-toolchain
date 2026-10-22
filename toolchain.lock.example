@@ -1,0 +1,8 @@
+# toolchain.lock — commit in a project root to pin its FPC toolchain.
+# identity: what `fpc -iW` prints (<ver>+N); the release tag is the same with -bN (3.3.1+1 = tag 3.3.1-b1).
+repo = frostney/fpc-toolchain-3.2.4
+identity = 3.2.4-rc2+1
+# sha256 of the release's SHA256SUMS asset: pins every archive of the release
+sha256sums = <sha256 of SHA256SUMS>
+# cross targets whose units the installer adds (comma list, or all)
+targets = aarch64-linux,x86_64-win64
