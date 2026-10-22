@@ -341,7 +341,7 @@ jobs:
         with: { pattern: 'dist-*', merge-multiple: true, path: out }
       - name: Collect and check completeness
         run: |
-          cd out && rm -f SHA256SUMS.* && sha256sum ./* | sed 's# \./#  #' > SHA256SUMS && cd ..
+          (cd out && rm -f SHA256SUMS.* && sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS") && mv "$RUNNER_TEMP/SHA256SUMS" out/SHA256SUMS
           scripts/check-release.sh ${{ needs.source.outputs.version }} out ${{ needs.source.outputs.build }}
           ls -la out >> "$GITHUB_STEP_SUMMARY"
       - name: Draft release (tags only; published after the action test)
