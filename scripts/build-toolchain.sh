@@ -277,6 +277,15 @@ step_canadian() {
     (cd "$tree" && run_make "$lf" install CPU_TARGET="$cpu2" OS_TARGET="$os2" FPC="$xppc" INSTALL_PREFIX="$root" UNIXHier= BUILDFULLNATIVE=1 "${extra[@]}")
     # FPC's Windows layout keeps every executable in bin\<host>\ (the utils' fpmake installs to bin\)
     for f in "$root"/bin/*; do [ -f "$f" ] && mv -f "$f" "$root/bin/$h2/"; done
+    # Windows x64 has no 80-bit Extended, so its ppcx64.exe stores reals in units as Double and cannot read the
+    # x86_64-linux/darwin/... units (80-bit). With soft x80 (SOFT_FPUX80=1 in toolchain.conf) it reads and
+    # writes them as 80-bit; win64 code is unchanged.
+    if [ "$h2" = x86_64-win64 ] && [ "${SOFT_FPUX80:-0}" = 1 ]; then
+      log "canadian $h2: ppcx64.exe with soft x80"
+      (cd "$tree/compiler" && run_make "$lf" clean CPU_TARGET="$cpu2" OS_TARGET="$os2" FPC="$xppc" \
+        && run_make "$lf" x86_64 RELEASE=1 CPU_TARGET="$cpu2" OS_TARGET="$os2" FPC="$xppc" LOCALOPT=-dFPC_SOFT_FPUX80 "${extra[@]}" \
+        && cp ppcx64.exe "$root/bin/$h2/ppcx64.exe") || { log "canadian $h2: soft x80 ppcx64.exe failed"; exit 1; }
+    fi
     # Cross compilers that run on h2: build compiler/ for PPC_TARGET=<cpu> with OS/CPU_TARGET=h2.
     for t in $(awk -F'\t' -v h="$h2" '$0 !~ /^#/ && NF>=3 && $2!="excluded" && (","$3",") ~ (","h",") {print $1}' "$tsv"); do
       tcpu=${t%%-*}
@@ -336,7 +345,7 @@ win64_x87_compiler() {
      && run_make "$lf" -C compiler x86_64 LOCALOPT=-dFPC_SUPPORT_X87_TYPES_ON_WIN64 FPC="$(native_ppc)" \
      && cp compiler/ppcx64 ppcx64-x87 \
      && run_make "$lf" -C rtl all OS_TARGET=win64 CPU_TARGET=x86_64 FPC="$x/ppcx64-x87" -j"$jobs" \
-     && run_make "$lf" -C compiler clean \
+     && run_make "$lf" -C compiler clean FPC="$(native_ppc)" \
      && run_make "$lf" -C compiler "$cpu" RELEASE=1 OS_TARGET=win64 CPU_TARGET=x86_64 FPC="$x/ppcx64-x87" \
      && cp "compiler/ppc$(compiler_suffix "$cpu").exe" "$dest") || return 1
   rm -rf "$x"

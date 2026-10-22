@@ -155,7 +155,7 @@ if [ -n "$targets" ] && [ "$targets" != none ]; then
 fi
 
 # --- 3.2.x on Apple Silicon: x86 targets through the x86_64-darwin build under Rosetta 2 ------------------
-x86=$(for t in $(echo "$targets" | tr ',' ' '); do case $t in i386-*|i8086-*|x86_64-*) echo "$t" ;; esac; done)
+x86=$(for t in $(echo "$targets" | tr ',' ' '); do case $t in (i386-*|i8086-*|x86_64-*) echo "$t" ;; esac; done)
 if [ "$host" = aarch64-darwin ] && [ -n "$x86" ] && grep -q '^ROSETTA_X86=1' "$dest.new/share/fpc-toolchain/toolchain.conf"; then
   [ -n "$assetid" ] || die "x86 targets on Apple Silicon need the x86_64-darwin archive next to $from"
   fetch "$assetid-x86_64-darwin.tar.xz"

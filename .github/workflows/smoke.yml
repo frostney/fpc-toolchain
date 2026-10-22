@@ -94,7 +94,7 @@ jobs:
       - name: Hello world, every target
         run: |
           id='${{ needs.resolve.outputs.identity }}'; v=${id%%[-+]*}
-          scripts/smoke.sh --fpc "$RUNNER_TEMP/fpc-toolchains/bin/fpc-$v" --out "$RUNNER_TEMP/smoke" --emulators
+          bash scripts/smoke.sh --fpc "$RUNNER_TEMP/fpc-toolchains/bin/fpc-$v" --out "$RUNNER_TEMP/smoke" --emulators
           cat "$RUNNER_TEMP/smoke/smoke.tsv" >> "$GITHUB_STEP_SUMMARY"
           scripts/check-smoke.sh "versions/$v/targets.tsv" "$RUNNER_TEMP/smoke/smoke.tsv" ${{ matrix.host }}
       - uses: actions/upload-artifact@v4

@@ -56,7 +56,7 @@ Run it again with another build to add it. Each build has its own directory.
 | Linux arm64 (`aarch64-linux`) | 23 | 65 |
 | macOS arm64 (`aarch64-darwin`) | 51 | 65 |
 | macOS x86_64 (`x86_64-darwin`) | 51 | 68 |
-| Windows x64 (`x86_64-win64`) | 51 | 68 |
+| Windows x64 (`x86_64-win64`) | 39 | 68 |
 | Windows arm64 (`aarch64-win64`) | - | 65 |
 
 Counts include the host itself. Every host ships the GNU binutils its targets need, built from source (binutils 2.42; the source is in each release). On Apple Silicon, 3.2.4's x86 targets run the x86_64 macOS compilers under Rosetta 2; the installer and the action set that up when you ask for one.
@@ -96,6 +96,8 @@ Limits:
 
 - FPC 3.2.4 builds no i386, i8086 or x86_64 cross compilers on Linux arm64: that host has no 80-bit `Extended`, and 3.2.4's soft-float fallback doesn't compile. FPC 3.2 has no Windows arm64.
 - FPC 3.3.1 builds no i8086 cross compiler on arm64 hosts: its `i8086/cpuinfo.pas` lacks the soft-float branch that i386 and x86_64 have.
+- FPC 3.2.4 on Windows x64 has no x86_64 targets but Windows: its compiler has no 80-bit `Extended` and can't read their units. 3.3.1 reads them with soft x80.
+- On hosts without 80-bit `Extended` (arm64, Windows), `Extended` constants for x86 targets are rounded to `Double` at compile time.
 - Targets that link against a vendor SDK (Apple, Android NDK, Solaris, Haiku, AROS, devkitARM, OpenBSD libc) ship compiler and units. You bring the SDK.
 - aarch64-win64 and the Darwin targets assemble with clang. GitHub's runners have it; elsewhere install LLVM.
 

@@ -82,6 +82,11 @@ Limits:
   then the i386 and i8086 cross compilers for Windows.
 - 3.3.1 builds i386 and x86_64 cross compilers on arm64 hosts with soft x80, but not i8086: trunk's
   `i8086/cpuinfo.pas` has no branch for hosts without `Extended` (i386 and x86_64 have one).
+- Units store real constants at the compiler's `Extended` size. Windows x64 has none, so its `ppcx64.exe` reads
+  them as Double and fails on the 80-bit units of the other x86_64 targets (internal error 200208151). For
+  3.3.1 (`SOFT_FPUX80=1`) the build replaces it with a soft-x80 `ppcx64.exe`; win64 output is byte-identical.
+  3.2.4 can't build soft x80, so its Windows x64 host ships no x86_64 target but win64.
+- Hosts without `Extended` round `Extended` constants for x86 targets to Double at compile time.
 - FPC 3.2 has no Windows arm64 host.
 
 Build details in `targets.tsv`: one SUBARCH per embedded target; i8086 RTLs with `-CX -XXs` (the system unit
