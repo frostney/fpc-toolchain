@@ -22,6 +22,10 @@ on:
         description: 'run ID whose dist-* artifacts hold the second version (dry runs); empty = its release'
         type: string
         default: ''
+      run:
+        description: 'run ID whose dist-* artifacts to install (default: this run, when artifacts is set)'
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       version:
@@ -30,6 +34,10 @@ on:
         default: '3.2.4'
       other:
         description: 'second version to install side by side (empty = none)'
+        required: false
+        default: ''
+      run:
+        description: 'install the dist-* artifacts of this build run (a dry run) instead of a release'
         required: false
         default: ''
 
@@ -54,9 +62,14 @@ jobs:
       - id: plan2
         if: inputs.other != ''
         run: scripts/action-test-plan.sh '${{ inputs.other }}'
-      - if: steps.plan.outputs.ship == 'true' && inputs.artifacts
+      - if: steps.plan.outputs.ship == 'true' && (inputs.artifacts || inputs.run != '')
         uses: actions/download-artifact@v4
-        with: { pattern: 'dist-*', merge-multiple: true, path: '${{ runner.temp }}/dist' }
+        with:
+          pattern: 'dist-*'
+          merge-multiple: true
+          path: '${{ runner.temp }}/dist'
+          run-id: ${{ inputs.run || github.run_id }}
+          github-token: ${{ github.token }}
       - if: steps.plan2.outputs.ship == 'true' && inputs.other-run != ''
         uses: actions/download-artifact@v4
         with:
@@ -71,7 +84,7 @@ jobs:
         with:
           version: ${{ inputs.version }}
           targets: ${{ steps.plan.outputs.cross }}
-          archives: ${{ inputs.artifacts && format('{0}/dist', runner.temp) || '' }}
+          archives: ${{ (inputs.artifacts || inputs.run != '') && format('{0}/dist', runner.temp) || '' }}
       - if: steps.plan.outputs.ship == 'true'
         run: scripts/action-test-check.sh '${{ steps.fpc.outputs.version }}' '${{ steps.fpc.outputs.identity }}' '${{ steps.plan.outputs.cross }}'
       - name: 'Same job again: runner tool cache'
@@ -81,7 +94,7 @@ jobs:
         with:
           version: ${{ inputs.version }}
           targets: ${{ steps.plan.outputs.cross }}
-          archives: ${{ inputs.artifacts && format('{0}/dist', runner.temp) || '' }}
+          archives: ${{ (inputs.artifacts || inputs.run != '') && format('{0}/dist', runner.temp) || '' }}
       - if: steps.plan.outputs.ship == 'true'
         run: test '${{ steps.again.outputs.cache-hit }}' = true
       - name: 'Other version, side by side'
@@ -121,7 +134,7 @@ jobs:
         with:
           version: ${{ inputs.version }}
           targets: ${{ steps.plan.outputs.cross }}
-          archives: ${{ inputs.artifacts && format('{0}/dist', runner.temp) || '' }}
+          archives: ${{ (inputs.artifacts || inputs.run != '') && format('{0}/dist', runner.temp) || '' }}
       - name: Restored from actions/cache, identity checked
         if: steps.plan.outputs.ship == 'true'
         run: |
