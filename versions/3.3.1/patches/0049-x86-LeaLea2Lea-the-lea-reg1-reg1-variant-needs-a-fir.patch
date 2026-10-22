@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 03:30:08 +0100
+Subject: [PATCH 49/75] x86 LeaLea2Lea: the lea (reg1,reg1) variant needs a
+ first LEA of a single register
+
+"lea (%r12,%rax),%rax / lea (%rax,%rax),%r12" became "lea (,%rax,4),%r12":
+the homogenising code assumes the first LEA is lea (,regX,scale) or
+lea (regX,regX) and turned lea (regY,regX) into lea (,regX,2), dropping
+regY.  Trunk only (931bda5633).  Found by the pgen3 generator (seed 30295).
+---
+ compiler/x86/aoptx86.pas | 13 ++++++++++++-
+ tests/tbs/tb9040.pp      | 34 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 46 insertions(+), 1 deletion(-)
+ create mode 100644 tests/tbs/tb9040.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 6a9373d9..5e9b2138 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -7128,7 +7128,18 @@ unit aoptx86;
+                         ) or (
+                           { lea (reg1,reg1), reg1 variant }
+                           (taicpu(hp1).oper[0]^.ref^.base = taicpu(p).oper[1]^.reg) and
+-                          (taicpu(hp1).oper[0]^.ref^.scalefactor <= 1)
++                          (taicpu(hp1).oper[0]^.ref^.scalefactor <= 1) and
++                          { the first LEA must compute a multiple of a single register
++                            (lea (,regX,scale) or lea (regX,regX)): the code below
++                            turns "lea (regY,regX),reg1" into "lea (,regX,2)", dropping
++                            regY, and the doubled scale must stay encodable }
++                          (
++                            (
++                              (taicpu(p).oper[0]^.ref^.base = NR_NO) and
++                              (taicpu(p).oper[0]^.ref^.scalefactor <= 4)
++                            ) or
++                            (taicpu(p).oper[0]^.ref^.base = taicpu(p).oper[0]^.ref^.index)
++                          )
+                         )
+                       ) then
+                       begin
+diff --git a/tests/tbs/tb9040.pp b/tests/tbs/tb9040.pp
+new file mode 100644
+index 00000000..f8aa244a
+--- /dev/null
++++ b/tests/tbs/tb9040.pp
+@@ -0,0 +1,34 @@
++{ %OPT=-O2 }
++{ LeaLea2Lea: "lea (%r12,%rax),%rax / lea (%rax,%rax),%r12" must not become
++  "lea (,%rax,4),%r12" (the base register of the first LEA was dropped) }
++program tb9040;
++
++{$mode objfpc}
++
++var
++  ga, gb: int64;
++
++function h: int64;
++begin
++  result:=1;
++end;
++
++function f(a: int64): int64;
++var
++  s, p: int64;
++begin
++  if ga>0 then
++    s:=a
++  else
++    s:=-a;
++  p:=s+popcnt(qword(gb));
++  result:=(p+p)+h;
++end;
++
++begin
++  ga:=1;
++  gb:=7;
++  if f(1000)<>2007 then
++    halt(1);
++  writeln('ok');
++end.

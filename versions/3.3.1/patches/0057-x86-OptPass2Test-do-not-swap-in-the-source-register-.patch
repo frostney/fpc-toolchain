@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 11:00:44 +0100
+Subject: [PATCH 57/75] x86 OptPass2Test: do not swap in the source register
+ when an instruction between the AND and the TEST uses it
+
+---
+ compiler/x86/aoptx86.pas | 21 +++++++++++++++++++-
+ tests/tbs/tb9049.pp      | 43 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 63 insertions(+), 1 deletion(-)
+ create mode 100644 tests/tbs/tb9049.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 43785a8f..5efeff13 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -13930,6 +13930,23 @@ unit aoptx86;
+       var
+         hp1, hp2, pCond: tai;
+         SourceReg, TargetReg: TRegister;
++
++      function SourceRegUnusedBetween: Boolean;
++        var
++          hp3: tai;
++        begin
++          { The backward search only stops at instructions that contain
++            TargetReg, so an instruction between hp2 and p may still read or
++            write SourceReg (e.g. a dead "mov $x,%reg1"); after the swap,
++            SourceReg holds the result until p, so such instructions would
++            clobber or misread it }
++          Result := True;
++          hp3 := hp2;
++          while GetNextInstruction(hp3, hp3) and (hp3 <> p) do
++            if RegInInstruction(SourceReg, hp3) then
++              Exit(False);
++        end;
++
+       begin
+         Result := False;
+ 
+@@ -13979,7 +13996,9 @@ unit aoptx86;
+                         { Make sure the MOV doesn't use the other register }
+                         not RegInOp(SourceReg, taicpu(hp1).oper[0]^) and
+                         { And make sure the source register is not used afterwards }
+-                        not RegInUsedRegs(SourceReg, UsedRegs) then
++                        not RegInUsedRegs(SourceReg, UsedRegs) and
++                        { Nor in between }
++                        SourceRegUnusedBetween then
+                         begin
+                           DebugMsg(SPeepholeOptimization + 'OpTest2OpTest (register swap) done', hp2);
+ 
+diff --git a/tests/tbs/tb9049.pp b/tests/tbs/tb9049.pp
+new file mode 100644
+index 00000000..893b2546
+--- /dev/null
++++ b/tests/tbs/tb9049.pp
+@@ -0,0 +1,43 @@
++{ %CPU=x86_64,i386 }
++{ %OPT=-O3 }
++{ x86 OptPass2Test (OpTest2OpTest register swap): in
++    andb %cl,%dl; movq $8,%rcx; testb %dl,%dl; movq $8,%rdx
++  the AND was rewritten to "andb %dl,%cl" and the TEST to "testb %cl,%cl",
++  although the (dead) "movq $8,%rcx" in between overwrote %cl, so the
++  condition was always true }
++program tb9049;
++
++{$mode objfpc}{$inline on}
++
++var
++  N: QWord = 100;
++  X: Int64 = 5;
++  D: Double = -1.0;
++  I: LongInt;
++
++function Sel(C: Boolean; A, B: Int64): Int64; inline;
++begin
++  if C then
++    Result := A
++  else
++    Result := B;
++end;
++
++procedure P;
++begin
++  if N > 0 then
++    begin
++      I := 8;
++      X := Sel(0 < D, I, SarInt64(X, 1));
++    end;
++end;
++
++begin
++  P;
++  if X <> 2 then
++    begin
++      writeln('error: ', X);
++      halt(1);
++    end;
++  writeln('ok');
++end.

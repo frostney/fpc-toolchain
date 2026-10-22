@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 03:20:38 +0100
+Subject: [PATCH 45/75] x86 PrePeepholeOptSxx: compute the AND mask in TCGInt,
+ so shr 31 / shl n on a 64-bit register gives $ffffffff80000000
+
+(1 shl 31)-1 was evaluated in 32 bits and the mask became +$80000000,
+which a 64-bit AND cannot encode: "Asm: signed dword value exceeds
+bounds 2147483648" for (q shr 31) shl 31 at -O1 and up.  Also in 3.2.x.
+Found by the pgen3 generator (seed 30039).
+---
+ compiler/x86/aoptx86.pas |  6 +++---
+ tests/tbs/tb9036.pp      | 23 +++++++++++++++++++++++
+ 2 files changed, 26 insertions(+), 3 deletions(-)
+ create mode 100644 tests/tbs/tb9036.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index c9faf18e..6a9373d9 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -1813,7 +1813,7 @@ unit aoptx86;
+                 DebugMsg(SPeepholeOptimization + 'SxrShl2SxrAnd 1 done',p);
+                 taicpu(p).loadConst(0,taicpu(p).oper[0]^.val-taicpu(hp1).oper[0]^.val);
+                 taicpu(hp1).opcode := A_AND;
+-                l := (1 shl (taicpu(hp1).oper[0]^.val)) - 1;
++                l := (TCGInt(1) shl (taicpu(hp1).oper[0]^.val)) - 1;
+                 case taicpu(p).opsize Of
+                   S_B: taicpu(hp1).loadConst(0,l Xor $ff);
+                   S_W: taicpu(hp1).loadConst(0,l Xor $ffff);
+@@ -1840,7 +1840,7 @@ unit aoptx86;
+                 DebugMsg(SPeepholeOptimization + 'SxrShl2SxrAnd 2 done',p);
+                 taicpu(hp1).loadConst(0,taicpu(hp1).oper[0]^.val-taicpu(p).oper[0]^.val);
+                 taicpu(p).opcode := A_AND;
+-                l := (1 shl (taicpu(p).oper[0]^.val))-1;
++                l := (TCGInt(1) shl (taicpu(p).oper[0]^.val))-1;
+                 case taicpu(p).opsize Of
+                   S_B: taicpu(p).loadConst(0,l Xor $ff);
+                   S_W: taicpu(p).loadConst(0,l Xor $ffff);
+@@ -1865,7 +1865,7 @@ unit aoptx86;
+                   with const1 = const2 }
+                 DebugMsg(SPeepholeOptimization + 'SxrShl2And done',p);
+                 taicpu(p).opcode := A_AND;
+-                l := (1 shl (taicpu(p).oper[0]^.val))-1;
++                l := (TCGInt(1) shl (taicpu(p).oper[0]^.val))-1;
+                 case taicpu(p).opsize Of
+                   S_B: taicpu(p).loadConst(0,l Xor $ff);
+                   S_W: taicpu(p).loadConst(0,l Xor $ffff);
+diff --git a/tests/tbs/tb9036.pp b/tests/tbs/tb9036.pp
+new file mode 100644
+index 00000000..a81fdee2
+--- /dev/null
++++ b/tests/tbs/tb9036.pp
+@@ -0,0 +1,23 @@
++{ %OPT=-O1 }
++{ "shr 31 / shl n" on a 64-bit register becomes "and $ffffffff80000000"
++  (a sign-extended 32-bit immediate); the mask was computed as 1 shl 31 in
++  32 bits and came out as $80000000, which cannot be encoded }
++program tb9036;
++
++var
++  v, r: qword;
++  i, j: int64;
++begin
++  v:=qword($923456789abcdef0);
++  r:=(v shr 31) shl 31;
++  if r<>(v and not qword($7fffffff)) then
++    halt(1);
++  r:=(v shr 31) shl 40;
++  if r<>((v and not qword($7fffffff)) shl 9) then
++    halt(2);
++  i:=-1234567890123;
++  j:=sarint64(i,31) shl 31;
++  if j<>(i and not int64($7fffffff)) then
++    halt(3);
++  writeln('ok');
++end.

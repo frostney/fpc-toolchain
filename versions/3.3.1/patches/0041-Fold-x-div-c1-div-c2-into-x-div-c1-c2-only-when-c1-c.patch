@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 03:40:52 +0100
+Subject: [PATCH 41/75] Fold (x div c1) div c2 into x div (c1*c2) only when
+ c1*c2 fits the result type
+
+tmoddivnode.simplify (2ce34f7bd3, #39301) multiplies the two divisors
+without an overflow check. The source has no constant multiplication, but
+a product that overflows was reported as "Overflow in arithmetic operation"
+(plus "Division by zero" from the recovered 0), rejecting valid code; an
+Int64 product of 2^63 only gave a range warning, wrapped to Low(Int64) and
+changed the result ((Low(Int64) div 2^62) div 2 gave 1 instead of -1).
+Keep the source order then.
+---
+ compiler/nmat.pas   | 18 +++++++++++++++++-
+ tests/tbs/tb9042.pp | 30 ++++++++++++++++++++++++++++++
+ 2 files changed, 47 insertions(+), 1 deletion(-)
+ create mode 100644 tests/tbs/tb9042.pp
+
+diff --git a/compiler/nmat.pas b/compiler/nmat.pas
+index 9e261d8b..18b7fda6 100644
+--- a/compiler/nmat.pas
++++ b/compiler/nmat.pas
+@@ -148,6 +148,18 @@ implementation
+       var
+         rv,lv : tconstexprint;
+         hp: tnode;
++
++      function ConstDivProductFits: boolean;
++        var
++          v: tconstexprint;
++        begin
++          v:=tordconstnode(right).value*tordconstnode(tmoddivnode(left).right).value;
++          result:=not(v.overflow) and
++            (resultdef.typ=orddef) and
++            (v>=torddef(resultdef).low) and
++            (v<=torddef(resultdef).high);
++        end;
++
+       begin
+         result:=nil;
+ 
+@@ -202,7 +214,11 @@ implementation
+             if (nodetype=divn) and (left.nodetype=divn) and is_constintnode(tmoddivnode(left).right) and
+               { we need a type and the types must be consistent }
+               assigned(resultdef) and
+-              (compare_defs(resultdef,left.resultdef,nothingn)=te_exact) then
++              (compare_defs(resultdef,left.resultdef,nothingn)=te_exact) and
++              { (x div c1) div c2 = x div (c1*c2) only if c1*c2 is representable:
++                the source has no constant multiplication, so an overflowing
++                product must neither be reported nor wrap around }
++              ConstDivProductFits then
+               begin
+                 { re-use the current node so we get the result type right }
+                 right:=caddnode.create_internal(muln,right,tmoddivnode(left).right.getcopy);
+diff --git a/tests/tbs/tb9042.pp b/tests/tbs/tb9042.pp
+new file mode 100644
+index 00000000..c9fd4589
+--- /dev/null
++++ b/tests/tbs/tb9042.pp
+@@ -0,0 +1,30 @@
++{ (x div c1) div c2 must not be folded to x div (c1*c2) when c1*c2 does not
++  fit the operation's type: valid code was rejected ("Overflow in arithmetic
++  operation") or, for an Int64 product of 2^63, gave a wrong result }
++program tb9042;
++
++{$mode objfpc}
++
++var
++  q: qword;
++  i: int64;
++  l: longint;
++begin
++  q:=high(qword);
++  i:=low(int64);
++  l:=low(longint);
++  if ((q div 1699722277574559715) div 16)<>0 then
++    halt(1);
++  if ((i div 4611686018427387904) div 2)<>-1 then
++    halt(2);
++  if ((i div -4611686018427387904) div -2)<>-1 then
++    halt(3);
++  if ((l div -65536) div -32768)<>-1 then
++    halt(4);
++  { still folded: the product fits }
++  if ((q div 3) div 5)<>1229782938247303441 then
++    halt(5);
++  if ((i div 3) div -5)<>614891469123651720 then
++    halt(6);
++  writeln('ok');
++end.

@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 22 Oct 2026 14:28:44 +0100
+Subject: [PATCH 69/75] wasm32: compare with a constant left operand (internal
+ error 2010120430 at -O3)
+
+twasmaddnode.second_generic_compare dispatches on the operands'
+locations, and its helpers (a_cmp_const_loc_stack & co.) only accept a
+constant as the right operand. At -O3, constant propagation can replace
+the left operand by a constant without folding the comparison, e.g. in
+the first test of a rotated loop:
+
+  op := OP_EXACTLY;
+  while op <> OP_EEND do ...      { first test: OP_EXACTLY <> OP_EEND }
+
+so the compiler stopped with internal error 2010120430. Load such a
+constant into a register first. This made the FPC testsuite unusable for
+wasm32 at -O3 and -O4: building its units fails on
+packages/regexpr/src/regexpr.pas (TRegExpr.Dump).
+
+Test: tests/test/cg/tcmpconst1.pp.
+---
+ compiler/wasm32/nwasmadd.pas |  6 ++++++
+ tests/test/cg/tcmpconst1.pp  | 31 +++++++++++++++++++++++++++++++
+ 2 files changed, 37 insertions(+)
+ create mode 100644 tests/test/cg/tcmpconst1.pp
+
+diff --git a/compiler/wasm32/nwasmadd.pas b/compiler/wasm32/nwasmadd.pas
+index 702c05e9..d2db3f08 100644
+--- a/compiler/wasm32/nwasmadd.pas
++++ b/compiler/wasm32/nwasmadd.pas
+@@ -364,6 +364,12 @@ interface
+         cmpop: TOpCmp;
+       begin
+         pass_left_right;
++        { the left operand can be a constant, e.g. a variable replaced by its
++          value by constant propagation (-O3) in the first test of a rotated
++          loop ("op := X; while op <> Y do" -> "X <> Y"); the compare helpers
++          below take a constant only as the right operand }
++        if left.location.loc=LOC_CONSTANT then
++          hlcg.location_force_reg(current_asmdata.CurrAsmList,left.location,left.resultdef,left.resultdef,false);
+         { swap the operands to make it easier for the optimizer to optimize
+           the operand stack slot reloading in case both are in a register }
+         if (left.location.loc in [LOC_REGISTER,LOC_CREGISTER]) and
+diff --git a/tests/test/cg/tcmpconst1.pp b/tests/test/cg/tcmpconst1.pp
+new file mode 100644
+index 00000000..afb0e9e9
+--- /dev/null
++++ b/tests/test/cg/tcmpconst1.pp
+@@ -0,0 +1,31 @@
++{ %OPT=-O3 }
++{ constant propagation at -O3 puts a constant on the left of the first test of a
++  rotated loop (wasm32: internal error 2010120430) }
++program tcmpconst1;
++{$mode objfpc}{$H+}
++type TREOp = WideChar;
++const
++  OP_EEND = TREOp(0); OP_EXACTLY = TREOp(1); OP_CLOSE = TREOp(51); OP_CLOSE_ATOMIC = TREOp(52);
++  OP_LOOP = TREOp(60); OP_LOOP_NG = TREOp(61); OP_LOOP_POSS = TREOp(62); OP_LOOKAHEAD_END = TREOp(70);
++  OP_LOOKBEHIND_END = TREOp(71);
++var code: array[0..9] of TREOp;
++function Dump(s: PWideChar): integer;
++var op: TREOp; CurIndent: integer;
++begin
++  CurIndent := 3; result := 0;
++  op := OP_EXACTLY;
++  while op <> OP_EEND do
++  begin
++    op := s^;
++    if ((op = OP_CLOSE) or (op = OP_CLOSE_ATOMIC) or (op = OP_LOOP) or (op = OP_LOOP_NG) or (op = OP_LOOP_POSS) or
++        (op = OP_LOOKAHEAD_END) or (op = OP_LOOKBEHIND_END)) and (CurIndent > 0) then
++      dec(CurIndent);
++    inc(result);
++    inc(s);
++  end;
++end;
++begin
++  code[0] := OP_CLOSE; code[1] := OP_LOOP; code[2] := OP_EXACTLY; code[3] := OP_EEND;
++  if Dump(@code[0]) <> 4 then halt(1);
++  writeln('ok');
++end.

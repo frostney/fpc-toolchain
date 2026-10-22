@@ -1,0 +1,464 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 19:42:00 +0100
+Subject: [PATCH 63/75] wasm32: br_table for case statements and goto state
+ machines, inline small copies, direct bf exception flag test
+
+Four independent wasm32 code generation improvements; none of them
+changes code for other targets.
+
+1. case -> br_table (nwasmset.pas, aasmcpu.pas, agllvmmc.pas, cpupi.pas).
+   twasmcasenode only ever emitted a linear compare chain (the jump table
+   code was commented out), so a dense case with N labels costs up to N
+   compare+branch pairs. genjumptable now emits one br_table: the
+   selector minus the lowest label as an unsigned 32-bit index, one
+   target per value (the else label for holes) and the else label as the
+   default, so every value outside min..max, including negative ones,
+   takes the default. Used at -O1 and above for selectors of up to 32
+   bits (wasm32 defines cpu64bitalu, so Int64/QWord selectors reach this
+   code too; they keep the compare chain, since a truncated i32 index
+   would send e.g. $100000002 to the label 2), at least 4 labels, a
+   range of at most 8192 and at most 8x the label coverage, and not in
+   procedures with labels (the goto lowering in cpupi
+   resolve_labels_complex cannot retarget br_table entries; it raises
+   internal error 2026101604 if it ever meets one). New taicpu field
+   br_table_targets (one a_br per target, the last one is the default),
+   resolved from labels to nesting depths in cpupi pass 2, encoded by the
+   internal assembler (0x0E, count, depths) and written by the llvm-mc
+   writer as "br_table {d0, d1, ..., default}"; the validator pops the
+   i32 index and marks the rest unreachable.
+
+2. goto state machine dispatch (cpupi.pas): one br_table over the block
+   numbers instead of a local.get/i32.const/i32.eq/br_if sequence per
+   block (the TODO in the code).
+
+3. Small fixed-size copies (hlcgcpu.pas g_concatcopy): copies of 1..64
+   bytes that are not 1, 2, 4 or 8 bytes (e.g. a 16-byte record) are
+   emitted as inline i64/i32/i16/i8 load/store pairs instead of a call to
+   System.Move, which ends in memory.copy, an out-of-line libcall in most
+   engines.
+
+4. bf exceptions (hlcgcpu.pas g_maybe_checkforexceptions,
+   rtl/wasm32/except_branchful.inc): after every call the compiler called
+   fpc_raised_exception_flag, a function with its own shadow-stack frame.
+   Without wasm threads the flag is a plain global, so the RTL now exports
+   it with public name 'FPC_RAISEDEXCEPTION' and the compiler loads it
+   directly (u8 load). With threads (threadvar) the call is kept. Compiler
+   and RTL must be rebuilt together: a compiler with this change needs an
+   RTL that exports FPC_RAISEDEXCEPTION.
+
+Also a diagnostic in the wasm32 register allocator (rgcpu.pas
+do_spill_replace_all): an operand with an unallocated register
+(R_INVALIDREGISTER) now stops compilation with "DIAG unallocated
+register in <procedure>" instead of crashing the compiler.
+
+Effect on the GocciaScript VM under wasmtime 49 (callgrind instruction
+counts, AWFY geomean relative to native x86_64 trunk -O4): 4.04x ->
+2.13x.
+---
+ compiler/wasm32/aasmcpu.pas     | 38 ++++++++++++++++++++
+ compiler/wasm32/agllvmmc.pas    | 16 ++++++++-
+ compiler/wasm32/cpupi.pas       | 43 ++++++++++++++++++-----
+ compiler/wasm32/hlcgcpu.pas     | 44 ++++++++++++++++++++++--
+ compiler/wasm32/nwasmset.pas    | 61 ++++++++++++++++++++++++++++++++-
+ compiler/wasm32/rgcpu.pas       |  2 ++
+ rtl/wasm32/except_branchful.inc |  9 +++++
+ 7 files changed, 200 insertions(+), 13 deletions(-)
+
+diff --git a/compiler/wasm32/aasmcpu.pas b/compiler/wasm32/aasmcpu.pas
+index f21ed36f..8de3f1b0 100644
+--- a/compiler/wasm32/aasmcpu.pas
++++ b/compiler/wasm32/aasmcpu.pas
+@@ -152,6 +152,9 @@ uses
+       public
+          is_br_generated_by_goto: boolean;
+          try_table_catch_clauses: tasmlist;
++         { a_br_table: one a_br per target (label or resolved depth), the last
++           one is the default target }
++         br_table_targets: tasmlist;
+ 
+          constructor Create(op : tasmop);override;
+          destructor Destroy;override;
+@@ -1157,6 +1160,11 @@ uses
+               PopVals(label_types(FCtrlStack[n]));
+               PushVals(label_types(FCtrlStack[n]));
+             end;
++          a_br_table:
++            begin
++              PopVal(wbt_i32);
++              Unreachable;
++            end;
+           a_legacy_throw:
+             Unreachable;
+           a_legacy_rethrow:
+@@ -2023,12 +2031,15 @@ uses
+           internalerror(2024070701);
+         if op=a_try_table then
+           try_table_catch_clauses:=TAsmList.Create;
++        if op=a_br_table then
++          br_table_targets:=TAsmList.Create;
+       end;
+ 
+ 
+     destructor taicpu.Destroy;
+       begin
+         FreeAndNil(try_table_catch_clauses);
++        FreeAndNil(br_table_targets);
+         inherited;
+       end;
+ 
+@@ -2736,6 +2747,20 @@ uses
+                     internalerror(2021092611);
+                 end;
+             end;
++          a_br_table:
++            begin
++              if not assigned(br_table_targets) or (br_table_targets.Count<1) then
++                internalerror(2026101601);
++              result:=1+UlebSize(br_table_targets.Count-1);
++              hp:=taicpu(br_table_targets.First);
++              while assigned(hp) do
++                begin
++                  if (hp.ops<>1) or (hp.oper[0]^.typ<>top_const) then
++                    internalerror(2026101602);
++                  Inc(result,UlebSize(hp.oper[0]^.val));
++                  hp:=taicpu(hp.Next);
++                end;
++            end;
+           a_br,
+           a_br_if,
+           a_legacy_rethrow,
+@@ -3783,6 +3808,19 @@ uses
+                     internalerror(2021092611);
+                 end;
+             end;
++          a_br_table:
++            begin
++              WriteByte($0E);
++              WriteUleb(br_table_targets.Count-1);
++              hp:=taicpu(br_table_targets.First);
++              while assigned(hp) do
++                begin
++                  if (hp.ops<>1) or (hp.oper[0]^.typ<>top_const) then
++                    internalerror(2026101603);
++                  WriteUleb(hp.oper[0]^.val);
++                  hp:=taicpu(hp.Next);
++                end;
++            end;
+           a_br,
+           a_br_if,
+           a_legacy_rethrow,
+diff --git a/compiler/wasm32/agllvmmc.pas b/compiler/wasm32/agllvmmc.pas
+index 195f43e2..96349e6f 100644
+--- a/compiler/wasm32/agllvmmc.pas
++++ b/compiler/wasm32/agllvmmc.pas
+@@ -421,7 +421,7 @@ implementation
+       end;
+ 
+     var
+-      cpu : taicpu;
++      cpu, hpt : taicpu;
+       i   : integer;
+       writer: TExternalAssemblerOutputFile;
+     begin
+@@ -458,6 +458,20 @@ implementation
+       if Assigned(cpu.try_table_catch_clauses) then
+         WriteCatchClauses(writer,cpu.try_table_catch_clauses);
+ 
++      if Assigned(cpu.br_table_targets) then
++        begin
++          writer.AsmWrite(#9'{');
++          hpt:=taicpu(cpu.br_table_targets.First);
++          while Assigned(hpt) do
++            begin
++              writer.AsmWrite(getopstr(hpt.oper[0]^));
++              hpt:=taicpu(hpt.Next);
++              if Assigned(hpt) then
++                writer.AsmWrite(', ');
++            end;
++          writer.AsmWrite('}');
++        end;
++
+       writer.AsmLn;
+     end;
+ 
+diff --git a/compiler/wasm32/cpupi.pas b/compiler/wasm32/cpupi.pas
+index fbdf9b8c..d88b7271 100644
+--- a/compiler/wasm32/cpupi.pas
++++ b/compiler/wasm32/cpupi.pas
+@@ -771,6 +771,29 @@ implementation
+                           Message1(parser_f_unsupported_feature,'negative nesting level');
+                       end;
+ 
++                    a_br_table:
++                      begin
++                        catchinstr:=taicpu(instr.br_table_targets.First);
++                        while assigned(catchinstr) do
++                          begin
++                            if (catchinstr.ops<>1) then
++                              Message1(parser_f_unsupported_feature,'a_br_table target with wrong operand count');
++                            if catchinstr.oper[0]^.typ=top_ref then
++                              begin
++                                if (catchinstr.oper[0]^.ref^.symbol.nestingdepth<>-1) and
++                                   (cur_nesting_depth>=catchinstr.oper[0]^.ref^.symbol.nestingdepth) then
++                                  catchinstr.loadconst(0,cur_nesting_depth-catchinstr.oper[0]^.ref^.symbol.nestingdepth)
++                                else
++                                  begin
++                                    result:=false;
++                                    hlabel:=tasmsymbol(catchinstr.oper[0]^.ref^.symbol);
++                                    asmlist.insertafter(tai_comment.create(strpnew('Unable to find destination of label '+hlabel.name)),hp);
++                                  end;
++                              end;
++                            catchinstr:=taicpu(catchinstr.Next);
++                          end;
++                      end;
++
+                     a_br,
+                     a_br_if:
+                       begin
+@@ -821,7 +844,7 @@ implementation
+           hp, hpnext: tai;
+           block_nr, machine_state, target_block_index, catch_nr: Integer;
+           state_machine_loop_start_label, state_machine_exit: TAsmLabel;
+-          catchinstr: taicpu;
++          catchinstr, brtable: taicpu;
+         begin
+           blocks:=TFPHashObjectList.Create;
+           curr_block:=TAsmList.Create;
+@@ -856,15 +879,14 @@ implementation
+           current_asmdata.getjumplabel(state_machine_exit);
+           for block_nr:=0 to blocks.Count-1 do
+             asmlist.Concat(taicpu.op_none(a_block));
++          { one br_table instead of a compare chain over all blocks }
++          asmlist.Concat(taicpu.op_const(a_local_get,machine_state));
++          brtable:=taicpu.op_none(a_br_table);
+           for block_nr:=0 to blocks.Count-1 do
+-            begin
+-              { TODO: this sequence can be replaced with a single br_table instruction }
+-              asmlist.Concat(taicpu.op_const(a_local_get,machine_state));
+-              asmlist.Concat(taicpu.op_const(a_i32_const,block_nr));
+-              asmlist.Concat(taicpu.op_none(a_i32_eq));
+-              asmlist.Concat(taicpu.op_const(a_br_if,block_nr));
+-            end;
+-          asmlist.Concat(taicpu.op_none(a_unreachable));
++            brtable.br_table_targets.Concat(taicpu.op_const(a_br,block_nr));
++          { default: never taken, the state is always a block number }
++          brtable.br_table_targets.Concat(taicpu.op_const(a_br,0));
++          asmlist.Concat(brtable);
+           tmplist:=TAsmList.Create;
+           for block_nr:=0 to blocks.Count-1 do
+             begin
+@@ -875,6 +897,9 @@ implementation
+               while assigned(hp) do
+                 begin
+                   hpnext:=tai(hp.next);
++                  if (hp.typ=ait_instruction) and (taicpu(hp).opcode=a_br_table) then
++                    { twasmcasenode only emits br_table in procedures without labels }
++                    internalerror(2026101604);
+                   if (hp.typ=ait_instruction) and (taicpu(hp).opcode in [a_br,a_br_if]) and
+                      (taicpu(hp).ops=1) and
+                      (taicpu(hp).oper[0]^.typ=top_ref) and
+diff --git a/compiler/wasm32/hlcgcpu.pas b/compiler/wasm32/hlcgcpu.pas
+index bd22623f..3b7b91ad 100644
+--- a/compiler/wasm32/hlcgcpu.pas
++++ b/compiler/wasm32/hlcgcpu.pas
+@@ -2108,6 +2108,9 @@ implementation
+ 
+   procedure thlcgwasm.g_concatcopy(list: TAsmList; size: tdef; const source, dest: treference);
+     var
++      ofs: asizeint;
++      chunkdef: tdef;
++      srcref, dstref: treference;
+       pd: tprocdef;
+       cgpara1,cgpara2,cgpara3 : TCGPara;
+     begin
+@@ -2117,6 +2120,30 @@ implementation
+          (dest.index=NR_EVAL_STACK_BASE) or (dest.index=NR_LOCAL_STACK_POINTER_REG) or
+          (size.size in [1,2,4,8]) then
+         inherited
++      else if (size.size>0) and (size.size<=64) then
++        begin
++          { small fixed-size copy (records, short arrays): inline loads and
++            stores instead of a call to Move, which ends in memory.copy (an
++            out-of-line libcall in most engines) }
++          ofs:=0;
++          while ofs<size.size do
++            begin
++              if size.size-ofs>=8 then
++                chunkdef:=u64inttype
++              else if size.size-ofs>=4 then
++                chunkdef:=u32inttype
++              else if size.size-ofs>=2 then
++                chunkdef:=u16inttype
++              else
++                chunkdef:=u8inttype;
++              srcref:=source;
++              inc(srcref.offset,ofs);
++              dstref:=dest;
++              inc(dstref.offset,ofs);
++              a_load_ref_ref(list,chunkdef,chunkdef,srcref,dstref);
++              inc(ofs,chunkdef.size);
++            end;
++        end
+       else
+         begin
+           pd:=search_system_proc('MOVE');
+@@ -2563,11 +2590,24 @@ implementation
+   procedure thlcgwasm.g_maybe_checkforexceptions(list: TasmList);
+     var
+       pd: tprocdef;
++      ref: treference;
++      extra_slots: longint;
+     begin
+       if ts_wasm_bf_exceptions in current_settings.targetswitches then
+         begin
+-          pd:=search_system_proc('fpc_raised_exception_flag');
+-          g_call_system_proc(list,pd,[],nil).resetiftemp;
++          if not (ts_wasm_threads in current_settings.targetswitches) then
++            begin
++              { a plain global without threads: load it instead of calling
++                fpc_raised_exception_flag after every call }
++              reference_reset_symbol(ref,current_asmdata.RefAsmSymbol('FPC_RAISEDEXCEPTION',AT_DATA),0,1,[]);
++              extra_slots:=prepare_stack_for_ref(list,ref,false);
++              a_load_ref_stack(list,u8inttype,ref,extra_slots);
++            end
++          else
++            begin
++              pd:=search_system_proc('fpc_raised_exception_flag');
++              g_call_system_proc(list,pd,[],nil).resetiftemp;
++            end;
+ 
+           decstack(current_asmdata.CurrAsmList,1);
+ 
+diff --git a/compiler/wasm32/nwasmset.pas b/compiler/wasm32/nwasmset.pas
+index ec0123cc..60b8940e 100644
+--- a/compiler/wasm32/nwasmset.pas
++++ b/compiler/wasm32/nwasmset.pas
+@@ -46,6 +46,7 @@ interface
+       protected
+         procedure genlinearlist(hp : pcaselabel);override;
+         procedure genlinearcmplist(hp : pcaselabel);override;
++        procedure genjumptable(hp : pcaselabel;min_,max_ : int64);override;
+       public
+         procedure pass_generate_code;override;
+       end;
+@@ -59,7 +60,7 @@ implementation
+       aasmdata,aasmcpu,
+       hlcgobj,hlcgcpu,
+       nbas,
+-      symtype,
++      symtype,symdef,procinfo,
+       pass_2,defutil,verbose,constexp;
+ 
+ {*****************************************************************************
+@@ -291,11 +292,53 @@ implementation
+       end;
+ 
+ 
++    procedure twasmcasenode.genjumptable(hp : pcaselabel;min_,max_ : int64);
++      var
++        targets: array of tasmlabel;
++        i: int64;
++        brtable: taicpu;
++        idxreg: tregister;
++
++      procedure fill(t : pcaselabel);
++        var
++          v: int64;
++        begin
++          if assigned(t^.less) then
++            fill(t^.less);
++          for v:=t^._low.svalue to t^._high.svalue do
++            targets[v-min_]:=blocklabel(t^.blockid);
++          if assigned(t^.greater) then
++            fill(t^.greater);
++        end;
++
++      begin
++        SetLength(targets,max_-min_+1);
++        for i:=0 to high(targets) do
++          targets[i]:=elselabel;
++        fill(hp);
++        { index = value-min_ as an unsigned 32-bit number: every value outside
++          min_..max_ (also below min_, and for signed values) becomes >= the
++          table length and takes the default target }
++        idxreg:=hlcg.getintregister(current_asmdata.CurrAsmList,u32inttype);
++        hlcg.a_load_reg_reg(current_asmdata.CurrAsmList,opsize,u32inttype,hregister,idxreg);
++        thlcgwasm(hlcg).a_load_reg_stack(current_asmdata.CurrAsmList,u32inttype,idxreg);
++        if min_<>0 then
++          thlcgwasm(hlcg).a_op_const_stack(current_asmdata.CurrAsmList,OP_SUB,u32inttype,tcgint(min_));
++        brtable:=taicpu.op_none(a_br_table);
++        for i:=0 to high(targets) do
++          brtable.br_table_targets.Concat(taicpu.op_sym(a_br,targets[i]));
++        brtable.br_table_targets.Concat(taicpu.op_sym(a_br,elselabel));
++        current_asmdata.CurrAsmList.concat(brtable);
++        thlcgwasm(hlcg).decstack(current_asmdata.CurrAsmList,1);
++      end;
++
++
+     procedure twasmcasenode.pass_generate_code;
+       var
+         oldflowcontrol: tflowcontrol;
+         ShortcutElse: Boolean;
+         i: Integer;
++        max_label: tconstexprint;
+       begin
+         location_reset(location,LOC_VOID,OS_NO);
+ 
+@@ -435,6 +478,22 @@ implementation
+             //      end;
+             //  end
+             //else
++            { br_table: a single indirect branch instead of a compare chain.
++              Not in procedures with labels: goto lowering (cpupi
++              resolve_labels_complex) does not handle br_table targets.
++              Only for selectors of up to 32 bits: the index is computed as
++              an i32 (wasm32 has cpu64bitalu, so 64-bit selectors get here
++              too, and truncating them would map e.g. $100000002 to 2). }
++            max_label:=case_get_max(labels);
++            if (cs_opt_level1 in current_settings.optimizerswitches) and
++               (opsize.size<=4) and
++               not(pi_has_label in current_procinfo.flags) and
++               (labelcnt>=4) and
++               (max_label.svalue>=min_label.svalue) and
++               ((max_label-min_label).uvalue<=8192) and
++               ((max_label-min_label).uvalue<=8*labelcoverage) then
++              genjumptable(labels,min_label.svalue,max_label.svalue)
++            else
+               { it's always not bad }
+               genlinearlist(labels);
+           end;
+diff --git a/compiler/wasm32/rgcpu.pas b/compiler/wasm32/rgcpu.pas
+index 59620e60..61de49ba 100644
+--- a/compiler/wasm32/rgcpu.pas
++++ b/compiler/wasm32/rgcpu.pas
+@@ -69,6 +69,8 @@ implementation
+           if (instr.oper[l]^.typ=top_reg) and (instr.oper[l]^.reg<>NR_LOCAL_FRAME_POINTER_REG) then
+             begin
+               reg:=instr.oper[l]^.reg;
++              if (getregtype(reg)=R_INVALIDREGISTER) then
++                Message1(parser_f_unsupported_feature,'DIAG unallocated register in '+current_procinfo.procdef.fullprocname(false));
+               instr.loadref(l,spilltemps[getregtype(reg)][getsupreg(reg)]);
+             end;
+       end;
+diff --git a/rtl/wasm32/except_branchful.inc b/rtl/wasm32/except_branchful.inc
+index 8206c846..ee99ed41 100644
+--- a/rtl/wasm32/except_branchful.inc
++++ b/rtl/wasm32/except_branchful.inc
+@@ -24,7 +24,16 @@ Var
+ {$endif FPC_HAS_FEATURE_THREADING}
+   ExceptObjectStack : PExceptObject;
+   ExceptTryLevel    : ObjpasInt;
++{$ifdef FPC_WASM_THREADS}
+   RaisedException   : Boolean;
++{$endif FPC_WASM_THREADS}
++
++{$ifndef FPC_WASM_THREADS}
++var
++  { without threads the compiler tests this flag directly after each call
++    instead of calling fpc_raised_exception_flag (thlcgwasm.g_maybe_checkforexceptions) }
++  RaisedException   : Boolean; public name 'FPC_RAISEDEXCEPTION';
++{$endif FPC_WASM_THREADS}
+ 
+ {$ifdef FPC_USE_PSABIEH}
+ {$i psabieh.inc}

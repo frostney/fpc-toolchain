@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 11:00:44 +0100
+Subject: [PATCH 56/75] x86 OptPass2Movx Movzx2Nop 3: allocate the register in
+ UsedRegs, not in a temporary copy (FuncMov2Func then kept a read register)
+
+---
+ compiler/x86/aoptx86.pas |  9 +++++++--
+ tests/tbs/tb9048.pp      | 36 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 43 insertions(+), 2 deletions(-)
+ create mode 100644 tests/tbs/tb9048.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 99df3342..43785a8f 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -12348,8 +12348,13 @@ unit aoptx86;
+ 
+                     DebugMsg(SPeepholeOptimization + 'Simplified register usage so ' + debug_regname(ThisReg) + ' = ' + debug_regname(taicpu(p).oper[1]^.reg), p);
+ 
+-                    TransferUsedRegs(TmpUsedRegs);
+-                    AllocRegBetween(ThisReg, p, hp1, TmpUsedRegs);
++                    { p now writes ThisReg and stays the current instruction,
++                      so an allocation inserted before p has to go into
++                      UsedRegs directly: UpdateUsedRegs only processes the
++                      tai_regalloc entries after p, and without ThisReg in
++                      UsedRegs later optimisations (e.g. FuncMov2Func on a
++                      following "mov %ThisReg,%reg") consider it unused }
++                    AllocRegBetween(ThisReg, p, hp1, UsedRegs);
+ 
+                     DebugMsg(SPeepholeOptimization + 'Movzx2Nop 3', hp1);
+                     if p = hp1 then
+diff --git a/tests/tbs/tb9048.pp b/tests/tbs/tb9048.pp
+new file mode 100644
+index 00000000..6cfc58c8
+--- /dev/null
++++ b/tests/tbs/tb9048.pp
+@@ -0,0 +1,36 @@
++{ %CPU=x86_64,i386 }
++{ %OPT=-O3 }
++{ x86 OptPass2Movx "Movzx2Nop 3": after
++    movzbl C,%eax; movzwl %ax,%edx  ->  movzbl C,%edx
++  the new allocation of %edx was inserted before the current instruction
++  but not added to UsedRegs, so FuncMov2Func then folded the following
++  "movl %edx,%ecx" into "movzbl C,%ecx" although %edx was still read }
++program tb9048;
++
++{$goto on}
++
++var
++  C: Char = 'q';
++  R: LongInt;
++  B: Byte = 3;
++  S: set of 0..31;
++
++procedure P;
++label
++  L;
++begin
++  R := Swap(Word(C));
++  if B in S then
++    R := 0;
++L:
++end;
++
++begin
++  P;
++  if R <> $7100 then
++    begin
++      writeln('error: ', R);
++      halt(1);
++    end;
++  writeln('ok');
++end.

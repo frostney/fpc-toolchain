@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 03:52:48 +0100
+Subject: [PATCH 38/75] CSE: do not move a constant between multiplications
+ when Currency scaling is involved (#41865 follow-up)
+
+---
+ compiler/optcse.pas | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/optcse.pas b/compiler/optcse.pas
+index 8209ee98..5ba5e6e6 100644
+--- a/compiler/optcse.pas
++++ b/compiler/optcse.pas
+@@ -399,7 +399,17 @@ unit optcse;
+                           cannot swap out one of the 32 bit operands for a 64 bit one
+                         }
+                         (tbinarynode(tbinarynode(n).left).left.resultdef=tbinarynode(n).left.resultdef) and
+-                        (tbinarynode(n).left.resultdef=tbinarynode(n).right.resultdef) do
++                        (tbinarynode(n).left.resultdef=tbinarynode(n).right.resultdef) and
++                        { the folding of real constants under a multiplication interprets
++                          nf_is_currency (value scaled by 10000) relative to the flags of the
++                          node that combines them; moving C into the node of A*B would then
++                          drop or add a factor of 10000, e.g. for the scaling (f()*c)*10000
++                          of a conversion to Currency (see moves_currency_scaling in nadd.pas) }
++                        not((n.nodetype=muln) and
++                            ((nf_is_currency in n.flags) or
++                             (nf_is_currency in tbinarynode(n).left.flags) or
++                             (nf_is_currency in tbinarynode(n).right.flags) or
++                             (nf_is_currency in tbinarynode(tbinarynode(n).left).right.flags))) do
+                     begin
+                       csedomain:=true;
+                       foreachnodestatic(pm_postprocess,tbinarynode(n).right,@searchsubdomain,@csedomain);

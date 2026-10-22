@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 22:50:17 +0100
+Subject: [PATCH 10/75] TProcess.CloseInput/CloseOutput/CloseStderr close the
+ pipe after its stream was used (#41845)
+
+ResolveStream hands our pipe handle to the stream and forgets it, so
+CloseOurHandle found no handle to close once Input, Output or Stderr had
+been accessed: the child never saw EOF on stdin. Free the stream, which
+closes the handle, and do not create a stream for a closed handle (the
+property is nil after Close*, as in 3.2).
+---
+ packages/fcl-process/src/processbody.inc | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/packages/fcl-process/src/processbody.inc b/packages/fcl-process/src/processbody.inc
+index 96cecde8..f44ffd98 100644
+--- a/packages/fcl-process/src/processbody.inc
++++ b/packages/fcl-process/src/processbody.inc
+@@ -1103,7 +1103,8 @@ end;
+ 
+ function TIODescriptor.ResolveStream: THandleStream;
+ begin
+-  if (FStream=Nil) and (FHandleValid) and (FTheirHandleIOType=iotPipe) then
++  if (FStream=Nil) and (FHandleValid) and (FTheirHandleIOType=iotPipe) and
++     (FOurHandle<>THandle(INVALID_HANDLE_VALUE)) then
+     begin
+     // Writeln(ProcessHandleType,' creating stream for stream ',IOType,': ',OurHandle);
+     Case FHandleType of
+@@ -1125,6 +1126,8 @@ var
+ begin
+   if Not FHandleValid then
+      exit;
++  { Once the stream was created it owns our handle: free it to close the pipe. }
++  FreeAndNil(FStream);
+   H:=OurHandle;
+   // Writeln(StdErr, GetProcessID ,' : ',ProcessHandleType,' closing our handle ',IOType,': ',FOurHandle);
+   FOurHandle:=THandle(INVALID_HANDLE_VALUE) ;

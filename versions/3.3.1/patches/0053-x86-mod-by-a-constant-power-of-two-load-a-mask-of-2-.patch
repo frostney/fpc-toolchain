@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 09:50:35 +0100
+Subject: [PATCH 53/75] x86 mod by a constant power of two: load a mask of 2^32
+ or more through a register (inlined divisors)
+
+---
+ compiler/x86/nx86mat.pas |  7 ++++++-
+ tests/tbs/tb9051.pp      | 40 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 46 insertions(+), 1 deletion(-)
+ create mode 100644 tests/tbs/tb9051.pp
+
+diff --git a/compiler/x86/nx86mat.pas b/compiler/x86/nx86mat.pas
+index 6de491f4..18f67d9e 100644
+--- a/compiler/x86/nx86mat.pas
++++ b/compiler/x86/nx86mat.pas
+@@ -864,7 +864,12 @@ interface
+             { unsigned modulus by a (+/-)power-of-2 constant? }
+             if isabspowerof2(tordconstnode(right).value,power) then
+               begin
+-                emit_const_reg(A_AND,opsize,(aint(1) shl power)-1,hreg1);
++                { the mask does not fit in a sign-extended 32-bit immediate
++                  for power >= 32 on x86_64, so let the code generator load it
++                  into a register if necessary (such divisors normally become an
++                  AND node in firstoptimize, but not if the constant only
++                  appears after pass_1, e.g. as the result of an inlined call) }
++                cg.a_op_const_reg(current_asmdata.CurrAsmList,OP_AND,cgsize,(aint(1) shl power)-1,hreg1);
+                 location.register:=hreg1;
+               end
+             else
+diff --git a/tests/tbs/tb9051.pp b/tests/tbs/tb9051.pp
+new file mode 100644
+index 00000000..92767fa8
+--- /dev/null
++++ b/tests/tbs/tb9051.pp
+@@ -0,0 +1,40 @@
++{ %OPT=-O- }
++{ unsigned "mod" by a power of two that only becomes a constant after
++  inlining (inlining now runs after pass_1, so firstoptimize does not turn it
++  into an AND node): the x86 code generator emitted "andq $2^n-1" with an
++  immediate that does not fit in a sign-extended 32-bit field for n >= 32
++  ("Asm: signed dword value exceeds bounds") }
++program tb9051;
++
++{$mode objfpc}{$inline on}
++
++function Id(A: QWord): QWord; inline;
++begin
++  Result := A;
++end;
++
++function K40: QWord; inline;
++begin
++  Result := QWord(1) shl 40;
++end;
++
++var
++  v: qword;
++  c: cardinal;
++begin
++  v:=qword($DF37DF3299D9137B);
++  if v mod Id(QWord(1) shl 32)<>(v and $FFFFFFFF) then
++    halt(1);
++  if v mod K40<>(v and $FFFFFFFFFF) then
++    halt(2);
++  if v mod Id(QWord(4611686018427387904))<>(v and $3FFFFFFFFFFFFFFF) then
++    halt(3);
++  if v mod Id(QWord(1) shl 63)<>(v and $7FFFFFFFFFFFFFFF) then
++    halt(4);
++  if v mod Id(QWord(1) shl 31)<>(v and $7FFFFFFF) then
++    halt(5);
++  c:=$DF37DF32;
++  if c mod Id(QWord(1) shl 31)<>(c and $7FFFFFFF) then
++    halt(6);
++  writeln('ok');
++end.

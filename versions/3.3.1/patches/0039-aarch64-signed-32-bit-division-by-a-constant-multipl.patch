@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 04:03:21 +0100
+Subject: [PATCH 39/75] aarch64: signed 32-bit division by a constant
+ multiplies with SMULL (#41956)
+
+---
+ compiler/aarch64/ncpumat.pas | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/aarch64/ncpumat.pas b/compiler/aarch64/ncpumat.pas
+index 6e277f2c..3c54ee94 100644
+--- a/compiler/aarch64/ncpumat.pas
++++ b/compiler/aarch64/ncpumat.pas
+@@ -278,7 +278,11 @@ implementation
+                           begin
+                             largerresreg := newreg(getregtype(resultreg), getsupreg(resultreg), R_SUBWHOLE);
+                             largernumreg := newreg(getregtype(numerator), getsupreg(numerator), R_SUBWHOLE);
+-                            current_asmdata.CurrAsmList.concat(taicpu.op_reg_reg_reg(A_MUL,largerresreg,largerresreg,largernumreg));
++                            { The upper halves of the 64-bit registers are not the sign
++                              extensions of the 32-bit operands (a W-register write zeroes
++                              them), so a 64-bit MUL gives a wrong product for a negative
++                              numerator or magic number: multiply the 32-bit values signed }
++                            current_asmdata.CurrAsmList.concat(taicpu.op_reg_reg_reg(A_SMULL,largerresreg,resultreg,numerator));
+                             expandword := True; { Merge the shift operation with something below }
+                           end;
+ 

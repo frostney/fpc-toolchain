@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 02:14:02 +0100
+Subject: [PATCH 33/75] Set addition: give equal set types the lower base of
+ the two so constant range checks see the real type
+
+---
+ compiler/nadd.pas | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/nadd.pas b/compiler/nadd.pas
+index 3d06eb22..8ed47109 100644
+--- a/compiler/nadd.pas
++++ b/compiler/nadd.pas
+@@ -3042,7 +3042,17 @@ const
+                     else
+                        inserttypeconv(right,tsetdef(nd).elementdef);
+                   end;
+-              end;
++              end
++             { Set types with the same element type, base, size and upper
++               bound are equal even if their lower bounds differ. The result
++               gets the type of the left operand, so if the right one starts
++               lower, give the left one the right's type, else the result type
++               does not cover all of its elements (a later range check of a
++               constant set would then fail for a valid element). This only
++               changes the type, the representation is the same. }
++             else if (rd.typ=setdef) and
++                     (tsetdef(rd).setlow<tsetdef(ld).setlow) then
++               inserttypeconv(left,rd);
+           end
+          { pointer comparison and subtraction }
+          else if (

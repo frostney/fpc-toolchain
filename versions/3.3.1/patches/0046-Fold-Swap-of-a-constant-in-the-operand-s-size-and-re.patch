@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 03:20:38 +0100
+Subject: [PATCH 46/75] Fold Swap() of a constant in the operand's size and
+ reinterpret it in the signed type
+
+Swap(SmallInt(255)) was folded to 65280 and range checked against
+SmallInt (compile-time error at every level; at -O3 also reached via
+constant propagation); negative operands were shifted as 64-bit values.
+Also in 3.2.x.  Found by the pgen3 generator (seed 30020).
+---
+ compiler/ninl.pas   | 20 +++++++++++++++++---
+ tests/tbs/tb9037.pp | 41 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 58 insertions(+), 3 deletions(-)
+ create mode 100644 tests/tbs/tb9037.pp
+
+diff --git a/compiler/ninl.pas b/compiler/ninl.pas
+index b7feb0d9..bba76c63 100644
+--- a/compiler/ninl.pas
++++ b/compiler/ninl.pas
+@@ -2491,12 +2491,26 @@ implementation
+                      hp:=create_simplified_ord_const(sqr(vl.uvalue),resultdef,forinline,false);
+                  in_const_odd :
+                    hp:=cordconstnode.create(qword(odd(int64(vl))),pasbool1type,true);
++                 { swap the bits of the operand's size and reinterpret the
++                   result in the (possibly signed) operand type, so that e.g.
++                   Swap(SmallInt(255)) is -256 rather than an out-of-range
++                   65280, and negative operands are not shifted as 64-bit
++                   values }
+                  in_const_swap_word :
+-                   hp:=cordconstnode.create((vl and $ff) shl 8+(vl shr 8),left.resultdef,true);
++                   if is_signed(left.resultdef) then
++                     hp:=cordconstnode.create(smallint(word((word(vl.uvalue) and $ff) shl 8) or (word(vl.uvalue) shr 8)),left.resultdef,true)
++                   else
++                     hp:=cordconstnode.create(word((word(vl.uvalue) and $ff) shl 8) or (word(vl.uvalue) shr 8),left.resultdef,true);
+                  in_const_swap_long :
+-                   hp:=cordconstnode.create((vl and $ffff) shl 16+(vl shr 16),left.resultdef,true);
++                   if is_signed(left.resultdef) then
++                     hp:=cordconstnode.create(longint(dword((dword(vl.uvalue) and $ffff) shl 16) or (dword(vl.uvalue) shr 16)),left.resultdef,true)
++                   else
++                     hp:=cordconstnode.create(dword((dword(vl.uvalue) and $ffff) shl 16) or (dword(vl.uvalue) shr 16),left.resultdef,true);
+                  in_const_swap_qword :
+-                   hp:=cordconstnode.create((vl and $ffffffff) shl 32+(vl shr 32),left.resultdef,true);
++                   if is_signed(left.resultdef) then
++                     hp:=cordconstnode.create(int64((qword(vl.uvalue) shl 32) or (qword(vl.uvalue) shr 32)),left.resultdef,true)
++                   else
++                     hp:=cordconstnode.create((qword(vl.uvalue) shl 32) or (qword(vl.uvalue) shr 32),left.resultdef,true);
+                  in_const_ptr:
+                    begin
+                      {Don't construct pointers from negative values.}
+diff --git a/tests/tbs/tb9037.pp b/tests/tbs/tb9037.pp
+new file mode 100644
+index 00000000..71649288
+--- /dev/null
++++ b/tests/tbs/tb9037.pp
+@@ -0,0 +1,41 @@
++{ swap() of a signed constant is the swapped bit pattern of the operand's
++  size, reinterpreted in the signed type: swap(smallint(255)) is -256 and
++  must not be rejected with a range check error }
++program tb9037;
++
++{$mode objfpc}
++
++const
++  cs = smallint(255);
++  cneg = smallint(-2);
++  cl = longint(65535);
++  cln = longint(-2);
++  ci = int64($0000000180000000);
++  cin = int64(-2);
++var
++  vs: smallint;
++  vl: longint;
++  vi: int64;
++begin
++  vs:=cs;
++  if swap(cs)<>swap(vs) then
++    halt(1);
++  vs:=cneg;
++  if swap(cneg)<>swap(vs) then
++    halt(2);
++  vl:=cl;
++  if swap(cl)<>swap(vl) then
++    halt(3);
++  vl:=cln;
++  if swap(cln)<>swap(vl) then
++    halt(4);
++  vi:=ci;
++  if swap(ci)<>swap(vi) then
++    halt(5);
++  vi:=cin;
++  if swap(cin)<>swap(vi) then
++    halt(6);
++  if swap(cs)<>-256 then
++    halt(7);
++  writeln('ok');
++end.

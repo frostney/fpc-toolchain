@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 02:45:00 +0100
+Subject: [PATCH 35/75] Reassociate (x op c1) op c2 only when c1 op c2 does not
+ overflow and overflow checking is off
+
+taddnode.simplify rewrites (x+c1)+c2 and (x*c1)*c2 into x+(c1+c2) and
+x*(c1*c2) at every optimization level (trunk@43577). The source has no
+constant-constant operation there, but an overflowing c1 op c2 was
+reported as "Overflow in arithmetic operation", rejecting code that wraps
+at run time (#36356). With overflow checking the rewrite also dropped the
+run-time check of x op c1 ((x+5)+(-5) became x). Keep the source order in
+both cases; and, or and xor are not affected.
+---
+ compiler/nadd.pas | 33 ++++++++++++++++++++++++++++++++-
+ 1 file changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/nadd.pas b/compiler/nadd.pas
+index b0ccdeb2..817e2523 100644
+--- a/compiler/nadd.pas
++++ b/compiler/nadd.pas
+@@ -568,6 +568,36 @@ const
+         end;
+ 
+ 
++      { (val op c1) op c2 is about to become val op (c1 op c2). For + and *
++        that is only equivalent if c1 op c2 does not overflow: the source has
++        no constant-constant operation, so folding it must neither report an
++        overflow error nor change the result. With overflow checking, val op c1
++        can trap at run time where val op (c1 op c2) does not, so keep the
++        source order then (pointer arithmetic is not checked) }
++      function ConstReassociationAllowed: boolean;
++        var
++          c1: tnode;
++          v: tconstexprint;
++        begin
++          result:=true;
++          if not(nodetype in [addn,muln]) then
++            exit;
++          if (cs_check_overflow in localswitches) and not(is_pointer(resultdef)) then
++            exit(false);
++          if is_constintnode(taddnode(left).left) then
++            c1:=taddnode(left).left
++          else if is_constintnode(taddnode(left).right) then
++            c1:=taddnode(left).right
++          else
++            exit;
++          if nodetype=addn then
++            v:=get_int_value(c1)+get_int_value(right)
++          else
++            v:=get_int_value(c1)*get_int_value(right);
++          result:=not(v.overflow);
++        end;
++
++
+       function IsAndOrAndNot(n1,n2,n3,n4 : tnode): Boolean;
+         begin
+           result:=(n4.nodetype=notn) and
+@@ -1059,7 +1089,8 @@ const
+             else if (left.nodetype=nodetype) and
+               { there might be a mul operation e.g. longint*longint => int64 in this case
+                 we cannot do this optimization, see e.g. tests/webtbs/tw36587.pp on arm }
+-              (compare_defs(resultdef,ld,nothingn)=te_exact) then
++              (compare_defs(resultdef,ld,nothingn)=te_exact) and
++              ConstReassociationAllowed then
+               begin
+                 if is_constintnode(taddnode(left).left) then
+                   begin

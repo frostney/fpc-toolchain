@@ -1,0 +1,128 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 02:14:02 +0100
+Subject: [PATCH 32/75] x86 MovxOp2Op: do not let a narrowed AND write the movx
+ source; keep the sign of the result and flags
+
+---
+ compiler/x86/aoptx86.pas | 93 +++++++++++++++++++++++++++-------------
+ 1 file changed, 64 insertions(+), 29 deletions(-)
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 77bb06de..0d4b313e 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -15588,30 +15588,55 @@ unit aoptx86;
+                 else
+                   RegUsed := RegUsedAfterInstruction(taicpu(p).oper[1]^.reg,hp1,TmpUsedRegs);
+ 
++                { the instruction whose flags the code after the sequence sees }
++                if AndTest then
++                  hp3 := hp2
++                else
++                  hp3 := hp1;
++
+                 if
+                   (
+-                    (taicpu(p).opcode = A_MOVZX) and
+                     (
+-                      (taicpu(hp1).opcode=A_AND) or
+-                      (taicpu(hp1).opcode=A_TEST)
+-                    ) and
+-                    not (
+-                      { If both are references, then the final instruction will have
+-                        both operands as references, which is not allowed }
+-                      (taicpu(p).oper[0]^.typ = top_ref) and
+-                      (taicpu(hp1).oper[0]^.typ = top_ref)
+-                    ) and
+-                    not RegUsed
+-                  ) or
++                      (taicpu(p).opcode = A_MOVZX) and
++                      (
++                        (taicpu(hp1).opcode=A_AND) or
++                        (taicpu(hp1).opcode=A_TEST)
++                      ) and
++                      not (
++                        { If both are references, then the final instruction will have
++                          both operands as references, which is not allowed }
++                        (taicpu(p).oper[0]^.typ = top_ref) and
++                        (taicpu(hp1).oper[0]^.typ = top_ref)
++                      ) and
++                      not RegUsed
++                    ) or
++                    (
++                      (
++                        SuperRegistersEqual(taicpu(p).oper[0]^.reg, taicpu(p).oper[1]^.reg) or
++                        not RegUsed
++                      ) and
++                      (taicpu(p).oper[0]^.typ = top_reg) and
++                      SuperRegistersEqual(taicpu(p).oper[0]^.reg, taicpu(p).oper[1]^.reg) and
++                      (taicpu(hp1).oper[0]^.typ = top_const) and
++                      ((taicpu(hp1).oper[0]^.val and Limit) = taicpu(hp1).oper[0]^.val)
++                    )
++                  ) and
+                   (
++                    { The narrowed operation takes its result sign from the
++                      most significant bit of the smaller size. If the operand
++                      cannot set that bit, the result and the flags are the
++                      same. Otherwise a sign extension gives a different
++                      result, and a zero extension (whose wide result is never
++                      negative) gives a different sign flag, so the flags must
++                      not reach a signed condition. }
+                     (
+-                      SuperRegistersEqual(taicpu(p).oper[0]^.reg, taicpu(p).oper[1]^.reg) or
+-                      not RegUsed
+-                    ) and
+-                    (taicpu(p).oper[0]^.typ = top_reg) and
+-                    SuperRegistersEqual(taicpu(p).oper[0]^.reg, taicpu(p).oper[1]^.reg) and
+-                    (taicpu(hp1).oper[0]^.typ = top_const) and
+-                    ((taicpu(hp1).oper[0]^.val and Limit) = taicpu(hp1).oper[0]^.val)
++                      (taicpu(hp1).oper[0]^.typ = top_const) and
++                      ((taicpu(hp1).oper[0]^.val and Limit and not (Limit shr 1)) = 0)
++                    ) or
++                    (
++                      (taicpu(p).opcode = A_MOVZX) and
++                      not FlagsReadBySignedCondition(p, hp3)
++                    )
+                   ) then
+                   begin
+ {$if defined(i386) or defined(i8086)}
+@@ -15626,18 +15651,28 @@ unit aoptx86;
+ 
+                     taicpu(hp1).loadoper(1, taicpu(p).oper[0]^);
+                     if AndTest then
++                      RemoveInstruction(hp2);
++                    { If %reg2 is not used afterwards, only the flags of the
++                      AND are needed. As an AND, the narrowed instruction would
++                      write its result into the source operand of the movx,
++                      which can be memory or a different register that is
++                      still in use, so turn it into a TEST. }
++                    if not RegUsed and (taicpu(hp1).opcode = A_AND) and
++                      (
++                        AndTest or
++                        not (
++                          (taicpu(p).oper[0]^.typ = top_reg) and
++                          SuperRegistersEqual(taicpu(p).oper[0]^.reg, taicpu(p).oper[1]^.reg)
++                        )
++                      ) then
+                       begin
+-                        RemoveInstruction(hp2);
+-                        if not RegUsed then
++                        taicpu(hp1).opcode := A_TEST;
++                        if (taicpu(hp1).oper[0]^.typ = top_ref) then
+                           begin
+-                            taicpu(hp1).opcode := A_TEST;
+-                            if (taicpu(hp1).oper[0]^.typ = top_ref) then
+-                              begin
+-                                { Make sure the reference is the second operand }
+-                                SwapOper := taicpu(hp1).oper[0];
+-                                taicpu(hp1).oper[0] := taicpu(hp1).oper[1];
+-                                taicpu(hp1).oper[1] := SwapOper;
+-                              end;
++                            { Make sure the reference is the second operand }
++                            SwapOper := taicpu(hp1).oper[0];
++                            taicpu(hp1).oper[0] := taicpu(hp1).oper[1];
++                            taicpu(hp1).oper[1] := SwapOper;
+                           end;
+                       end;
+ 

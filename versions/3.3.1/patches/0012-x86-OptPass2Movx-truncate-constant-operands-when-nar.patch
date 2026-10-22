@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 23:08:52 +0100
+Subject: [PATCH 12/75] x86 OptPass2Movx: truncate constant operands when
+ narrowing instructions
+
+Narrowing 'andw $1023' to byte size kept the constant and produced
+'andb $1023' ('Asm: byte value exceeds bounds 1023') for
+(Byte(B + 83) and 1023) or 1 at -O2. Resize through
+ChangeArithmeticOpSize, which masks the constant.
+---
+ compiler/x86/aoptx86.pas | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 47a5abf2..e1147753 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -12277,7 +12277,8 @@ unit aoptx86;
+                       InstrList[LocalIndex].oper[0]^.reg := ThisReg;
+ 
+                     InstrList[LocalIndex].oper[InstrList[LocalIndex].ops - 1]^.reg := ThisReg;
+-                    InstrList[LocalIndex].opsize := TargetSize;
++                    { also truncates a constant operand to the new size (e.g. an AND mask) }
++                    ChangeArithmeticOpSize(InstrList[LocalIndex], TargetSize);
+                   end;
+ 
+                 Result := True;
+@@ -12592,7 +12593,8 @@ unit aoptx86;
+                                     InstrList[Index].oper[0]^.reg := ThisReg;
+ 
+                                   InstrList[Index].oper[InstrList[Index].ops - 1]^.reg := ThisReg;
+-                                  InstrList[Index].opsize := MinSize;
++                                  { also truncates a constant operand to the new size (e.g. an AND mask) }
++                                  ChangeArithmeticOpSize(InstrList[Index], MinSize);
+                                 end;
+                             end;
+ 

@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 15:29:42 +0100
+Subject: [PATCH 62/75] rtl: WASI FExpand: do not prefix rooted paths with a
+ drive
+
+On WASI FPC_FEXPAND_DRIVES is defined, but DriveSeparator is empty and
+paths have no drive letters. For a rooted path FExpand prepends
+"S[1] + DriveSeparator" of the base path, i.e. '/', so
+ExpandFileName('/a/b') returns '//a/b'. This breaks programs that
+compare or look up expanded paths (module resolution, configuration
+file discovery).
+
+Only take the drive from the base path when it really starts with a
+drive ("X:"); a rooted path is otherwise already complete.
+---
+ rtl/inc/fexpand.inc | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/rtl/inc/fexpand.inc b/rtl/inc/fexpand.inc
+index 2e9093f6..f15519ba 100644
+--- a/rtl/inc/fexpand.inc
++++ b/rtl/inc/fexpand.inc
+@@ -389,11 +389,19 @@ begin
+                             PathStart := Succ (I);
+    {$ENDIF FPC_FEXPAND_DIRSEP_IS_UPDIR}
+   {$ELSE FPC_FEXPAND_VOLUMES}
++   {$IFDEF WASI}
++                            { WASI: the base path has a drive only when it
++                              starts with a letter and ':'; otherwise a rooted
++                              path is already complete (no '//' prefix). }
++                            if (Length (S) > 1) and (S [2] = ':') then
++   {$ENDIF WASI}
++                            begin
+                             TmpS := S[1] + DriveSeparator;
+   {$IF defined(FPC_FEXPAND_SYSUTILS) and not defined(SYSUTILSUNICODE)}
+                             SetCodePage(TmpS, DefaultFileSystemCodePage, false);
+   {$ENDIF FPC_FEXPAND_SYSUTILS and not SYSUTILSUNICODE}
+                             Pa := TmpS + Pa;
++                            end;
+   {$ENDIF FPC_FEXPAND_VOLUMES}
+                         end;
+                 end

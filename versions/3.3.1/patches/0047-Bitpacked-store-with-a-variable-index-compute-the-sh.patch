@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 03:20:38 +0100
+Subject: [PATCH 47/75] Bitpacked store with a variable index: compute the
+ shift for the second load unit also when storing the all-ones value
+
+For SL_SETMAX no mask is generated, and tmpindexreg (loadbitsize -
+bitindex) was used uninitialised, so A[i] := 7 on a bitpacked array of
+0..7 lost the upper bits of an element that straddles a load unit.  Also
+in 3.2.x.  Found by the pgen3 generator (seeds 30058, 30148, 30278).
+---
+ compiler/hlcgobj.pas | 19 ++++++++++++++-----
+ tests/tbs/tb9038.pp  | 34 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 48 insertions(+), 5 deletions(-)
+ create mode 100644 tests/tbs/tb9038.pp
+
+diff --git a/compiler/hlcgobj.pas b/compiler/hlcgobj.pas
+index 20d48f32..e4dc80d3 100644
+--- a/compiler/hlcgobj.pas
++++ b/compiler/hlcgobj.pas
+@@ -2626,6 +2626,20 @@ implementation
+ 
+               a_load_ref_reg(list,loadsize,aluuinttype,tmpref,extra_value_reg);
+               tmpindexreg:=getintregister(list,aluuinttype);
++              { shift count for the part in the next load unit; it is needed
++                to insert the value as well, also when no mask is generated
++                (SL_SETMAX, e.g. storing the all-ones constant) }
++              if (target_info.endian=endian_big) then
++                begin
++                  a_op_const_reg_reg(list,OP_ADD,aluuinttype,sref.bitlen-2*loadbitsize,sref.bitindexreg,tmpindexreg);
++                  a_op_reg_reg(list,OP_NEG,aluuinttype,tmpindexreg,tmpindexreg);
++                end
++              else
++                begin
++                  { Y-x = -(x-Y) }
++                  a_op_const_reg_reg(list,OP_SUB,aluuinttype,loadbitsize,sref.bitindexreg,tmpindexreg);
++                  a_op_reg_reg(list,OP_NEG,aluuinttype,tmpindexreg,tmpindexreg);
++                end;
+ 
+               { load current array value }
+               if (slopt<>SL_SETZERO) then
+@@ -2645,16 +2659,11 @@ implementation
+                   maskreg:=getintregister(list,aluuinttype);
+                   if (target_info.endian=endian_big) then
+                     begin
+-                      a_op_const_reg_reg(list,OP_ADD,aluuinttype,sref.bitlen-2*loadbitsize,sref.bitindexreg,tmpindexreg);
+-                      a_op_reg_reg(list,OP_NEG,aluuinttype,tmpindexreg,tmpindexreg);
+                       a_load_const_reg(list,aluuinttype,tcgint((aword(1) shl sref.bitlen)-1),maskreg);
+                       a_op_reg_reg(list,OP_SHL,aluuinttype,tmpindexreg,maskreg);
+                     end
+                   else
+                     begin
+-                      { Y-x = -(x-Y) }
+-                      a_op_const_reg_reg(list,OP_SUB,aluuinttype,loadbitsize,sref.bitindexreg,tmpindexreg);
+-                      a_op_reg_reg(list,OP_NEG,aluuinttype,tmpindexreg,tmpindexreg);
+                       a_load_const_reg(list,aluuinttype,tcgint((aword(1) shl sref.bitlen)-1),maskreg);
+                       a_op_reg_reg(list,OP_SHR,aluuinttype,tmpindexreg,maskreg);
+                     end;
+diff --git a/tests/tbs/tb9038.pp b/tests/tbs/tb9038.pp
+new file mode 100644
+index 00000000..8a0ab03e
+--- /dev/null
++++ b/tests/tbs/tb9038.pp
+@@ -0,0 +1,34 @@
++{ storing the all-ones value into a bitpacked array element with a variable
++  index must also write the part of the element that lies in the next load
++  unit }
++program tb9038;
++
++type
++  tba = bitpacked array[0..17] of 0..7;
++  tbs = bitpacked array[0..24] of 7..7;
++var
++  a: tba;
++  s: tbs;
++  i: longint;
++begin
++  fillchar(a,sizeof(a),0);
++  for i:=0 to 17 do
++    a[i]:=7;
++  for i:=0 to 17 do
++    if a[i]<>7 then
++      halt(1);
++  fillchar(a,sizeof(a),0);
++  i:=5;
++  a[i]:=7;
++  i:=10;
++  a[i]:=7;
++  for i:=0 to 17 do
++    if (a[i]<>7) and (i in [5,10]) or (a[i]<>0) and not(i in [5,10]) then
++      halt(2);
++  for i:=0 to 24 do
++    s[i]:=7;
++  for i:=0 to 24 do
++    if s[i]<>7 then
++      halt(3);
++  writeln('ok');
++end.

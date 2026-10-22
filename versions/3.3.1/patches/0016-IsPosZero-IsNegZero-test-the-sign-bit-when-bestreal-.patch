@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 23:25:10 +0100
+Subject: [PATCH 16/75] IsPosZero/IsNegZero: test the sign bit when bestreal is
+ wider than a double
+
+For an extended bestreal both functions compared SizeOf(bestreal) bytes
+against the 8-byte double patterns MathPosZero/MathNegZero, reading past
+them, so they were effectively random. trealconstnode.docompare then
+equated the constants 0.0 and -0.0, and do_consttovar loaded both from
+one register: with the win64 cross compiler on x86_64-linux,
+'D := -3.0; D := D * 0.0' produced +0.0 at -O2.
+---
+ compiler/globals.pas | 33 ++++++++++++++-------------------
+ 1 file changed, 14 insertions(+), 19 deletions(-)
+
+diff --git a/compiler/globals.pas b/compiler/globals.pas
+index ea25770b..501a6a25 100644
+--- a/compiler/globals.pas
++++ b/compiler/globals.pas
+@@ -1287,31 +1287,26 @@ implementation
+         Result:=(QWord(TCompDoubleRec(value).bytes)=QWord(MathNegZero.bytes));
+       end;
+ {$else sizeof(bestreal)=sizeof(double)}
+-    function IsPosZero(value: bestreal): boolean;
+-      var
+-        X, Count: Integer;
+-        ByteArray: PByte;
++    { bestreal is wider than a double here (x87 extended, float128): the double
++      patterns MathPosZero/MathNegZero do not apply, and comparing SizeOf(bestreal)
++      bytes against them read past their end. Test the value and its sign bit. }
++    function bestreal_signbit(const value: bestreal): boolean;
+       begin
+-        Result:=False;
+-        ByteArray:=@value;
+-        Count:=SizeOf(bestreal);
++{$ifdef ENDIAN_LITTLE}
++        Result:=(PByte(@value)[SizeOf(bestreal)-1] and $80)<>0;
++{$else ENDIAN_LITTLE}
++        Result:=(PByte(@value)[0] and $80)<>0;
++{$endif ENDIAN_LITTLE}
++      end;
+ 
+-        { Read raw bytes of floating-point value - must be all zeroes }
+-        Result:=(CompareByte(ByteArray^,MathPosZero.bytes,Count)=0);
++    function IsPosZero(value: bestreal): boolean;
++      begin
++        Result:=(value=0) and not bestreal_signbit(value);
+       end;
+ 
+     function IsNegZero(value: bestreal): boolean;
+-      var
+-        X, Count: Integer;
+-        ByteArray: PByte;
+       begin
+-        Result:=False;
+-        ByteArray:=@value;
+-        Count:=SizeOf(bestreal);
+-
+-        { Read raw bytes of floating-point value - must be all zeroes except
+-          for the most significant (sign) bit }
+-        Result:=(CompareByte(ByteArray^,MathNegZero.bytes,Count)=0);
++        Result:=(value=0) and bestreal_signbit(value);
+       end;
+ {$ifend sizeof(bestreal)=sizeof(double)}
+ 

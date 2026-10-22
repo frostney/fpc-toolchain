@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 02:48:08 +0100
+Subject: [PATCH 34/75] Fastmath: do not move a constant between
+ multiplications when Currency scaling is involved (#41865)
+
+---
+ compiler/nadd.pas | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/compiler/nadd.pas b/compiler/nadd.pas
+index 8ed47109..b0ccdeb2 100644
+--- a/compiler/nadd.pas
++++ b/compiler/nadd.pas
+@@ -630,6 +630,19 @@ const
+         end;
+ 
+ 
++      { the folding of real constants under a multiplication interprets
++        nf_is_currency (value scaled by 10000) relative to the flags of the
++        node that combines them; moving a constant between two nodes for the
++        fastmath reassociation below would then drop or add a factor of
++        10000, e.g. for the scaling (x*c)*10000 of a conversion to Currency }
++      function moves_currency_scaling(inner,c1,c2 : tnode) : boolean;
++        begin
++          result:=(nodetype=muln) and
++            ((nf_is_currency in flags) or (nf_is_currency in inner.flags) or
++             (nf_is_currency in c1.flags) or (nf_is_currency in c2.flags));
++        end;
++
++
+       function SwapLeftWithRightRight : tnode;
+         var
+           hp,hp2 : tnode;
+@@ -1758,7 +1771,8 @@ const
+                 }
+                 if (left.nodetype=nodetype) and
+                   (((nodetype=addn) and ((rt=stringconstn) or is_constcharnode(right)) and ((taddnode(left).right.nodetype=stringconstn) or is_constcharnode(taddnode(left).right))) or
+-                   ((nodetype in [addn,muln,subn]) and (cs_opt_fastmath in current_settings.optimizerswitches) and (rt=realconstn) and (taddnode(left).right.nodetype=realconstn))
++                   ((nodetype in [addn,muln,subn]) and (cs_opt_fastmath in current_settings.optimizerswitches) and (rt=realconstn) and (taddnode(left).right.nodetype=realconstn) and
++                    not(moves_currency_scaling(left,right,taddnode(left).right)))
+                   ) and
+                   (compare_defs(resultdef,ld,nothingn)=te_exact) then
+                   begin
+@@ -1793,7 +1807,8 @@ const
+                 }
+                 if (right.nodetype=nodetype) and
+                   (((nodetype=addn) and ((lt=stringconstn) or is_constcharnode(left)) and ((taddnode(right).left.nodetype=stringconstn) or is_constcharnode(taddnode(right).left))) or
+-                   ((nodetype in [addn,muln]) and (cs_opt_fastmath in current_settings.optimizerswitches) and (lt=realconstn) and (taddnode(right).left.nodetype=realconstn))
++                   ((nodetype in [addn,muln]) and (cs_opt_fastmath in current_settings.optimizerswitches) and (lt=realconstn) and (taddnode(right).left.nodetype=realconstn) and
++                    not(moves_currency_scaling(right,left,taddnode(right).left)))
+                   ) and
+                   (compare_defs(resultdef,rd,nothingn)=te_exact) then
+                   begin

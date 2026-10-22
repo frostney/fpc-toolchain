@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 05:36:11 +0100
+Subject: [PATCH 51/75] Val into an unsigned integer from
+ AnsiString/UnicodeString/WideString: pass DestSize on, so the overflow of a
+ narrow destination is detected (#41981)
+
+---
+ rtl/inc/astrings.inc   | 2 +-
+ rtl/inc/sstrings.inc   | 7 +++++++
+ rtl/inc/ustrings.inc   | 2 +-
+ rtl/inc/wstrings.inc   | 2 +-
+ rtl/java/jsstrings.inc | 5 +++++
+ 5 files changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/rtl/inc/astrings.inc b/rtl/inc/astrings.inc
+index 291d8aaf..9ed0a012 100644
+--- a/rtl/inc/astrings.inc
++++ b/rtl/inc/astrings.inc
+@@ -930,7 +930,7 @@ begin
+   else
+     begin
+       SS := S;
+-      Val(SS,fpc_Val_UInt_AnsiStr,code);
++      fpc_Val_UInt_AnsiStr:=int_Val_UInt_ShortStr({$ifndef VER3_2}DestSize,{$endif VER3_2}SS,code);
+     end;
+ end;
+ 
+diff --git a/rtl/inc/sstrings.inc b/rtl/inc/sstrings.inc
+index 0b7fde47..700178a8 100644
+--- a/rtl/inc/sstrings.inc
++++ b/rtl/inc/sstrings.inc
+@@ -1256,6 +1256,13 @@ end;
+ Function int_Val_SInt_ShortStr(DestSize: SizeInt; Const S: ShortString; out Code: ValSInt): ValSInt; [external name 'FPC_VAL_SINT_SHORTSTR'];
+ {$endif FPC_HAS_INT_VAL_SINT_SHORTSTR}
+ 
++{$ifndef FPC_HAS_INT_VAL_UINT_SHORTSTR}
++{$define FPC_HAS_INT_VAL_UINT_SHORTSTR}
++{ likewise for fpc_Val_UInt_AnsiStr/UnicodeStr/WideStr: they must pass DestSize on, }
++{ otherwise an overflow of a destination narrower than ValUInt is not detected    }
++Function int_Val_UInt_ShortStr({$ifndef VER3_2}DestSize: SizeInt;{$endif VER3_2} Const S: ShortString; out Code: ValSInt): ValUInt; [external name 'FPC_VAL_UINT_SHORTSTR'];
++{$endif FPC_HAS_INT_VAL_UINT_SHORTSTR}
++
+ 
+ Function fpc_Val_UInt_Shortstr({$ifndef VER3_2}DestSize: SizeInt;{$endif VER3_2} Const S: ShortString; out Code: ValSInt): ValUInt; [public, alias:'FPC_VAL_UINT_SHORTSTR']; compilerproc;
+ var
+diff --git a/rtl/inc/ustrings.inc b/rtl/inc/ustrings.inc
+index 8a3b9edd..2b66395a 100644
+--- a/rtl/inc/ustrings.inc
++++ b/rtl/inc/ustrings.inc
+@@ -1427,7 +1427,7 @@ begin
+   else
+     begin
+       SS:=ShortString(S);
+-      Val(SS,fpc_Val_UInt_UnicodeStr,code);
++      fpc_Val_UInt_UnicodeStr:=int_Val_UInt_ShortStr({$ifndef VER3_2}DestSize,{$endif VER3_2}SS,code);
+     end;
+ end;
+ 
+diff --git a/rtl/inc/wstrings.inc b/rtl/inc/wstrings.inc
+index 9ba1bf93..7826044e 100644
+--- a/rtl/inc/wstrings.inc
++++ b/rtl/inc/wstrings.inc
+@@ -805,7 +805,7 @@ begin
+   else
+     begin
+       SS:=ShortString(S);
+-      Val(SS,fpc_Val_UInt_WideStr,code);
++      fpc_Val_UInt_WideStr:=int_Val_UInt_ShortStr({$ifndef VER3_2}DestSize,{$endif VER3_2}SS,code);
+     end;
+ end;
+ 
+diff --git a/rtl/java/jsstrings.inc b/rtl/java/jsstrings.inc
+index 2251208e..efc892ac 100644
+--- a/rtl/java/jsstrings.inc
++++ b/rtl/java/jsstrings.inc
+@@ -361,6 +361,11 @@ end;
+ Function int_Val_SInt_ShortStr(DestSize: SizeInt; Const S: ShortString; out Code: ValSInt): ValSInt; [external name 'fpc_val_sint_shortstr'];
+ {$endif FPC_HAS_INT_VAL_SINT_SHORTSTR}
+ 
++{$ifndef FPC_HAS_INT_VAL_UINT_SHORTSTR}
++{$define FPC_HAS_INT_VAL_UINT_SHORTSTR}
++Function int_Val_UInt_ShortStr({$ifndef VER3_2}DestSize: SizeInt;{$endif VER3_2} Const S: ShortString; out Code: ValSInt): ValUInt; [external name 'fpc_val_uint_shortstr'];
++{$endif FPC_HAS_INT_VAL_UINT_SHORTSTR}
++
+ 
+ {$define FPC_HAS_SETSTRING_SHORTSTR}
+ Procedure fpc_setstring_shortstr(Out S : Shortstring; Buf : PAnsiChar; Len : SizeInt); compilerproc;

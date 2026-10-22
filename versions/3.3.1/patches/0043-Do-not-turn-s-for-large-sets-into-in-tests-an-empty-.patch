@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 03:20:37 +0100
+Subject: [PATCH 43/75] Do not turn (s*[])=[] / <>[] for large sets into
+ in-tests: an empty constant set gave a not-node without operand (AV) or
+ internal error 200109041
+
+isconstsetfewelements accepted a constant set with no elements; the
+transformation then produced no in-node at all.  Found by the pgen3
+generator (seeds 30075, 30298); all compilers since 3.2 at -O1 and up.
+---
+ compiler/nadd.pas   |  7 ++++++-
+ tests/tbs/tb9034.pp | 26 ++++++++++++++++++++++++++
+ 2 files changed, 32 insertions(+), 1 deletion(-)
+ create mode 100644 tests/tbs/tb9034.pp
+
+diff --git a/compiler/nadd.pas b/compiler/nadd.pas
+index 83d7f6c8..2e459956 100644
+--- a/compiler/nadd.pas
++++ b/compiler/nadd.pas
+@@ -4969,7 +4969,12 @@ const
+ 
+       function isconstsetfewelements(p : tnode) : boolean;
+         begin
+-          result:=(p.nodetype=setconstn) and (tsetconstnode(p).elements<=4);
++          { an empty constant set would produce no in-node at all: the
++            transformation below would then return nil (internal error
++            200109041 for <>) or a not-node without operand (access
++            violation for =); leave those to the generic set code }
++          result:=(p.nodetype=setconstn) and (tsetconstnode(p).elements>0) and
++            (tsetconstnode(p).elements<=4);
+         end;
+ 
+       var
+diff --git a/tests/tbs/tb9034.pp b/tests/tbs/tb9034.pp
+new file mode 100644
+index 00000000..036dc88e
+--- /dev/null
++++ b/tests/tbs/tb9034.pp
+@@ -0,0 +1,26 @@
++{ %OPT=-O1 }
++{ the "(s*[c1..cn]) =/<> []" to in-test transformation for large sets
++  must not be applied to an empty constant set: it produced a not-node
++  without operand (access violation) for = and an unprocessed node
++  (internal error 200109041) for <> }
++program tb9034;
++
++var
++  s: set of 0..200;
++  b: boolean;
++begin
++  s:=[3];
++  b:=(s*[])=[];
++  if not b then
++    halt(1);
++  b:=(s*[])<>[];
++  if b then
++    halt(2);
++  if not([]=([]*s)) then
++    halt(3);
++  if (s*[3])=[] then
++    halt(4);
++  if not((s*[3,4])<>[]) then
++    halt(5);
++  writeln('ok');
++end.

@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 00:50:22 +0100
+Subject: [PATCH 28/75] Fold Str(<int constant>, S) at -O3 only for string
+ types without a code page
+
+tcallnode.handle_compilerproc (in_str_x_string) rewrites Str(<const>, S)
+as S := '<digits>' at level 3 for every destination; for an AnsiString
+with a declared code page (AnsiString(866), UTF8String) the result then
+had the constant's code page (0 for UTF8String) instead of the
+destination's (tests/test/tcpstr14 fails at -O3). Upstream 9e4c8eac
+removed the earlier encoding guard. Restrict the rewrite to ShortString,
+WideString and UnicodeString.
+---
+ compiler/ncal.pas | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/compiler/ncal.pas b/compiler/ncal.pas
+index 20678506..8854b116 100644
+--- a/compiler/ncal.pas
++++ b/compiler/ncal.pas
+@@ -2970,6 +2970,18 @@ implementation
+                 begin
+                   { Output variable }
+                   outnode := para.left;
++
++                  { Assigning a string constant only does the same as the
++                    helper for these destinations: the ansistring helpers
++                    also set the code page passed in their extra parameter
++                    (the constant would get the source code page instead),
++                    and the chararray helpers leave the elements after the
++                    digits untouched (the assignment pads them with #0) }
++                  if not is_shortstring(outnode.resultdef) and
++                     not is_widestring(outnode.resultdef) and
++                     not is_unicodestring(outnode.resultdef) then
++                    exit;
++
+                   para := GetParaFromIndex(paracount - 2);
+ 
+                   if Assigned(para) then

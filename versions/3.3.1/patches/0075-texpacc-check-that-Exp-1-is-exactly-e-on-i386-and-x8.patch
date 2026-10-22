@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 22 Oct 2026 16:46:40 +0100
+Subject: [PATCH 75/75] texpacc: check that Exp(1) is exactly e on i386 and
+ x86_64
+
+Exp(1) must give 2.718281828459045 (bits $4005BF0A8B145769), the value
+of the x87 Exp and of V8. On x86_64-win64 the SSE2 Exp gets it only
+through its special case for 1.0 (fdlibm alone is 1 ulp above), so the
+check fails without that and passes with it. Only i386 and x86_64 are
+checked: other targets use the generic genmath.inc Exp, which has no
+such special case. The argument is passed through BitsToDouble so that
+the compiler cannot fold Exp(1.0) at compile time.
+---
+ tests/test/units/system/texpacc.pp | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/tests/test/units/system/texpacc.pp b/tests/test/units/system/texpacc.pp
+index 46c49477..b277b417 100644
+--- a/tests/test/units/system/texpacc.pp
++++ b/tests/test/units/system/texpacc.pp
+@@ -84,6 +84,18 @@ begin
+       lFailed:=true;
+       end;
+     end;
++{$if defined(cpui386) or defined(cpux86_64)}
++  { exp(1) must be e exactly (as V8 returns); the x87 Exp gives it, and the
++    SSE2 Exp of x86_64-win64 special-cases it (fdlibm alone is 1 ulp above,
++    so other targets using the generic genmath.inc Exp are not checked) }
++  lValue:=Exp(BitsToDouble(QWord($3FF0000000000000))); { not Exp(1.0): that is folded at compile time }
++  lGot:=DoubleToBits(lValue);
++  if lGot<>QWord($4005BF0A8B145769) then
++    begin
++    writeln('exp(1): got ',HexStr(lGot,16),', expected 4005BF0A8B145769 (e)');
++    lFailed:=true;
++    end;
++{$endif}
+   if lFailed then
+     halt(1);
+   writeln('ok');

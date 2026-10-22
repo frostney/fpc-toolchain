@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 17:34:39 +0100
+Subject: [PATCH 04/75] is_range_test: do not treat a constant as the tested
+ variable
+
+After inlining with constant arguments '(3 <= 0) or (1 <= 0)' reaches
+the range-test transformation before the comparisons are folded; the
+constant 0 was taken as the variable and the expression folded to True.
+---
+ compiler/nadd.pas | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/compiler/nadd.pas b/compiler/nadd.pas
+index 7d60e94e..8d77d9ed 100644
+--- a/compiler/nadd.pas
++++ b/compiler/nadd.pas
+@@ -455,6 +455,11 @@ const
+           if not value.isequal(valuer) then
+             exit;
+ 
++          { both sides constant: nothing to range-test (and treating the
++            constant as "the variable" gives wrong results) }
++          if is_constnode(value) then
++            exit;
++
+           { This is based on De Morgan's theorem, namely that
+             "A and B" = "not ((not A) or (not B))" }
+           inverted_range:=(nodetype=orn);

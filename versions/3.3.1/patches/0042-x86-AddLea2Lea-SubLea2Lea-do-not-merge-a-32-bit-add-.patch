@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 03:41:33 +0100
+Subject: [PATCH 42/75] x86 AddLea2Lea/SubLea2Lea: do not merge a 32-bit
+ add/sub into a 64-bit LEA
+
+OptPass1Add/OptPass1Sub (b58fdc3e58) fold "addl/subl $c,%reg" into the
+offset of a following LEA that reads the register, without comparing the
+sizes. A 32-bit add/sub wraps at 2^32 and zero-extends; folded into a
+64-bit LEA it does not: "subl $1517433733,%eax; ...; leaq (%rax,%rbx),%rax"
+became "leaq -1517433733(%rax,%rbx),%rax" and Int64(Cardinal(x + c)) + y
+lost the wrap (-O3/-O4, where the 64-bit add is a LEA). Require the LEA to
+be no wider than the add/sub.
+---
+ compiler/x86/aoptx86.pas |  6 ++++++
+ tests/tbs/tb9044.pp      | 42 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 48 insertions(+)
+ create mode 100644 tests/tbs/tb9044.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 5845b6ac..2c8ade1b 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -6741,6 +6741,9 @@ unit aoptx86;
+             if (taicpu(p).opsize >= S_L) and
+               GetNextInstructionUsingReg(p,hp1, ActiveReg) and
+               MatchInstruction(hp1,A_LEA,[]) and
++              { a 32-bit add/sub wraps around at 2^32 and clears the upper half
++                of the register: it cannot become part of a 64-bit address }
++              (topsize2memsize[taicpu(hp1).opsize] <= topsize2memsize[taicpu(p).opsize]) and
+               (SuperRegistersEqual(ActiveReg, taicpu(hp1).oper[0]^.ref^.base) or
+                SuperRegistersEqual(ActiveReg, taicpu(hp1).oper[0]^.ref^.index)) and
+               (
+@@ -7858,6 +7861,9 @@ unit aoptx86;
+             if (taicpu(p).opsize >= S_L) and
+               GetNextInstructionUsingReg(p,hp1, ActiveReg) and
+               MatchInstruction(hp1,A_LEA,[]) and
++              { a 32-bit add/sub wraps around at 2^32 and clears the upper half
++                of the register: it cannot become part of a 64-bit address }
++              (topsize2memsize[taicpu(hp1).opsize] <= topsize2memsize[taicpu(p).opsize]) and
+               (SuperRegistersEqual(ActiveReg, taicpu(hp1).oper[0]^.ref^.base) or
+                SuperRegistersEqual(ActiveReg, taicpu(hp1).oper[0]^.ref^.index)) and
+               (
+diff --git a/tests/tbs/tb9044.pp b/tests/tbs/tb9044.pp
+new file mode 100644
+index 00000000..7b12b2bd
+--- /dev/null
++++ b/tests/tbs/tb9044.pp
+@@ -0,0 +1,42 @@
++{ %OPT=-O3 }
++{ x86 AddLea2Lea/SubLea2Lea: a 32-bit add/sub of a constant must not be merged
++  into a following 64-bit LEA (the 32-bit operation wraps around at 2^32) }
++program tb9044;
++
++{$mode objfpc}
++
++function sel(b: cardinal): cardinal;
++begin
++  result:=b;
++end;
++
++function fsub(p: longint): int64;
++var
++  v: int64;
++begin
++  v:=cardinal(sel(4)+2777533563)+p;
++  result:=v;
++end;
++
++function fadd(p: longint): int64;
++var
++  v: int64;
++begin
++  v:=cardinal(sel($ffffffff)+1)+p;
++  result:=v;
++end;
++
++function fadd2(p: longint): int64;
++begin
++  result:=int64(cardinal(sel($fffffff0)+100))+p;
++end;
++
++begin
++  if fsub(2)<>2777533569 then
++    halt(1);
++  if fadd(2)<>2 then
++    halt(2);
++  if fadd2(2)<>86 then
++    halt(3);
++  writeln('ok');
++end.

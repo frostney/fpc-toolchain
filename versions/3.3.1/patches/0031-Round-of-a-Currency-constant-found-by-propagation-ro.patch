@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 01:59:33 +0100
+Subject: [PATCH 31/75] Round of a Currency constant found by propagation:
+ round the unscaled value
+
+---
+ compiler/ninl.pas | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/compiler/ninl.pas b/compiler/ninl.pas
+index 17b11132..b7feb0d9 100644
+--- a/compiler/ninl.pas
++++ b/compiler/ninl.pas
+@@ -2856,6 +2856,21 @@ implementation
+                       else
+                         result:=cordconstnode.create(round(vr),s64inttype,true)
+                     end
++                  { if constant propagation or inlining folds the (unscaled)
++                    Currency argument to a constant after type checking,
++                    trealconstnode.simplify stores a fractional value scaled
++                    by 10000 and sets nf_is_currency; the rounding code would
++                    use that scaled value, so pass the unscaled value instead }
++                  else if forinline and
++                     (left.nodetype=realconstn) and
++                     is_currency(left.resultdef) and
++                     (nf_is_currency in left.flags) then
++                    begin
++                      hp:=crealconstnode.create(getconstrealvalue,pbestrealtype^);
++                      left.free;
++                      left:=hp;
++                      typecheckpass(left);
++                    end;
+                 end;
+               in_frac_real :
+                 begin

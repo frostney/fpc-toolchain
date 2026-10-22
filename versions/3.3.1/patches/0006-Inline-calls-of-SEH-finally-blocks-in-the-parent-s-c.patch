@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 17:42:04 +0100
+Subject: [PATCH 06/75] Inline calls of SEH finally blocks in the parent's
+ context (#41842)
+
+On x86_64-win64, finally blocks become exception-filter procedures
+that share the parent's tempgen; the parent initializes and finalizes
+the managed temps they allocate. Since inlining moved to
+TransformNodeTree, calls in a finally block are inlined only when the
+filter is generated during the parent's pass 2, so a managed temp from
+an inlined body sets pi_needs_implicit_finally after the parent has
+decided not to use an implicit finally, giving internal error
+200405231. Inline the filters' calls while transforming the parent and
+propagate pi_needs_implicit_finally to it.
+---
+ compiler/psub.pas | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index 9e2ffaa4..c00093e8 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -1183,10 +1183,33 @@ implementation
+         UserCode : TNode;
+         updated,
+         RedoDFA : boolean;
++        hpi : tcgprocinfo;
++        old_current_procinfo : tprocinfo;
+       begin
+        { inlining is a heuristics, so we do this very early }
+        do_optinline(code,updated);
+ 
++       { The code of exception filters (SEH 'finally' blocks) is moved out of
++         this procedure before inlining takes place, and they share our
++         tempgen: we finalize the managed temps they allocate. Inline their
++         calls now, so that we know whether we need an implicit finally
++         before add_entry_exit_code decides on it (#41842) }
++       hpi:=tcgprocinfo(get_first_nestedproc);
++       while assigned(hpi) do
++         begin
++           if (hpi.procdef.proctypeoption=potype_exceptfilter) and
++              assigned(hpi.code) then
++             begin
++               old_current_procinfo:=current_procinfo;
++               current_procinfo:=hpi;
++               do_optinline(hpi.code,updated);
++               current_procinfo:=old_current_procinfo;
++               if pi_needs_implicit_finally in hpi.flags then
++                 include(flags,pi_needs_implicit_finally);
++             end;
++           hpi:=tcgprocinfo(hpi.next);
++         end;
++
+        { do this before adding the entry code else the tail recursion recognition won't work,
+          if this causes troubles, it must be if'ed
+        }

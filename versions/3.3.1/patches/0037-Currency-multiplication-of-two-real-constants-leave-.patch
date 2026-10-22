@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 03:31:42 +0100
+Subject: [PATCH 37/75] Currency multiplication of two real constants: leave
+ the scaling to constant folding (no endless re-typecheck)
+
+---
+ compiler/nadd.pas | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/nadd.pas b/compiler/nadd.pas
+index 817e2523..83d7f6c8 100644
+--- a/compiler/nadd.pas
++++ b/compiler/nadd.pas
+@@ -3720,7 +3720,13 @@ const
+               muln :
+                 if (nf_is_currency in flags) then
+                   begin
+-                    if (nf_is_currency in left.flags) and (nf_is_currency in right.flags) then
++                    if (nf_is_currency in left.flags) and (nf_is_currency in right.flags) and
++                      { two real constants are left to the constant folding in
++                        simplify, which removes one of the scalars itself; unscaling
++                        one of them here never reaches a fixed point, because
++                        trealconstnode.simplify scales a fractional Currency constant
++                        back up and flags it again }
++                      not((left.nodetype=realconstn) and (right.nodetype=realconstn)) then
+                       begin
+                         if s64currencytype.typ=floatdef then
+                           begin

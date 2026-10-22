@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 23:41:16 +0100
+Subject: [PATCH 17/75] Integer constant folding during inline/propagation
+ simplification does not report overflow
+
+simplify(forinline=true) runs on inlined bodies and after constant
+propagation (-O3). An addition, subtraction or multiplication that
+overflows there was not a constant expression in the source, but the
+folder reported 'Overflow in arithmetic operation' and rejected valid
+code (V0 := 4022060303630; if B then V0 := V0 * V0 at -O3; trunk also
+propagates into case-of-string branches). Leave such operations to run
+time, where they wrap or raise the overflow check error.
+---
+ compiler/nadd.pas | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/compiler/nadd.pas b/compiler/nadd.pas
+index 1758a79e..72a60666 100644
+--- a/compiler/nadd.pas
++++ b/compiler/nadd.pas
+@@ -830,6 +830,12 @@ const
+                    v:=lv+rv;
+                    if v.overflow then
+                      begin
++                       { when simplifying an inlined body or after constant
++                         propagation, the operation was not a constant
++                         expression in the source: leave it to run time, where
++                         it wraps or raises an overflow check error }
++                       if forinline then
++                         exit;
+                        Message(parser_e_arithmetic_operation_overflow);
+                        { Recover }
+                        t:=genintconstnode(0)
+@@ -852,6 +858,12 @@ const
+                    v:=lv-rv;
+                    if v.overflow then
+                      begin
++                       { when simplifying an inlined body or after constant
++                         propagation, the operation was not a constant
++                         expression in the source: leave it to run time, where
++                         it wraps or raises an overflow check error }
++                       if forinline then
++                         exit;
+                        Message(parser_e_arithmetic_operation_overflow);
+                        { Recover }
+                        t:=genintconstnode(0)
+@@ -884,6 +896,12 @@ const
+                    v:=lv*rv;
+                    if v.overflow then
+                      begin
++                       { when simplifying an inlined body or after constant
++                         propagation, the operation was not a constant
++                         expression in the source: leave it to run time, where
++                         it wraps or raises an overflow check error }
++                       if forinline then
++                         exit;
+                        message(parser_e_arithmetic_operation_overflow);
+                        { Recover }
+                        t:=genintconstnode(0)

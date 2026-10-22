@@ -1,0 +1,300 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 22 Oct 2026 12:26:04 +0100
+Subject: [PATCH 72/75] wasm32: short-circuit and/or/not conditions of if,
+ while and repeat as branches
+
+A short-circuit "a and b" / "a or b" was always evaluated as a value:
+"a; if (result i32) b else i32.const 0 end" (twasmaddnode
+second_addboolean), and an if statement or loop condition then tested
+that value again. Engines do not thread the branch through the block's
+result: Cranelift emits a setcc, a zero extension, a test and extra
+jumps for every compound condition.
+
+When the condition of an if, while or repeat node is such a tree
+(andn/orn of non-64-bit booleans with short-circuit evaluation, or a
+boolean not of one), it is now emitted as branches to a label after
+an enclosing block: "a and b" false -> branch if a is false, branch if b
+is false; "a or b" true -> branch if a is true, branch if b is true; the
+two other cases put a block around the first operand's branch; not
+swaps the sense. Leaves keep the existing evaluation (64-bit booleans
+compared with 0). if/else becomes "block block <cond> then br end end
+else end"; the loop condition branches to the label after the loop's
+outer block (the label is passed explicitly, CurrBreakLabel is not yet
+set when a test-at-begin condition is generated).
+
+Test: tests/test/cg/tcondbr1.pp (all combinations of 7 condition shapes
+x 8 operand values, evaluation order via traces, while/repeat with
+and/or/not, break and continue).
+
+GocciaScript VM under wasmtime 49 (callgrind instruction counts): AWFY
+geomean a further 0.961x (every one of 17 workloads lower).
+---
+ compiler/wasm32/nwasmflw.pas | 124 +++++++++++++++++++++++++++++++++++
+ tests/test/cg/tcondbr1.pp    |  88 +++++++++++++++++++++++++
+ 2 files changed, 212 insertions(+)
+ create mode 100644 tests/test/cg/tcondbr1.pp
+
+diff --git a/compiler/wasm32/nwasmflw.pas b/compiler/wasm32/nwasmflw.pas
+index 0eb11e27..bd93d27b 100644
+--- a/compiler/wasm32/nwasmflw.pas
++++ b/compiler/wasm32/nwasmflw.pas
+@@ -44,6 +44,9 @@ interface
+       { twasmwhilerepeatnode }
+ 
+       twasmwhilerepeatnode = class(tcgwhilerepeatnode)
++      private
++        { label after the block around the loop (leaves the loop) }
++        fexitlabel: tasmlabel;
+       public
+         procedure pass_generate_code_condition;
+         procedure pass_generate_code;override;
+@@ -108,12 +111,103 @@ implementation
+       tgobj,paramgr,
+       cgutils,hlcgobj,hlcgcpu;
+ 
++{*****************************************************************************
++                      Conditions as branches
++*****************************************************************************}
++
++    { A short-circuit "and"/"or" of booleans (what twasmaddnode.second_addboolean
++      evaluates with an if/else block that yields the value) or a boolean "not"
++      of such a tree }
++    function is_wasm_branch_cond_tree(n: tnode): boolean;
++      begin
++        result:=false;
++        case n.nodetype of
++          andn,orn:
++            result:=is_boolean(n.resultdef) and
++              not is_64bit(n.resultdef) and
++              (not(cs_full_boolean_eval in current_settings.localswitches) or
++               (anf_short_bool in taddnode(n).addnodeflags));
++          notn:
++            result:=is_boolean(n.resultdef) and
++              not is_64bit(n.resultdef) and
++              is_wasm_branch_cond_tree(tunarynode(n).left);
++          else
++            ;
++        end;
++      end;
++
++
++    { Evaluates the boolean condition n and branches to lbl (a label right
++      after the end of an enclosing block) if its value is jumpiftrue, else
++      falls through. Short-circuit "and"/"or" and "not" become branches
++      instead of an if/else block that yields an i32 that is then tested
++      again: engines (Cranelift) do not thread a branch through such a
++      value, every compound condition cost a setcc, a test and extra jumps. }
++    procedure wasm_gen_cond_branch(n: tnode; jumpiftrue: boolean; lbl: tasmlabel);
++      var
++        lskip: tasmlabel;
++        list: TAsmList;
++      begin
++        list:=current_asmdata.CurrAsmList;
++        if is_wasm_branch_cond_tree(n) then
++          case n.nodetype of
++            notn:
++              begin
++                wasm_gen_cond_branch(tunarynode(n).left,not jumpiftrue,lbl);
++                exit;
++              end;
++            andn,orn:
++              begin
++                { "a and b" is false if a is false, "a or b" is true if a is true }
++                if (n.nodetype=andn)<>jumpiftrue then
++                  begin
++                    wasm_gen_cond_branch(tbinarynode(n).left,jumpiftrue,lbl);
++                    wasm_gen_cond_branch(tbinarynode(n).right,jumpiftrue,lbl);
++                  end
++                else
++                  begin
++                    { "a and b" is true / "a or b" is false: decided by b
++                      once a did not decide it }
++                    current_asmdata.getjumplabel(lskip);
++                    list.concat(taicpu.op_none(a_block));
++                    wasm_gen_cond_branch(tbinarynode(n).left,not jumpiftrue,lskip);
++                    wasm_gen_cond_branch(tbinarynode(n).right,jumpiftrue,lbl);
++                    list.concat(taicpu.op_none(a_end_block));
++                    hlcg.a_label(list,lskip);
++                  end;
++                exit;
++              end;
++            else
++              internalerror(2026102202);
++          end;
++        secondpass(n);
++        thlcgwasm(hlcg).a_load_loc_stack(list,n.resultdef,n.location);
++        if is_64bit(n.resultdef) then
++          begin
++            thlcgwasm(hlcg).a_load_const_stack(list,n.resultdef,0,R_INTREGISTER);
++            list.concat(taicpu.op_none(a_i64_ne));
++            thlcgwasm(hlcg).decstack(list,1);
++          end;
++        if not jumpiftrue then
++          list.concat(taicpu.op_none(a_i32_eqz));
++        list.concat(taicpu.op_sym(a_br_if,lbl));
++        thlcgwasm(hlcg).decstack(list,1);
++      end;
++
++
+ {*****************************************************************************
+                            twasmwhilerepeatnode
+ *****************************************************************************}
+ 
+     procedure twasmwhilerepeatnode.pass_generate_code_condition;
+       begin
++        if is_wasm_branch_cond_tree(left) then
++          begin
++            { leave the loop (the block around it) when the condition is
++              false, or true for "until" }
++            wasm_gen_cond_branch(left,lnf_checknegate in loopflags,fexitlabel);
++            exit;
++          end;
+         secondpass(left);
+         thlcgwasm(hlcg).a_load_loc_stack(current_asmdata.CurrAsmList,left.resultdef,left.location);
+ 
+@@ -147,6 +241,7 @@ implementation
+         current_asmdata.getjumplabel(lloop);
+         current_asmdata.getjumplabel(lcont);
+         current_asmdata.getjumplabel(lbreak);
++        fexitlabel:=lbreak;
+ 
+         oldflowcontrol:=flowcontrol;
+ 
+@@ -207,6 +302,7 @@ implementation
+     procedure twasmifnode.pass_generate_code;
+       var
+         oldflowcontrol: tflowcontrol;
++        lelse,lend: tasmlabel;
+       begin
+         // left  - condition
+         // right - then
+@@ -217,6 +313,34 @@ implementation
+         oldflowcontrol := flowcontrol;
+         include(flowcontrol,fc_inflowcontrol);
+ 
++        if is_wasm_branch_cond_tree(left) then
++          begin
++            { block (block <branch to lelse if false> then (br lend)) lelse:
++              else) lend: }
++            current_asmdata.getjumplabel(lelse);
++            if Assigned(t1) then
++              begin
++                current_asmdata.getjumplabel(lend);
++                current_asmdata.CurrAsmList.concat(taicpu.op_none(a_block));
++              end;
++            current_asmdata.CurrAsmList.concat(taicpu.op_none(a_block));
++            wasm_gen_cond_branch(left,false,lelse);
++            if Assigned(right) then
++              secondpass(right);
++            if Assigned(t1) then
++              current_asmdata.CurrAsmList.concat(taicpu.op_sym(a_br,lend));
++            current_asmdata.CurrAsmList.concat(taicpu.op_none(a_end_block));
++            hlcg.a_label(current_asmdata.CurrAsmList,lelse);
++            if Assigned(t1) then
++              begin
++                secondpass(t1);
++                current_asmdata.CurrAsmList.concat(taicpu.op_none(a_end_block));
++                hlcg.a_label(current_asmdata.CurrAsmList,lend);
++              end;
++            flowcontrol := oldflowcontrol + (flowcontrol - [fc_inflowcontrol]);
++            exit;
++          end;
++
+         //todo: MOVE all current_asm_data actions to Wasm HL CodeGen
+ 
+         secondpass(left); // condition expressions
+diff --git a/tests/test/cg/tcondbr1.pp b/tests/test/cg/tcondbr1.pp
+new file mode 100644
+index 00000000..3bb2c223
+--- /dev/null
++++ b/tests/test/cg/tcondbr1.pp
+@@ -0,0 +1,88 @@
++program tcondbr1;
++{ short-circuit and/or/not conditions of if, while and repeat: results and
++  evaluation order (wasm32 emits them as branches) }
++{$mode objfpc}{$B-}
++var
++  trace: string;
++  fails: integer = 0;
++  q: QWordBool;
++
++function T(c: char): boolean; begin trace := trace + c; result := true; end;
++function F(c: char): boolean; begin trace := trace + c; result := false; end;
++function V(c: char; b: boolean): boolean; begin trace := trace + c; result := b; end;
++
++function IntToStr(i: integer): string; begin str(i, result); end;
++
++procedure chk(const got, exp, what: string);
++begin
++  if got <> exp then begin writeln('FAIL ', what, ': ', got, ' expected ', exp); inc(fails); end;
++end;
++
++function ifres(a, b, c: boolean; k: integer): string;
++begin
++  trace := '';
++  case k of
++    0: if V('a',a) and V('b',b) then trace := trace + '+' else trace := trace + '-';
++    1: if V('a',a) or V('b',b) then trace := trace + '+' else trace := trace + '-';
++    2: if not (V('a',a) and V('b',b)) then trace := trace + '+' else trace := trace + '-';
++    3: if (V('a',a) or V('b',b)) and V('c',c) then trace := trace + '+';
++    4: if V('a',a) and (V('b',b) or not V('c',c)) then trace := trace + '+' else trace := trace + '-';
++    5: if not V('a',a) or not (V('b',b) and V('c',c)) then trace := trace + '+' else trace := trace + '-';
++    6: if (V('a',a) and V('b',b)) or (V('c',c) and not V('d',a)) then trace := trace + '+' else trace := trace + '-';
++  end;
++  result := trace;
++end;
++
++function ref(a, b, c: boolean; k: integer): string;
++{ the same with full evaluation emulated by hand (expected traces) }
++var r: boolean; s: string;
++begin
++  s := '';
++  case k of
++    0: begin s := 'a'; r := a; if r then begin s := s + 'b'; r := b; end; end;
++    1: begin s := 'a'; r := a; if not r then begin s := s + 'b'; r := b; end; end;
++    2: begin s := 'a'; r := a; if r then begin s := s + 'b'; r := b; end; r := not r; end;
++    3: begin s := 'a'; r := a; if not r then begin s := s + 'b'; r := b; end; if r then begin s := s + 'c'; r := c; end;
++         if r then s := s + '+'; exit(s); end;
++    4: begin s := 'a'; r := a; if r then begin s := s + 'b'; r := b; if not r then begin s := s + 'c'; r := not c; end; end; end;
++    5: begin s := 'a'; r := not a; if not r then begin s := s + 'b'; r := b; if r then begin s := s + 'c'; r := c; end; r := not r; end; end;
++    6: begin s := 'a'; r := a; if r then begin s := s + 'b'; r := b; end;
++         if not r then begin s := s + 'c'; r := c; if r then begin s := s + 'd'; r := not a; end; end; end;
++  end;
++  if r then s := s + '+' else s := s + '-';
++  result := s;
++end;
++
++procedure loops;
++var i, j, n: integer;
++begin
++  i := 0; n := 0;
++  while (i < 10) and not (i = 7) do begin inc(i); inc(n); end;
++  chk(IntToStr(i) + ',' + IntToStr(n), '7,7', 'while and not');
++  i := 0;
++  while (i < 3) or (i = 5) do begin inc(i); if i = 3 then i := 5; if i = 6 then break; end;
++  chk(IntToStr(i), '6', 'while or break');
++  i := 0; j := 0;
++  repeat inc(i); if odd(i) then continue; inc(j); until (i >= 9) and (j > 3) or (i > 100);
++  chk(IntToStr(i) + ',' + IntToStr(j), '9,4', 'repeat until');
++  i := 0;
++  while not ((i > 4) or (i < -1)) do inc(i);
++  chk(IntToStr(i), '5', 'while not or');
++  q := true; i := 0;
++  while q and (i < 3) do inc(i);
++  chk(IntToStr(i), '3', 'qwordbool and');
++end;
++
++
++var a, b, c: boolean; k, m: integer;
++begin
++  for k := 0 to 6 do
++    for m := 0 to 7 do
++      begin
++        a := odd(m); b := odd(m shr 1); c := odd(m shr 2);
++        chk(ifres(a, b, c, k), ref(a, b, c, k), 'k=' + IntToStr(k) + ' m=' + IntToStr(m));
++      end;
++  loops;
++  if fails <> 0 then halt(1);
++  writeln('ok');
++end.

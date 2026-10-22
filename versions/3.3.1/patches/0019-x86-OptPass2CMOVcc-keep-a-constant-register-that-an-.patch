@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 00:04:38 +0100
+Subject: [PATCH 19/75] x86 OptPass2CMOVcc: keep a constant register that an
+ earlier CMOV still reads (#41867)
+
+Patch proposed in #41867 (rasberryrabbit): before removing the MOV that
+loads a constant shared by several CMOVs of a 'CMOV Block', check that no
+instruction between it and the current CMOV reads the register. Without
+it the #41867 programs print wrong values at -O3/-O4 (linux and win64; one
+hangs on win64).
+---
+ compiler/x86/aoptx86.pas | 44 ++++++++++++++++++++++++++++++++++------
+ 1 file changed, 38 insertions(+), 6 deletions(-)
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 99bde2e7..cab25823 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -10812,8 +10812,9 @@ unit aoptx86;
+ 
+   function TX86AsmOptimizer.OptPass2CMOVcc(var p: tai): Boolean;
+     var
+-      hp1, hp2: tai;
++      hp1, hp2, hp3: tai;
+       FoundComparison: Boolean;
++      SharedRegStillNeeded: Boolean;
+     begin
+       { Run the pass 1 optimisations as well, since they may have some effect
+         after the CMOV blocks are created in OptPass2Jcc }
+@@ -10887,12 +10888,43 @@ unit aoptx86;
+                       if (taicpu(hp1).opcode = A_MOV) and MatchOpType(taicpu(hp1), top_const, toP_reg)
+                         and (taicpu(hp1).oper[1]^.reg = taicpu(p).oper[0]^.reg) then
+                         begin
+-                          { Found a constant! }
+-                          taicpu(p).loadconst(0, taicpu(hp1).oper[0]^.val);
++                          { Found a constant! Before deleting the instruction that
++                            materialises it (hp1), we must make sure NOTHING ELSE
++                            still reads that register - not just "after p", but
++                            also anywhere BETWEEN hp1 and p. This matters because
++                            hp1 can be a single register shared by several CMOV
++                            instructions produced by the "CMOV Block" optimisation
++                            in OptPass2Jcc (e.g. an if/elseif chain that assigns
++                            the same literal constant in more than one branch):
++                            in that case there can be an earlier sibling CMOV,
++                            positioned between hp1 and p, that still depends on
++                            hp1 having initialised the register. Checking only
++                            "used after p" misses that earlier sibling entirely
++                            and can cause hp1 to be removed while it is still
++                            live, leaving the sibling CMOV to read a garbage/
++                            reused register. }
++                          begin
++                            SharedRegStillNeeded := False;
++                            hp3 := hp1;
++                            while (hp3 <> p) and GetNextInstruction(hp3, hp3) do
++                              begin
++                                if hp3 = p then
++                                  Break;
++                                if RegInInstruction(taicpu(hp1).oper[1]^.reg, hp3) then
++                                  begin
++                                    SharedRegStillNeeded := True;
++                                    Break;
++                                  end;
++                              end;
+ 
+-                          if not RegUsedAfterInstruction(taicpu(hp1).oper[1]^.reg, p, UsedRegs) then
+-                            { The source register is no longer in use }
+-                            RemoveInstruction(hp1);
++                            taicpu(p).loadconst(0, taicpu(hp1).oper[0]^.val);
++
++                            if not SharedRegStillNeeded and
++                               not RegUsedAfterInstruction(taicpu(hp1).oper[1]^.reg, p, UsedRegs) then
++                              { The source register is no longer in use anywhere
++                                between its definition and here, nor after here }
++                              RemoveInstruction(hp1);
++                          end;
+ 
+                           Break;
+                         end;

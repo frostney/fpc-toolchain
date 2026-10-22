@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 17:34:39 +0100
+Subject: [PATCH 02/75] x86: AddLea2Lea must fold the ADD constant when LEA
+ uses a sub-register
+
+OptPass1ADD matches the LEA's base/index with SuperRegistersEqual but
+adjusted the offset only when the registers were identical, so for
+'addq $c,%rax; leal x(%eax),%eax' the ADD was removed and its constant
+lost. SubLea2Lea already compares with SuperRegistersEqual.
+---
+ compiler/x86/aoptx86.pas | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 45eb745a..877b65aa 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -6735,9 +6735,9 @@ unit aoptx86;
+ {$R-}{$Q-}
+                 { Explicitly disable overflow checking for these offset calculation
+                   as those do not matter for the final result }
+-                if ActiveReg=taicpu(hp1).oper[0]^.ref^.base then
++                if SuperRegistersEqual(ActiveReg,taicpu(hp1).oper[0]^.ref^.base) then
+                   inc(taicpu(hp1).oper[0]^.ref^.offset,taicpu(p).oper[0]^.val);
+-                if ActiveReg=taicpu(hp1).oper[0]^.ref^.index then
++                if SuperRegistersEqual(ActiveReg,taicpu(hp1).oper[0]^.ref^.index) then
+                   inc(taicpu(hp1).oper[0]^.ref^.offset,taicpu(p).oper[0]^.val*max(taicpu(hp1).oper[0]^.ref^.scalefactor,1));
+ {$pop}
+ {$ifdef x86_64}

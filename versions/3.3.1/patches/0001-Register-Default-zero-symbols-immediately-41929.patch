@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 17:34:39 +0100
+Subject: [PATCH 01/75] Register Default() zero symbols immediately (#41929)
+
+handle_default creates the $_zero_$ staticvarsym in the current module's
+localsymtable but leaves it unregistered (SymId=-2) until the unit
+finishes. Inlining a routine that uses Default(T) into another unit of
+the same unit cycle imports the symbol through tmodule.addimportedsym,
+which indexes symlist[-2] and raises EListError.
+---
+ compiler/ninl.pas | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/compiler/ninl.pas b/compiler/ninl.pas
+index 85c22f2f..6730dad7 100644
+--- a/compiler/ninl.pas
++++ b/compiler/ninl.pas
+@@ -534,6 +534,11 @@ implementation
+                   tabstractvarsym(srsym).varstate:=vs_initialised;
+ 
+                   srsymtable.insertsym(srsym);
++                  { register it now: when this unit is part of a unit cycle,
++                    another unit can inline a routine whose body loads this
++                    symbol before this unit registers its symbols at the end,
++                    and tmodule.addimportedsym needs a valid SymId (#41929) }
++                  tstoredsym(srsym).register_sym;
+                   cnodeutils.insertbssdata(tstaticvarsym(srsym));
+                 end;
+               result:=cloadnode.create(srsym,srsymtable);

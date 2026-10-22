@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 22 Oct 2026 03:11:49 +0100
+Subject: [PATCH 60/75] x86 OptPass1Cmp: no Cmp2Nop once a jump that stays in
+ the code reads the flags
+
+---
+ compiler/x86/aoptx86.pas | 16 ++++++++++++----
+ tests/tbs/tb9056.pp      | 32 ++++++++++++++++++++++++++++++++
+ 2 files changed, 44 insertions(+), 4 deletions(-)
+ create mode 100644 tests/tbs/tb9056.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index c416f4e0..7c1df475 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -9006,7 +9006,7 @@ unit aoptx86;
+        var
+          v: TCGInt;
+          true_hp1, hp1, hp2, p_dist, p_jump, hp1_dist, p_label, hp1_label: tai;
+-         FirstMatch, TempBool: Boolean;
++         FirstMatch, TempBool, JumpKept: Boolean;
+          NewReg: TRegister;
+          JumpLabel, JumpLabel_dist, JumpLabel_far: TAsmLabel;
+        begin
+@@ -9017,6 +9017,9 @@ unit aoptx86;
+            Exit;
+ 
+          true_hp1 := hp1;
++         { Set once p_jump moves past a conditional jump that stays in the
++           code, since that jump still reads the flags set by p }
++         JumpKept := False;
+ 
+          { Search for:
+              cmp   ###,###
+@@ -9063,10 +9066,13 @@ unit aoptx86;
+                      TransferUsedRegs(TmpUsedRegs);
+                      UpdateUsedRegs(TmpUsedRegs, tai(p.Next));
+ 
+-                     if not Assigned(p_jump) or
++                     if not JumpKept and
+                        (
+-                         not MatchInstruction(p_jump, A_Jcc, A_SETcc, A_CMOVcc, []) and
+-                         not RegUsedAfterInstruction(NR_DEFAULTFLAGS, p_jump, TmpUsedRegs)
++                         not Assigned(p_jump) or
++                         (
++                           not MatchInstruction(p_jump, A_Jcc, A_SETcc, A_CMOVcc, []) and
++                           not RegUsedAfterInstruction(NR_DEFAULTFLAGS, p_jump, TmpUsedRegs)
++                         )
+                        ) then
+                        begin
+                          { No more conditional jumps; conditional statement is no longer required }
+@@ -9204,10 +9210,12 @@ unit aoptx86;
+                  { hp2 is the next instruction, so save time and just set p_jump
+                    to it instead of calling GetNextInstruction below }
+                  p_jump := hp2;
++                 JumpKept := True;
+                  Continue;
+                end;
+ 
+              GetNextInstruction(p_jump, p_jump);
++             JumpKept := True;
+            end;
+ 
+          if (
+diff --git a/tests/tbs/tb9056.pp b/tests/tbs/tb9056.pp
+new file mode 100644
+index 00000000..fb40d7c0
+--- /dev/null
++++ b/tests/tbs/tb9056.pp
+@@ -0,0 +1,32 @@
++{ %OPT=-O1 }
++{ x86 OptPass1Cmp (Cmp2Nop): after the jumps of a nested if were rewritten,
++  the CMP was removed although a conditional jump reading its flags was
++  still in place }
++program tb9056;
++
++{$mode objfpc}
++
++var
++  b: boolean = false;
++  i: longint = 0;
++  x: longint = 6;
++
++procedure q;
++begin
++  if x=5 then
++    i:=1;
++  if not b then
++    begin
++      if b then
++        exit;
++    end
++  else
++    i:=100;
++end;
++
++begin
++  q;
++  if i<>0 then
++    halt(1);
++  writeln('ok');
++end.

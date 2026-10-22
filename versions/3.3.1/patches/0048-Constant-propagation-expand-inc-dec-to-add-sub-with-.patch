@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 03:20:38 +0100
+Subject: [PATCH 48/75] Constant propagation: expand inc/dec to add/sub with
+ the inc/dec's own local switches
+
+The add/sub tree was built with the switches of the end of the routine,
+so a {$R-} Inc(V, c) of a propagated constant became a range-checked
+conversion and -O3 -Cr reported a false 'range check error while
+evaluating constants'.  Also in 3.2.x.  Found by the pgen3 generator
+(seeds 30055, 30067, 30179, 30213, 30267, 30282, 30020, 30058).
+---
+ compiler/optconstprop.pas | 12 ++++++++++++
+ tests/tbs/tb9039.pp       | 33 +++++++++++++++++++++++++++++++++
+ 2 files changed, 45 insertions(+)
+ create mode 100644 tests/tbs/tb9039.pp
+
+diff --git a/compiler/optconstprop.pas b/compiler/optconstprop.pas
+index f787ceba..37e105e5 100644
+--- a/compiler/optconstprop.pas
++++ b/compiler/optconstprop.pas
+@@ -81,6 +81,8 @@ unit optconstprop;
+         old: pnode;
+         changed, tree_modified2, tree_modified3: boolean;
+         written, tree_modified4, tree_modified5: Boolean;
++        oldlocalswitches: tlocalswitches;
++        oldfilepos: tfileposinfo;
+       begin
+         result:=true;
+ 
+@@ -237,7 +239,17 @@ unit optconstprop;
+                     { if the node just being searched is inc'ed/dec'ed then replace the inc/dec
+                       by add/sub and force a second replacement pass }
+                     oldnode:=n;
++                    { build the add/sub tree with the switches and position
++                      of the inc/dec statement, not those of the end of the
++                      routine: an inc/dec compiled with range/overflow checks off must stay unchecked
++                      (and a checked one checked) }
++                    oldlocalswitches:=current_settings.localswitches;
++                    oldfilepos:=current_filepos;
++                    current_settings.localswitches:=n.localswitches;
++                    current_filepos:=n.fileinfo;
+                     n:=tinlinenode(n).getaddsub_for_incdec;
++                    current_settings.localswitches:=oldlocalswitches;
++                    current_filepos:=oldfilepos;
+                     Include(n.flags, nf_internal);
+                     oldnode.free;
+                     oldnode := nil;
+diff --git a/tests/tbs/tb9039.pp b/tests/tbs/tb9039.pp
+new file mode 100644
+index 00000000..0136490e
+--- /dev/null
++++ b/tests/tbs/tb9039.pp
+@@ -0,0 +1,33 @@
++{ %OPT=-O3 -Cr -OoCONSTPROP }
++{ constant propagation into an inc/dec that is compiled without range
++  checks must not range check the propagated result: the inc wraps at run
++  time, so this is not a compile-time range error }
++program tb9039;
++
++{$mode objfpc}
++
++function f: longint;
++var
++  v: smallint;
++begin
++  v:=100;
++  {$push}{$r-}inc(v,smallint(32767)){$pop};
++  result:=v;
++end;
++
++function g: longint;
++var
++  v: byte;
++begin
++  v:=250;
++  {$push}{$r-}inc(v,10);{$pop}
++  result:=v;
++end;
++
++begin
++  if f<>-32669 then
++    halt(1);
++  if g<>4 then
++    halt(2);
++  writeln('ok');
++end.

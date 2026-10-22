@@ -1,0 +1,235 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 22 Oct 2026 09:43:56 +0100
+Subject: [PATCH 65/75] wasm32: register variables (cs_opt_regvar at -O2 and
+ above)
+
+wasm32 had no register variables: every local, parameter and function
+result lived in the linear-memory shadow stack. Enable cs_opt_regvar
+(supported switch, part of -O2) and fix what that exposes:
+
+- hlcgobj gen_load_para_value / gen_load_cgpara_loc (thlcgobj, used by
+  the high-level code generator targets; thlcg2ll targets such as x86
+  have their own overrides): handle parameters whose initial location
+  is a register variable (LOC_CREGISTER/LOC_CFPUREGISTER) by loading the
+  incoming parameter into a register and making it the variable's
+  location, as thlcg2ll does.
+- Narrow unsigned parameters (wasm32 only): callers pass 8/16-bit values
+  sign-extended (the parameter location's def is the signed type). A
+  memory copy normalised them through its narrow store and load, a
+  register copy does not, so e.g. a Char/Byte/Word parameter >= $80
+  compared wrong (RTL Pos() with characters >= $80). Normalise with
+  a_load_reg_reg from the parameter location's def to the variable's
+  def.
+- Loop back-edge liveness (nwasmflw twasmwhilerepeatnode): the wasm
+  register allocator uses linear live ranges, so the wasm local of a
+  register variable last used before the end of a loop body could be
+  reused later in the body while the next iteration still needed it
+  (miscompiled for loop). sync_regvars around the loop keeps the
+  variables used in the loop live from before the loop to its end; the
+  wasm rgcpu drops the ra_sync markers afterwards.
+- symsym tabstractnormalvarsym.setregable (wasm32 only): no register
+  variables for externref/funcref values (their own kind of wasm local),
+  and none for non-ordinal, non-float values larger than 4 bytes (method
+  pointers, 8-byte records): wasm32 has no register pairs (reghi is
+  NR_NO on cpuhighleveltarget) and such values are accessed as two
+  32-bit halves, which ended in "local.get INVALID" / a compiler AV.
+- Typecasts on the assignment side (htypechk valid_for_assign, wasm32
+  as for llvm): the high level code generator copies a register variable
+  into a new register for a value typecast (ncgcnv second_int_to_int,
+  cpuhighleveltarget), so an assignment such as "byte(e) := 3" to a
+  register variable was lost (FPC testsuite webtbs/tw4809: no range
+  check error at -O2). Such variables are now not regable, as on llvm.
+
+Procedures that use exceptions keep their variables in memory (generic
+rule); see the next commit.
+---
+ compiler/hlcgobj.pas         | 44 ++++++++++++++++++++++++++++++++++++
+ compiler/htypechk.pas        |  9 +++++---
+ compiler/symsym.pas          | 16 +++++++++++++
+ compiler/wasm32/cpuinfo.pas  |  4 ++--
+ compiler/wasm32/nwasmflw.pas |  6 +++++
+ compiler/wasm32/rgcpu.pas    | 10 ++++++++
+ 6 files changed, 84 insertions(+), 5 deletions(-)
+
+diff --git a/compiler/hlcgobj.pas b/compiler/hlcgobj.pas
+index e4dc80d3..9e77513e 100644
+--- a/compiler/hlcgobj.pas
++++ b/compiler/hlcgobj.pas
+@@ -5480,6 +5480,26 @@ implementation
+           { don't use currpara.vardef, as this will be wrong in case of
+             call-by-reference parameters (it won't contain the pointer) }
+           gen_load_cgpara_loc(list,currpara.paraloc[calleeside].def,currpara.paraloc[calleeside],currpara.initialloc,paramanager.param_use_paraloc(currpara.paraloc[calleeside]));
++          { a register variable parameter: gen_load_cgpara_loc allocated its
++            register, make it the variable's location (as thlcg2ll does) }
++          if currpara.initialloc.loc in [LOC_CREGISTER,LOC_CFPUREGISTER] then
++            begin
++{$ifdef wasm32}
++              { callers pass unsigned 8/16-bit values sign-extended (the
++                parameter location's def is the signed type), normalise
++                to the variable's type (a memory copy does this through its
++                narrow store and load) }
++              if (currpara.initialloc.loc=LOC_CREGISTER) and
++                 (currpara.paraloc[calleeside].def<>currpara.vardef) and
++                 is_ordinal(currpara.vardef) and
++                 (currpara.paraloc[calleeside].def.size=currpara.vardef.size) and
++                 (currpara.vardef.size<4) then
++                a_load_reg_reg(list,currpara.paraloc[calleeside].def,currpara.vardef,
++                  currpara.initialloc.register,currpara.initialloc.register);
++{$endif wasm32}
++              gen_alloc_regvar(list,currpara,false);
++              varsym_set_localloc(list,currpara);
++            end;
+         end;
+ 
+       { generate copies of call by value parameters, must be done before
+@@ -5777,6 +5797,30 @@ implementation
+                 end;
+               end;
+           end;
++        LOC_CREGISTER,
++        LOC_CFPUREGISTER:
++          begin
++            { a parameter that is a register variable (cs_opt_regvar on
++              high level code generator targets such as wasm32) }
++            case para.location^.loc of
++              LOC_REFERENCE,LOC_CREFERENCE:
++                begin
++                  reference_reset_base(href,voidstackpointertype,para.location^.reference.index,para.location^.reference.offset,ctempposinvalid,para.alignment,[]);
++                  if destloc.loc=LOC_CFPUREGISTER then
++                    begin
++                      destloc.register:=getfpuregister(list,vardef);
++                      a_loadfpu_ref_reg(list,para.def,vardef,href,destloc.register);
++                    end
++                  else
++                    begin
++                      destloc.register:=getregisterfordef(list,vardef);
++                      a_load_ref_reg(list,para.def,vardef,href,destloc.register);
++                    end;
++                end;
++              else
++                internalerror(2026101605);
++            end;
++          end;
+         { TODO other possible locations }
+         else
+           internalerror(2011010308);
+diff --git a/compiler/htypechk.pas b/compiler/htypechk.pas
+index 48d98c1f..612eee04 100644
+--- a/compiler/htypechk.pas
++++ b/compiler/htypechk.pas
+@@ -1593,12 +1593,15 @@ implementation
+                           if report_errors then
+                             CGMessagePos2(hp.fileinfo,type_e_typecast_wrong_size_for_assignment,tostr(fromdef.size),tostr(todef.size));
+                       end
+-{$ifdef llvm}
++{$if defined(llvm) or defined(wasm32)}
+                     { we can never typecast a non-memory value on the assignment
+-                      side in llvm }
++                      side in llvm; on wasm32 the high level code generator
++                      copies a register variable to a new register for a
++                      typecast (ncgcnv, cpuhighleveltarget), so an assignment
++                      through it would be lost }
+                     else
+                       make_not_regable(hp,[ra_addr_regable])
+-{$endif llvm}
++{$endif llvm or wasm32}
+                   end;
+ 
+                  { don't allow assignments to typeconvs that need special code }
+diff --git a/compiler/symsym.pas b/compiler/symsym.pas
+index d6d504c6..61e89d9e 100644
+--- a/compiler/symsym.pas
++++ b/compiler/symsym.pas
+@@ -563,6 +563,9 @@ implementation
+        procinfo,
+        { ppu }
+        entfile,ppu
++{$ifdef wasm32}
++       ,symcpu
++{$endif wasm32}
+        ;
+ 
+ {****************************************************************************
+@@ -2046,6 +2049,19 @@ implementation
+       begin
+         if vo_volatile in varoptions then
+           exit;
++{$ifdef wasm32}
++        { externref/funcref values live in their own kind of wasm local }
++        if is_wasm_reference_type(vardef) then
++          exit;
++        { wasm32 has no register pairs (cpuhighleveltarget): 8-byte method
++          pointers or records would get a single i64 register but are
++          accessed as two 32-bit halves }
++        if not(vardef.typ in [orddef,floatdef]) and
++           not is_open_array(vardef) and
++           not is_array_of_const(vardef) and
++           (vardef.size>4) then
++          exit;
++{$endif wasm32}
+          { can we load the value into a register ? }
+         if not assigned(owner) or
+            (owner.symtabletype in [localsymtable, parasymtable]) or
+diff --git a/compiler/wasm32/cpuinfo.pas b/compiler/wasm32/cpuinfo.pas
+index 7688a7de..95753ab1 100644
+--- a/compiler/wasm32/cpuinfo.pas
++++ b/compiler/wasm32/cpuinfo.pas
+@@ -93,10 +93,10 @@ const
+                                  genericlevel3optimizerswitches-
+                                  { no need to write info about those }
+                                  [cs_opt_level1,cs_opt_level2,cs_opt_level3]+
+-                                 [cs_opt_loopunroll,cs_opt_nodecse];
++                                 [cs_opt_regvar,cs_opt_loopunroll,cs_opt_nodecse];
+ 
+    level1optimizerswitches = genericlevel1optimizerswitches;
+-   level2optimizerswitches = genericlevel2optimizerswitches + level1optimizerswitches {+ [cs_opt_nodecse]};
++   level2optimizerswitches = genericlevel2optimizerswitches + level1optimizerswitches + [cs_opt_regvar] {+ [cs_opt_nodecse]};
+    level3optimizerswitches = genericlevel3optimizerswitches + level2optimizerswitches;
+    level4optimizerswitches = genericlevel4optimizerswitches + level3optimizerswitches + [];
+ 
+diff --git a/compiler/wasm32/nwasmflw.pas b/compiler/wasm32/nwasmflw.pas
+index 5932f8d5..b749b1e1 100644
+--- a/compiler/wasm32/nwasmflw.pas
++++ b/compiler/wasm32/nwasmflw.pas
+@@ -147,6 +147,10 @@ implementation
+         include(flowcontrol,fc_inflowcontrol);
+         exclude(flowcontrol,fc_unwind_loop);
+ 
++        { register variables used in the loop must stay allocated over the
++          back edge: keep them live from before the loop until its end }
++        sync_regvars(true);
++
+         current_asmdata.CurrAsmList.concat(taicpu.op_none(a_block));
+         current_asmdata.CurrAsmList.concat(taicpu.op_none(a_loop));
+ 
+@@ -174,6 +178,8 @@ implementation
+           end;
+         current_asmdata.CurrAsmList.concat(taicpu.op_const(a_br,0) ); // jump back to loop
+ 
++        sync_regvars(false);
++
+         current_asmdata.CurrAsmList.concat(taicpu.op_none(a_end_loop));
+         current_asmdata.CurrAsmList.concat(taicpu.op_none(a_end_block));
+         hlcg.a_label(current_asmdata.CurrAsmList,lbreak);
+diff --git a/compiler/wasm32/rgcpu.pas b/compiler/wasm32/rgcpu.pas
+index 61de49ba..df005b79 100644
+--- a/compiler/wasm32/rgcpu.pas
++++ b/compiler/wasm32/rgcpu.pas
+@@ -386,6 +386,16 @@ implementation
+               ait_regalloc:
+                   begin
+                     ra := tai_regalloc(p);
++                    { ra_sync (register variables around loops) only served
++                      to extend the live range, which is done }
++                    if not (ra.ratype in [ra_alloc,ra_dealloc]) then
++                      begin
++                        q:=Tai(p.previous);
++                        list.remove(p);
++                        p.free;
++                        p:=Tai(q.next);
++                        continue;
++                      end;
+                     case getregtype(ra.reg) of
+                       R_INTREGISTER:
+                         case getsubreg(ra.reg) of

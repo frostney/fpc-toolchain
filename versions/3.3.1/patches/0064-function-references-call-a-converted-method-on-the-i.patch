@@ -1,0 +1,614 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 22 Oct 2026 09:43:22 +0100
+Subject: [PATCH 64/75] function references: call a converted method on the
+ instance taken at the conversion (#42006)
+
+Converting a method of an object expression to a function reference
+("P := O.Method" in mode delphi) moved the expression O into the Invoke
+method of the capturer without capturing anything it uses
+(capturer_add_procvar_or_proc took tloadnode(n).left into the call node
+and cleared it before the capture scans ran over n, and the scan only
+looked at symbols of nested routines). The Invoke method then read a
+local variable or parameter of the converting routine from its own
+frame, a field of Self through the capturer, or a global variable that
+the converting routine kept in a register: the method ran with a
+garbage Self or the capturer as Self (#42006: runtime error 216 on
+x86_64, wrong results on every target), and wasm32 with register
+variables stopped with internal error 2021092006 (tests tfuncref9 and
+tfuncref45 at -O2, whose methods do not use Self).
+
+- A method of a class, interface or class reference expression other
+  than Self: evaluate the expression once, at the conversion, and keep
+  it in a field of the capturer, as is already done for procvars; the
+  Invoke method calls the method on that field (Delphi semantics: a
+  later change of the variable does not change the target).
+- Any other instance (a record, an object, Self): the expression stays
+  in the Invoke method, so capture the local variables and parameters
+  it uses (as an anonymous function would; a var parameter cannot be
+  captured and is now reported instead of being read from a wrong
+  frame) and keep the global variables it uses in memory.
+- Conversions of a procvar or of a method of an instance get their own
+  Invoke method and field per conversion site: before, two conversions
+  of the same procvar or method in one routine shared the first one's
+  field or instance ("P := V; V := W; Q := V" made Q call the old V).
+
+Tests: tfuncref57 (parameter, var parameter, local, field of another
+class, function result, typecast, class methods, interface, record,
+nested routine, global; value taken at the conversion), tfuncref58
+(procvar converted twice), tfuncref59 (interface lifetime, anonymous
+function, generic routine, record field of Self, two instances in one
+routine).
+---
+ compiler/procdefutil.pas | 144 +++++++++++++++++++++++++++--
+ tests/test/tfuncref57.pp | 194 +++++++++++++++++++++++++++++++++++++++
+ tests/test/tfuncref58.pp |  25 +++++
+ tests/test/tfuncref59.pp | 125 +++++++++++++++++++++++++
+ 4 files changed, 482 insertions(+), 6 deletions(-)
+ create mode 100644 tests/test/tfuncref57.pp
+ create mode 100644 tests/test/tfuncref58.pp
+ create mode 100644 tests/test/tfuncref59.pp
+
+diff --git a/compiler/procdefutil.pas b/compiler/procdefutil.pas
+index 542820b6..584bdd47 100644
+--- a/compiler/procdefutil.pas
++++ b/compiler/procdefutil.pas
+@@ -42,7 +42,7 @@ function adjust_funcref(var def:tdef;sym,dummysym:tsym):boolean;
+ 
+ function get_or_create_capturer(pd:tprocdef):tsym;
+ function capturer_add_anonymous_proc(owner:tprocinfo;pd:tprocdef;out capturer:tsym):tobjectdef;
+-function capturer_add_procvar_or_proc(owner:tprocinfo;n:tnode;out capturer:tsym;out capturen:tnode):tobjectdef;
++function capturer_add_procvar_or_proc(owner:tprocinfo;var n:tnode;out capturer:tsym;out capturen:tnode):tobjectdef;
+ procedure initialize_capturer(ctx:tprocinfo;var stmt:tstatementnode);
+ procedure postprocess_capturer(ctx:tprocinfo);
+ procedure convert_captured_syms(pd:tprocdef;tree:tnode);
+@@ -800,7 +800,66 @@ implementation
+     end;
+ 
+ 
+-  function capturer_add_procvar_or_proc(owner:tprocinfo;n:tnode;out capturer:tsym;out capturen:tnode):tobjectdef;
++  type
++    tmethodpointerinfo=record
++      pd:tprocdef;
++      fileinfo:tfileposinfo;
++    end;
++    pmethodpointerinfo=^tmethodpointerinfo;
++
++
++  function capture_methodpointer_syms(var n:tnode;arg:pointer):foreachnoderesult;
++    var
++      info : pmethodpointerinfo absolute arg;
++      sym : tsym;
++    begin
++      result:=fen_true;
++      if n.nodetype<>loadn then
++        exit;
++      sym:=tsym(tloadnode(n).symtableentry);
++      case sym.typ of
++        staticvarsym:
++          { now also used by the Invoke method: keep it in memory }
++          make_not_regable(n,[ra_different_scope]);
++        localvarsym,
++        paravarsym:
++          if (sym.owner.symtabletype in [localsymtable,parasymtable]) and
++              (sym.owner.symtablelevel>=normal_function_level) then
++            begin
++              if not can_be_captured(sym,nil) then
++                MessagePos1(n.fileinfo,sym_e_symbol_no_capture,sym.realname)
++              else
++                info^.pd.add_captured_sym(sym,tloadnode(n).resultdef,info^.fileinfo);
++            end;
++        else
++          ;
++      end;
++    end;
++
++
++  { n is a method of an instance or class expression other than Self }
++  function is_instance_methodpointer(n:tnode):boolean;
++    var
++      mp : tnode;
++    begin
++      result:=false;
++      if (n.nodetype<>loadn) or
++          (tloadnode(n).symtableentry.typ<>procsym) then
++        exit;
++      mp:=tloadnode(n).left;
++      if not assigned(mp) then
++        exit;
++      if (mp.nodetype=loadn) and
++          (tloadnode(mp).symtableentry.typ=paravarsym) and
++          (vo_is_self in tparavarsym(tloadnode(mp).symtableentry).varoptions) then
++        exit;
++      result:=is_class(mp.resultdef) or
++        is_interface(mp.resultdef) or
++        (mp.resultdef.typ=classrefdef);
++    end;
++
++
++  function capturer_add_procvar_or_proc(owner:tprocinfo;var n:tnode;out capturer:tsym;out capturen:tnode):tobjectdef;
+ 
+     function create_paras(pd:tprocdef):tcallparanode;
+       var
+@@ -886,10 +945,18 @@ implementation
+       n1 : tnode;
+       fieldsym : tfieldvarsym;
+       selfinfo : tselfinfo;
++      mp,
++      capturedmp : tnode;
++      mpinfo : tmethodpointerinfo;
++      storesvalue,
++      persite : boolean;
++      suffix : tsymstr;
+     begin
+       if not (n.resultdef.typ in [procdef,procvardef]) then
+         internalerror(2022022101);
+ 
++      capturedmp:=nil;
++
+       capturer:=nil;
+       capturen:=nil;
+       pinested:=nil;
+@@ -902,7 +969,23 @@ implementation
+       if not foreachnodestatic(pm_preprocess,n,@find_outermost_loaded_sym,@sym) then
+         internalerror(2022022102);
+ 
+-      result:=funcref_intf_for_proc(tabstractprocdef(n.resultdef),fileinfo_to_suffix(sym.fileinfo));
++      { a conversion of a procvar or of a method of an instance needs its own
++        Invoke method (and field): two conversions of the same procvar or
++        method in a routine can have different values or instances }
++      persite:=not ((sym.typ=procsym) and (sym.owner.symtabletype=localsymtable)) and
++        (
++          (n.resultdef.typ=procvardef) or
++          (
++            (n.nodetype=loadn) and
++            assigned(tloadnode(n).left)
++          )
++        );
++      storesvalue:=persite and is_instance_methodpointer(n);
++      if persite then
++        suffix:=fileinfo_to_suffix(n.fileinfo)
++      else
++        suffix:=fileinfo_to_suffix(sym.fileinfo);
++      result:=funcref_intf_for_proc(tabstractprocdef(n.resultdef),suffix);
+ 
+       if (sym.typ=procsym) and (sym.owner.symtabletype=localsymtable) then
+         begin
+@@ -973,7 +1056,7 @@ implementation
+         end;
+       implintf:=capturedef.register_implemented_interface(result,true);
+ 
+-      invokename:=method_name_funcref_invoke_decl+'__FPCINTERNAL__'+fileinfo_to_suffix(sym.fileinfo);
++      invokename:=method_name_funcref_invoke_decl+'__FPCINTERNAL__'+suffix;
+ 
+       ps:=cprocsym.create(invokename);
+       pd:=tprocdef(tabstractprocdef(n.resultdef).getcopyas(procdef,pc_normal_no_hidden,'',false));
+@@ -1092,8 +1175,49 @@ implementation
+             internalerror(2022032401);
+           if tloadnode(n).symtableentry.typ<>procsym then
+             internalerror(2022032402);
+-          n1:=ccallnode.create(create_paras(pd),tprocsym(tloadnode(n).symtableentry),tloadnode(n).symtable,tloadnode(n).left,[],nil);
+-          tloadnode(n).left:=nil;
++          { the instance or class the method is called on (nil for a global
++            procedure or a class method called through its type) }
++          mp:=tloadnode(n).left;
++          if storesvalue then
++            begin
++              tloadnode(n).left:=nil;
++              { the instance (or class) is an expression of the converting
++                routine (a local variable, a parameter, a field of another
++                object, a function result, ...): evaluate it once, at the
++                conversion, and keep it in a field of the capturer (Delphi
++                compatible, as for a procvar above); the Invoke method calls
++                the method on that field. Moving the expression itself into
++                the Invoke method read the routine's locals from the wrong
++                frame or register there (#42006). }
++              fieldsym:=cfieldvarsym.create('$'+fileinfo_to_suffix(n.fileinfo),vs_value,mp.resultdef,[]);
++              fieldsym.fileinfo:=n.fileinfo;
++              capturedef.symtable.insertsym(fieldsym);
++              tabstractrecordsymtable(capturedef.symtable).addfield(fieldsym,vis_public);
++
++              capturen:=csubscriptnode.create(fieldsym,cloadnode.create(capturer,capturer.owner));
++
++              selfsym:=tsym(pd.parast.find('self'));
++              if not assigned(selfsym) then
++                internalerror(2026102201);
++              n1:=ccallnode.create(create_paras(pd),tprocsym(tloadnode(n).symtableentry),tloadnode(n).symtable,
++                    csubscriptnode.create(fieldsym,cloadnode.create(selfsym,selfsym.owner)),[],nil);
++              capturedmp:=mp;
++            end
++          else
++            begin
++              tloadnode(n).left:=nil;
++              if assigned(mp) then
++                begin
++                  { the expression moves into the Invoke method: capture the
++                    locals and parameters it uses (a record, an object, an
++                    interface or Self) and keep the global variables it uses
++                    in memory (#42006) }
++                  mpinfo.pd:=pd;
++                  mpinfo.fileinfo:=n.fileinfo;
++                  foreachnodestatic(pm_postprocess,mp,@capture_methodpointer_syms,@mpinfo);
++                end;
++              n1:=ccallnode.create(create_paras(pd),tprocsym(tloadnode(n).symtableentry),tloadnode(n).symtable,mp,[],nil);
++            end;
+         end;
+       if assigned(pd.returndef) and not is_void(pd.returndef) then
+         begin
+@@ -1159,6 +1283,14 @@ implementation
+       implintf.AddMapping(upcase(result.objrealname^+'.')+method_name_funcref_invoke_find,upcase(invokename));
+ 
+       capture_captured_syms(pd,owner,capturedef,oldpd);
++
++      if assigned(capturedmp) then
++        begin
++          { the caller stores the instance in the field (capturen) instead of
++            a procvar }
++          n.free;
++          n:=capturedmp;
++        end;
+     end;
+ 
+ 
+diff --git a/tests/test/tfuncref57.pp b/tests/test/tfuncref57.pp
+new file mode 100644
+index 00000000..42408ff3
+--- /dev/null
++++ b/tests/test/tfuncref57.pp
+@@ -0,0 +1,194 @@
++program tfuncref57;
++{ #42006 / F57: a method assigned to a function reference must run with the
++  Self of the object expression, evaluated at the assignment (Delphi) }
++{$mode delphi}
++{$modeswitch functionreferences}
++type
++  TProc = reference to procedure;
++  TLocal = class
++    v: Integer;
++    procedure Go;
++    class procedure CGo;
++  end;
++  TOwner = class
++    FObj: TLocal;
++    procedure Run;
++    procedure RunSelf;
++    procedure Go2;
++  end;
++  IGo = interface
++    procedure Go;
++  end;
++  TIntf = class(TInterfacedObject, IGo)
++    v: Integer;
++    procedure Go;
++  end;
++  TRec = record
++    v: Integer;
++    procedure Go;
++  end;
++var
++  Acc: Integer;
++  G: TLocal;
++  Fails: Integer;
++
++procedure TLocal.Go; begin Inc(Acc, v); end;
++class procedure TLocal.CGo; begin if ClassName = 'TLocal' then Inc(Acc, 7) else Inc(Acc, 1000000); end;
++procedure TIntf.Go; begin Inc(Acc, v); end;
++procedure TRec.Go; begin Inc(Acc, v); end;
++procedure TOwner.Go2; begin if ClassName = 'TOwner' then Inc(Acc, 3); end;
++
++procedure Check(const what: string; expected: Integer);
++begin
++  if Acc <> expected then
++    begin
++      writeln('FAIL ', what, ': ', Acc, ' expected ', expected);
++      Inc(Fails);
++    end;
++  Acc := 0;
++end;
++
++procedure TOwner.Run;
++var P: TProc;
++begin
++  P := FObj.Go;          { field of an unrelated class }
++  P();
++  Check('field', 11);
++end;
++
++procedure TOwner.RunSelf;
++var P: TProc;
++begin
++  P := Go2;              { implicit Self }
++  P();
++  P := Self.Go2;         { explicit Self }
++  P();
++  Check('self', 6);
++end;
++
++procedure FromParameter(O: TLocal);
++var P: TProc;
++begin
++  P := O.Go;
++  P();
++  Check('param', 12);
++end;
++
++procedure FromVarParameter(var O: TLocal);
++var P: TProc;
++begin
++  P := O.Go;
++  P();
++  Check('var param', 12);
++end;
++
++function MakeLocal(n: Integer): TProc;
++var L: TLocal;
++begin
++  L := TLocal.Create;
++  L.v := n;
++  Result := L.Go;
++  L := nil;              { Self was taken at the assignment }
++end;
++
++function GetObj: TLocal; begin Result := G; end;
++
++procedure FromCallAndCast;
++var P: TProc; o: TObject;
++begin
++  P := GetObj.Go;
++  P();
++  o := G;
++  P := TLocal(o).Go;
++  P();
++  Check('call/cast', 26);
++end;
++
++procedure FromLocalChanged;
++var L: TLocal; P: TProc; A, B: TLocal;
++begin
++  A := TLocal.Create; A.v := 1;
++  B := TLocal.Create; B.v := 2;
++  L := A;
++  P := L.Go;
++  L := B;
++  P();
++  Check('value at assignment', 1);
++  A.Free; B.Free;
++end;
++
++procedure FromClassMethods;
++var P: TProc; L: TLocal;
++begin
++  P := TLocal.CGo;
++  P();
++  L := G;
++  P := L.CGo;
++  P();
++  Check('class methods', 14);
++end;
++
++procedure FromInterface;
++var I: IGo; P: TProc; O: TIntf;
++begin
++  O := TIntf.Create; O.v := 21;
++  I := O;
++  P := I.Go;
++  P();
++  Check('interface', 21);
++end;
++
++procedure FromRecord;
++var R: TRec; P: TProc;
++begin
++  R.v := 31;
++  P := R.Go;
++  P();
++  Check('record', 31);
++end;
++
++procedure Nested;
++var L: TLocal;
++  procedure Inner;
++  var P: TProc;
++  begin
++    P := L.Go;
++    P();
++  end;
++begin
++  L := G;
++  Inner;
++  Check('nested', 13);
++end;
++
++procedure CallIt(const P: TProc); begin P(); end;
++
++var
++  Owner: TOwner;
++  P: TProc;
++  Obj: TLocal;
++begin
++  G := TLocal.Create; G.v := 13;
++  Owner := TOwner.Create;
++  Owner.FObj := TLocal.Create; Owner.FObj.v := 11;
++  Owner.Run;
++  Owner.RunSelf;
++
++  Obj := TLocal.Create; Obj.v := 12;
++  FromParameter(Obj);
++  FromVarParameter(Obj);
++  P := MakeLocal(100);
++  CallIt(P);
++  Check('local, later', 100);
++  FromCallAndCast;
++  FromLocalChanged;
++  FromClassMethods;
++  FromInterface;
++  FromRecord;
++  Nested;
++  P := Obj.Go;           { global in the main program (tfuncref9) }
++  P();
++  CallIt(Obj.Go);
++  Check('global', 24);
++  if Fails = 0 then writeln('ok') else halt(1);
++end.
+diff --git a/tests/test/tfuncref58.pp b/tests/test/tfuncref58.pp
+new file mode 100644
+index 00000000..8634d751
+--- /dev/null
++++ b/tests/test/tfuncref58.pp
+@@ -0,0 +1,25 @@
++program tfuncref58;
++
++{ two conversions of the same procvar in one routine keep their own values }
++{$mode delphi}
++{$modeswitch functionreferences}
++type
++  TProc = reference to procedure;
++  TPlain = procedure;
++var Acc: Integer;
++procedure A; begin Inc(Acc, 1); end;
++procedure B; begin Inc(Acc, 10); end;
++procedure Run;
++var V: TPlain; P, Q: TProc;
++begin
++  V := A;
++  P := V;
++  V := B;
++  Q := V;
++  P(); Q();
++end;
++begin
++  Run;
++
++  if Acc <> 11 then halt(1);
++end.
+diff --git a/tests/test/tfuncref59.pp b/tests/test/tfuncref59.pp
+new file mode 100644
+index 00000000..1aa88932
+--- /dev/null
++++ b/tests/test/tfuncref59.pp
+@@ -0,0 +1,125 @@
++program tfuncref59;
++{ #42006 follow-ups: lifetime of a captured interface, conversions inside
++  anonymous functions and methods, generic routines, record fields of Self }
++{$mode delphi}
++{$modeswitch functionreferences}
++{$modeswitch anonymousfunctions}
++type
++  TProc = reference to procedure;
++  IGo = interface procedure Go; end;
++  TIntf = class(TInterfacedObject, IGo)
++    v: Integer;
++    destructor Destroy; override;
++    procedure Go;
++  end;
++  TRec = record
++    v: Integer;
++    procedure Go;
++  end;
++  THolder = class
++    R: TRec;
++    function Make: TProc;
++  end;
++  TLocal = class
++    v: Integer;
++    procedure Go;
++  end;
++var
++  Acc, Destroyed, Fails: Integer;
++
++destructor TIntf.Destroy; begin Inc(Destroyed); inherited; end;
++procedure TIntf.Go; begin Inc(Acc, v); end;
++procedure TRec.Go; begin Inc(Acc, v); end;
++procedure TLocal.Go; begin Inc(Acc, v); end;
++function THolder.Make: TProc; begin Result := R.Go; end;
++
++procedure Check(const what: string; got, expected: Integer);
++begin
++  if got <> expected then
++    begin
++      writeln('FAIL ', what, ': ', got, ' expected ', expected);
++      Inc(Fails);
++    end;
++  Acc := 0;
++end;
++
++function MakeIntf(n: Integer): TProc;
++var I: IGo; O: TIntf;
++begin
++  O := TIntf.Create; O.v := n;
++  I := O;
++  Result := I.Go;
++end;
++
++procedure IntfLife;
++var P: TProc;
++begin
++  P := MakeIntf(5);
++  P(); P();
++  Check('interface', Acc, 10);
++  Check('interface alive', Destroyed, 0);
++  P := nil;
++  Check('interface released', Destroyed, 1);
++end;
++
++function NewLocal(n: Integer): TLocal; begin Result := TLocal.Create; Result.v := n; end;
++
++function Outer(n: Integer): TProc;
++var L: TLocal;
++begin
++  L := TLocal.Create; L.v := n;
++  Result := function: TProc
++    begin
++      Result := L.Go;
++    end();
++end;
++
++function GenMake<T: TLocal>(o: T): TProc;
++begin
++  Result := o.Go;
++end;
++
++procedure Twice;
++var A, B: TLocal; P, Q: TProc;
++begin
++  A := TLocal.Create; A.v := 1;
++  B := TLocal.Create; B.v := 20;
++  P := A.Go; Q := B.Go;
++  P(); Q();
++  Check('two instances, one routine', Acc, 21);
++  A.Free; B.Free;
++end;
++
++procedure Loop;
++var L: array[0..2] of TLocal; P: array[0..2] of TProc; i: Integer;
++begin
++  for i := 0 to 2 do
++    begin
++      L[i] := TLocal.Create; L[i].v := 1 shl (i * 4);
++      P[i] := L[i].Go;
++    end;
++  for i := 0 to 2 do P[i]();
++  { one conversion site in a loop: one capturer per routine, so all three
++    share the last instance (as anonymous functions share captured locals) }
++  Check('loop', Acc, 3 * $100);
++end;
++
++var
++  P: TProc;
++  H: THolder;
++begin
++  IntfLife;
++  P := Outer(7);
++  P();
++  Check('anonymous', Acc, 7);
++  P := GenMake<TLocal>(NewLocal(4));
++  P();
++  Check('generic', Acc, 4);
++  H := THolder.Create; H.R.v := 9;
++  P := H.Make;
++  P();
++  Check('record field of Self', Acc, 9);
++  Twice;
++  Loop;
++  if Fails = 0 then writeln('ok') else halt(1);
++end.

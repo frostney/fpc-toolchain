@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 22 Oct 2026 09:44:30 +0100
+Subject: [PATCH 66/75] wasm32: register variables also in procedures that use
+ exceptions
+
+tabstractvarsym.is_regvar excludes every procedure with
+pi_uses_exceptions from register variables. That rule is for
+setjmp/longjmp based exception handling, where the registers are not
+valid anymore after the longjmp to the handler. On wasm32, exceptions
+are branches within the same function (bf: a flag test after each call)
+or wasm exception handling (try_table/catch, legacy try/catch), whose
+handlers are blocks of the same function: wasm locals keep their values
+there, and try/finally and try/except code is generated inline (no
+outlined funclets that access the parent's frame). So allow register
+variables in such procedures on wasm32.
+
+Effect on the GocciaScript VM under wasmtime 49 (callgrind instruction
+counts, AWFY geomean relative to native x86_64 -O4, research numbers):
+1.95x -> 1.77x (most VM routines have try/finally blocks).
+---
+ compiler/symsym.pas | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/compiler/symsym.pas b/compiler/symsym.pas
+index 61e89d9e..88b7c646 100644
+--- a/compiler/symsym.pas
++++ b/compiler/symsym.pas
+@@ -2005,7 +2005,11 @@ implementation
+            - the value needs to be in memory (i.e. reference counted) }
+         result:=(cs_opt_regvar in current_settings.optimizerswitches) and
+                 not(pi_has_assembler_block in current_procinfo.flags) and
++{$ifndef wasm32}
++                { wasm: exceptions are branches (bf) or wasm EH within the same
++                  frame, wasm locals keep their values in the handlers }
+                 not(pi_uses_exceptions in current_procinfo.flags) and
++{$endif wasm32}
+                 not(pi_has_interproclabel in current_procinfo.flags) and
+                 ((refpara and
+                   (varregable <> vr_none)) or

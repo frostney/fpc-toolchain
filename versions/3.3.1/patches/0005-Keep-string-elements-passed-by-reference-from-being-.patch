@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 17:37:08 +0100
+Subject: [PATCH 05/75] Keep string elements passed by reference from being
+ folded to constants (#41836)
+
+tvecnode.simplify folds 'const'[n] into an ordinal constant unless
+nf_address_taken is set. That flag is not set when the element is
+passed to a var/out/constref/untyped parameter of a routine known not
+to capture the address (e.g. Move), so after inlining substituted a
+string literal for a 'const S' parameter, Move(S[1],D,Length(S)) got
+the address of a one-character temporary. Mark such vecnodes in
+tcallparanode.pass_typecheck (the flag is kept in the inline body) and
+do not fold them.
+---
+ compiler/ncal.pas | 8 ++++++++
+ compiler/nmem.pas | 8 +++++++-
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/ncal.pas b/compiler/ncal.pas
+index 6976f4be..20678506 100644
+--- a/compiler/ncal.pas
++++ b/compiler/ncal.pas
+@@ -1409,6 +1409,14 @@ implementation
+                  if parasym.varspez in [vs_var,vs_out,vs_constref] then
+                    set_unique(left);
+ 
++                 { an element of a string must stay a reference into the
++                   string when passed by reference, even if the string later
++                   becomes a constant through inlining (#41836) }
++                 if (actualtargetnode(@left)^.nodetype=vecn) and
++                    ((parasym.vardef.typ=formaldef) or
++                     (parasym.varspez in [vs_var,vs_out,vs_constref])) then
++                   include(tvecnode(actualtargetnode(@left)^).vecnodeflags,vnf_byref_para);
++
+                  if (parasym.varspez=vs_const) and (parasym.vardef.typ=formaldef) then
+                    begin
+                      { compilerprocs never capture the address of their
+diff --git a/compiler/nmem.pas b/compiler/nmem.pas
+index 644d5a69..ad419d13 100644
+--- a/compiler/nmem.pas
++++ b/compiler/nmem.pas
+@@ -147,7 +147,10 @@ interface
+        TVecNodeFlag = (
+          vnf_memindex,
+          vnf_memseg,
+-         vnf_callunique
++         vnf_callunique,
++         { the element is passed to a by-reference (var, out, constref or
++           untyped) parameter, so the callee works on its address }
++         vnf_byref_para
+        );
+ 
+        TVecNodeFlags = set of TVecNodeFlag;
+@@ -1452,6 +1455,9 @@ implementation
+           { If the address of the result is taken, do not optimise, as the
+             pointer of the original string constant is in use }
+           not (nf_address_taken in flags) and
++          { Likewise when it is passed by reference: e.g. Move(S[1],...) reads
++            the following characters through that reference (#41836) }
++          not (vnf_byref_para in vecnodeflags) and
+           (left.nodetype = stringconstn) and
+           (right.nodetype = ordconstn) and
+           { Ensure the index is in range }

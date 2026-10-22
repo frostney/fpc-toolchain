@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 22 Oct 2026 16:25:36 +0100
+Subject: [PATCH 74/75] x86_64 win64 Exp: return e for Exp(1), as V8 does
+
+The fdlibm algorithm gives 2.7182818284590455 for exp(1), 1 ulp above
+the correctly rounded e (2.718281828459045). The x87 Exp of the other
+x86_64 targets returns e, and so does V8, whose fdlibm port special-cases
+x = 1 for this reason (src/base/ieee754.cc: "if (x == 1.0) return E;").
+test262 staging/sm/Math/exp-exact checks Math.exp(1) === Math.E.
+
+Return e directly for an argument of exactly 1.0 (checked in the
+0.5 ln2 < |d| < 1.5 ln2 branch only, so other arguments take no extra
+compare). All other results stay bit-identical to the generic
+genmath.inc fpc_exp_real.
+---
+ rtl/x86_64/math.inc | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/rtl/x86_64/math.inc b/rtl/x86_64/math.inc
+index d9b04ba0..d5cdab86 100644
+--- a/rtl/x86_64/math.inc
++++ b/rtl/x86_64/math.inc
+@@ -455,6 +455,7 @@ const
+     FPC_EXP_TWOM1000:    QWord = $0170000000000000; { 2^-1000 }
+     FPC_EXP_ONE:         QWord = $3FF0000000000000;
+     FPC_EXP_TWO:         QWord = $4000000000000000;
++    FPC_EXP_E:           QWord = $4005BF0A8B145769; { e, correctly rounded }
+ 
+     function fpc_exp_real(d : ValReal) : ValReal; compilerproc; assembler; nostackframe;
+     {*****************************************************************}
+@@ -492,6 +493,10 @@ const
+         cmpl      $0x3FF0A2B2, %edx
+         jae       .LReduceK
+         { 0.5 ln2 < abs(d) < 1.5 ln2: k = +-1 }
++        { exp(1) would be 1 ulp above e: return e itself (as V8 does) }
++        movq      FPC_EXP_ONE(%rip), %r9
++        cmpq      %r9,   %rax
++        je        .LExpOne
+         subsd     16(%r8,%rcx,8), %xmm0 { hi = d - ln2_hi[xsb] }
+         movsd     32(%r8,%rcx,8), %xmm1 { lo = ln2_lo[xsb] }
+         movl      $1,    %eax
+@@ -579,6 +584,9 @@ const
+     .LTiny:
+         addsd     FPC_EXP_ONE(%rip), %xmm0 { 1 + d }
+         ret
++    .LExpOne:
++        movsd     FPC_EXP_E(%rip), %xmm0
++        ret
+ 
+     .LLarge:
+         cmpl      $0x7FF00000, %edx

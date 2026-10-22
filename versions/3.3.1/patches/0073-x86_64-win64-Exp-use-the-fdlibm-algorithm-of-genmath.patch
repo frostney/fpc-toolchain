@@ -1,0 +1,448 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 22 Oct 2026 09:48:26 +0100
+Subject: [PATCH 73/75] x86_64 win64 Exp: use the fdlibm algorithm of
+ genmath.inc in the SSE2 routine (#41837 follow-up)
+
+On x86_64-win64 (no extended type, so the x87 exp of rtl/x86_64/math.inc
+is not used) fpc_exp_real has been a hand-written SSE2 routine since
+2025: 2^k times a [6/6] Pade approximant P(x)/P(-x), with both
+polynomials and the quotient rounded to double. That loses up to 2 ulp
+(about 39% of random arguments are not correctly rounded, 8% are more
+than 1 ulp off), and the range checks against log(2^1024) and
+log(2^-1023) make Exp return +Inf for 709.7827128933840 (largest finite
+result 1.797e308) and 0 for every argument below -709.09, where the
+result is a subnormal down to -745.13. 3.2.x used the generic Pascal
+fpc_exp_real of genmath.inc (fdlibm e_exp.c, error below 1 ulp) on
+win64, so Exp, and with it Power, the hyperbolic functions and
+everything built on them, changed in the last digits between 3.2.x and
+trunk on win64 only. Other x86_64 targets use the x87 routine and are
+unaffected.
+
+Replace the routine by an SSE2 transcription of the genmath.inc code:
+same constants, same argument reduction (r = hi - lo kept as two
+doubles), same polynomial and the same operations in the same order, so
+it gives bit-identical results to the generic version (no difference on
+7.2 million arguments, all four rounding modes) and to 3.2.x on win64:
+error below 1 ulp, subnormal results, overflow at 709.78271289338397
+and underflow at -745.13321910194111. Overflow and underflow are again
+computed as huge*huge and tiny*tiny as in genmath.inc, so an unmasked
+overflow exception raises EOverflow on win64 again like in 3.2.x and on
+the x87 targets (the SSE2 routine returned +Inf silently).
+
+The new routine executes about 8% more instructions than the Pade one
+(57.5 vs 53.0 per call under callgrind) and about 28% fewer than the
+compiled genmath.inc version (79.3).
+
+New test tests/test/units/system/texpacc.pp: arguments where the Pade
+routine was 2 ulp off, subnormal results and the largest finite result.
+---
+ rtl/x86_64/math.inc                | 272 ++++++++++++++++-------------
+ tests/test/units/system/texpacc.pp |  90 ++++++++++
+ 2 files changed, 240 insertions(+), 122 deletions(-)
+ create mode 100644 tests/test/units/system/texpacc.pp
+
+diff --git a/rtl/x86_64/math.inc b/rtl/x86_64/math.inc
+index 84371309..d9b04ba0 100644
+--- a/rtl/x86_64/math.inc
++++ b/rtl/x86_64/math.inc
+@@ -44,11 +44,6 @@ const
+   FPC_ABSMASK_SINGLE: array[0..1] of qword=($7fffffff7fffffff,$7fffffff7fffffff); cvar; public;
+   FPC_ABSMASK_DOUBLE: array[0..1] of qword=($7fffffffffffffff,$7fffffffffffffff); cvar; public;
+ {$pop}
+-  FPC_LOG2E: Double   =  1.4426950408889634073599246810019; {  1/log(2)    }
+-
+-  FPC_INFINITY_DOUBLE: QWord = $7ff0000000000000;     { IEEE 754 bit representation of +oo for binary64 }
+-  FPC_MAXLOG_DOUBLE: Double  =  709.78271289338399684324569237317; { log(2**1024)  }
+-  FPC_MINLOG_DOUBLE: Double  = -709.08956571282405153382846025171; { log(2**-1023) }
+ 
+ {****************************************************************************
+                             FPU Control word
+@@ -441,141 +436,174 @@ const
+     {$ifndef FPC_SYSTEM_HAS_EXP}
+     {$define FPC_SYSTEM_HAS_EXP}
+ 
+-{$push}
+-{$codealign constmin=16}
+   const
+-    { coefficients of P(-x) and P(x), P(x) = x^6 + 42x^5 + 840x^4 + 10080x^3 + 75600x^2 + 332640x + 665280 }
+-    FPC_EXP_C5_ARRAY: array[0..1] of Double = (-42.0,     42.0);
+-    FPC_EXP_C4_ARRAY: array[0..1] of Double = (840.0,     840.0);
+-    FPC_EXP_C3_ARRAY: array[0..1] of Double = (-10080.0,  10080.0);
+-    FPC_EXP_C2_ARRAY: array[0..1] of Double = (75600.0,   75600.0);
+-    FPC_EXP_C1_ARRAY: array[0..1] of Double = (-332640.0, 332640.0);
+-    FPC_EXP_C0_ARRAY: array[0..1] of Double = (665280.0,  665280.0);
+-{$pop}
+-    FPC_HALF_DOUBLE: Double = 0.5;
+-    FPC_ONE_DOUBLE: Double = 1.0;
+-    { ln 2 = FPC_LN2_HI + FPC_LN2_LO; k * FPC_LN2_HI is exact for abs(k) <= 1024 }
+-    FPC_LN2_HI: QWord = $3FE62E42FEE00000;
+-    FPC_LN2_LO: QWord = $3DEA39EF35793C76;
++    { Constants of fdlibm's e_exp.c (the same values as the generic fpc_exp_real
++      in genmath.inc). Pairs are indexed by the sign of the argument. }
++    FPC_EXP_HALF_LN2HI_LN2LO: array[0..5] of QWord = (
++      $3FE0000000000000, QWord($BFE0000000000000),  {  0.5,     -0.5     }
++      $3FE62E42FEE00000, QWord($BFE62E42FEE00000),  {  ln2_hi,  -ln2_hi  }
++      $3DEA39EF35793C76, QWord($BDEA39EF35793C76)); {  ln2_lo,  -ln2_lo  }
++    FPC_EXP_INVLN2:      QWord = $3FF71547652B82FE; { 1/ln 2 }
++    FPC_EXP_P1:          QWord = $3FC555555555553E;
++    FPC_EXP_P2:          QWord = QWord($BF66C16C16BEBD93);
++    FPC_EXP_P3:          QWord = $3F11566AAF25DE2C;
++    FPC_EXP_P4:          QWord = QWord($BEBBBD41C5D26BF1);
++    FPC_EXP_P5:          QWord = $3E66376972BEA4D0;
++    FPC_EXP_O_THRESHOLD: QWord = $40862E42FEFA39EF; {  7.09782712893383973096e+02 }
++    FPC_EXP_U_THRESHOLD: QWord = QWord($C0874910D52D3051); { -7.45133219101941108420e+02 }
++    FPC_EXP_HUGE:        QWord = $7E37E43C8800759C; { 1e300 }
++    FPC_EXP_TWOM1000:    QWord = $0170000000000000; { 2^-1000 }
++    FPC_EXP_ONE:         QWord = $3FF0000000000000;
++    FPC_EXP_TWO:         QWord = $4000000000000000;
+ 
+     function fpc_exp_real(d : ValReal) : ValReal; compilerproc; assembler; nostackframe;
+     {*****************************************************************}
+     { Exponential Function                                            }
+     {*****************************************************************}
+     {                                                                 }
+-    { SYNOPSIS:                                                       }
+-    {                                                                 }
+-    { double d, y, exp();                                             }
+-    {                                                                 }
+-    { y = exp(d);                                                     }
+-    {                                                                 }
+-    { DESCRIPTION:                                                    }
+-    {                                                                 }
+-    { Returns e (2.71828...) raised to the d power.                   }
+-    {                                                                 }
+-    { First calculate z = d log2 e, then break z into integer and     }
+-    { fractional components k and f.                                  }
++    { SSE2 version of the generic fpc_exp_real in genmath.inc (from   }
++    { fdlibm's e_exp.c) that performs the same operations in the same }
++    { order, so both give bit-identical results, with an error below  }
++    { 1 ulp:                                                          }
+     {                                                                 }
+-    {     d    z      k + f    k f                                    }
+-    {    e  = 2   => 2      = 2 2                                     }
++    {   d = k ln2 + r, |r| <= 0.5 ln2, r = hi - lo (r is kept as two  }
++    {   doubles so that its rounding error does not reach the result) }
++    {   exp(r) = 1 + r + r*c/(2-c), c = r - r^2 (P1 + ... + P5 r^8)   }
++    {   exp(d) = 2^k exp(r)                                           }
+     {                                                                 }
+-    { 2^k can be calculated very quickly with bit manipulation, then  }
+-    { x = d - k ln 2 = f ln 2 and a Padé approximant gives e^x for x  }
+-    { between -0.5 ln 2 and 0.5 ln 2                                  }
++    { Overflow (d > 709.78...) and underflow (d < -745.13...) are     }
++    { computed as huge*huge and tiny*tiny, so they raise the FPU      }
++    { exception like the generic version when it is unmasked.         }
+     {*****************************************************************}
+       asm
+-        movsd     FPC_LOG2E(%rip), %xmm4
+-        ucomisd   FPC_MAXLOG_DOUBLE(%rip), %xmm0
+-        jp        .LNaN { Propagate NaN into result }
+-        jae       .LOverflow
+-        movsd     FPC_ONE_DOUBLE(%rip), %xmm5
+-        xorpd     %xmm3, %xmm3
+-        comisd    FPC_MINLOG_DOUBLE(%rip), %xmm0
+-        ja        .LNoUnderflow
+-        xorpd     %xmm0, %xmm0 { Set result to zero }
+-    .LNaN:
++        movq      %xmm0, %rax
++        movq      %rax,  %rdx
++        shrq      $32,   %rdx
++        movl      %edx,  %ecx
++        shrl      $31,   %ecx           { xsb: sign of d }
++        andl      $0x7fffffff, %edx     { hx: high word of abs(d) }
++        cmpl      $0x40862E42, %edx
++        jae       .LLarge               { abs(d) >= 709.78 or not finite }
++        cmpl      $0x3FD62E42, %edx
++        jbe       .LSmall               { abs(d) <= 0.5 ln2 }
++
++    .LReduce:
++        leaq      FPC_EXP_HALF_LN2HI_LN2LO(%rip), %r8
++        cmpl      $0x3FF0A2B2, %edx
++        jae       .LReduceK
++        { 0.5 ln2 < abs(d) < 1.5 ln2: k = +-1 }
++        subsd     16(%r8,%rcx,8), %xmm0 { hi = d - ln2_hi[xsb] }
++        movsd     32(%r8,%rcx,8), %xmm1 { lo = ln2_lo[xsb] }
++        movl      $1,    %eax
++        subl      %ecx,  %eax
++        subl      %ecx,  %eax           { k = 1 - 2 xsb }
++        jmp       .LReduced
++    .LReduceK:
++        movsd     FPC_EXP_INVLN2(%rip), %xmm2
++        mulsd     %xmm0, %xmm2
++        addsd     (%r8,%rcx,8), %xmm2
++        cvttsd2si %xmm2, %eax           { k = trunc(d/ln2 + copysign(0.5, d)) }
++        cvtsi2sd  %eax,  %xmm2          { t = k }
++        movsd     16(%r8), %xmm1
++        mulsd     %xmm2, %xmm1
++        subsd     %xmm1, %xmm0          { hi = d - t ln2_hi (t ln2_hi is exact) }
++        movsd     32(%r8), %xmm1
++        mulsd     %xmm2, %xmm1          { lo = t ln2_lo }
++    .LReduced:
++        movapd    %xmm0, %xmm5          { hi }
++        subsd     %xmm1, %xmm0          { r = hi - lo }
++        jmp       .LPoly
++
++    .LSmall:
++        cmpl      $0x3E300000, %edx
++        jb        .LTiny                { abs(d) < 2^-28 }
++        xorl      %eax,  %eax           { k = 0 }
++
++    .LPoly:
++        { c = r - t (P1 + t (P2 + t (P3 + t (P4 + t P5)))), t = r^2 }
++        movapd    %xmm0, %xmm2
++        mulsd     %xmm0, %xmm2          { t }
++        movsd     FPC_EXP_P5(%rip), %xmm3
++        mulsd     %xmm2, %xmm3
++        addsd     FPC_EXP_P4(%rip), %xmm3
++        mulsd     %xmm2, %xmm3
++        addsd     FPC_EXP_P3(%rip), %xmm3
++        mulsd     %xmm2, %xmm3
++        addsd     FPC_EXP_P2(%rip), %xmm3
++        mulsd     %xmm2, %xmm3
++        addsd     FPC_EXP_P1(%rip), %xmm3
++        mulsd     %xmm2, %xmm3
++        movapd    %xmm0, %xmm4
++        subsd     %xmm3, %xmm4          { c }
++        movsd     FPC_EXP_TWO(%rip), %xmm3
++        testl     %eax,  %eax
++        jnz       .LScale
++
++        { k = 0: exp(r) = 1 - ((r c)/(c - 2) - r) }
++        movapd    %xmm0, %xmm1
++        mulsd     %xmm4, %xmm1          { r c }
++        subsd     %xmm3, %xmm4          { c - 2 }
++        divsd     %xmm4, %xmm1
++        subsd     %xmm0, %xmm1
++        movsd     FPC_EXP_ONE(%rip), %xmm0
++        subsd     %xmm1, %xmm0
+         ret
+-    .LOverflow:
+-        movsd     FPC_INFINITY_DOUBLE(%rip), %xmm0 { Set result to infinity }
++
++    .LScale:
++        { y = 1 - ((lo - (r c)/(2 - c)) - hi) }
++        mulsd     %xmm4, %xmm0          { r c }
++        subsd     %xmm4, %xmm3          { 2 - c }
++        divsd     %xmm3, %xmm0
++        subsd     %xmm0, %xmm1
++        subsd     %xmm5, %xmm1
++        movsd     FPC_EXP_ONE(%rip), %xmm0
++        subsd     %xmm1, %xmm0          { y }
++        { add k to the exponent of y; below -1021 add k + 1000 and multiply by 2^-1000 }
++        movq      %xmm0, %rdx
++        cmpl      $-1021, %eax
++        jl        .LSubnormal
++        movslq    %eax,  %rax
++        shlq      $52,   %rax
++        addq      %rax,  %rdx
++        movq      %rdx,  %xmm0
+         ret
+-        .balign   16
+-    .LNoUnderflow:
+-        movsd     FPC_HALF_DOUBLE(%rip), %xmm2
+-        comisd    %xmm3, %xmm0
+-        jnz .LNotZero
+-        movsd     %xmm5, %xmm0 { e^0 = 1 }
++    .LSubnormal:
++        addl      $1000, %eax
++        movslq    %eax,  %rax
++        shlq      $52,   %rax
++        addq      %rax,  %rdx
++        movq      %rdx,  %xmm0
++        mulsd     FPC_EXP_TWOM1000(%rip), %xmm0
+         ret
+-        .balign   16
+-    .LNotZero:
+-        movapd    %xmm0, %xmm5 { d }
+-        mulsd     %xmm4, %xmm0 { z }
+-        { k = trunc(z + copysign(0.5, z)): z rounded half away from zero }
+-        movupd    FPC_ABSMASK_DOUBLE(%rip), %xmm1
+-        andnpd    %xmm0, %xmm1 { sign of z }
+-        orpd      %xmm2, %xmm1 { copysign(0.5, z) }
+-        addsd     %xmm0, %xmm1
+-        { %xmm1 won't be out of range due to the earlier checks }
+-        cvttsd2si %xmm1, %rax
+-        cvtsi2sd  %rax,  %xmm1 { k }
+-
+-        { x = (d - k ln2_hi) - k ln2_lo }
+-        movsd     FPC_LN2_HI(%rip), %xmm0
+-        mulsd     %xmm1, %xmm0
+-        subsd     %xmm0, %xmm5
+-        mulsd     FPC_LN2_LO(%rip), %xmm1
+-        subsd     %xmm1, %xmm5
+-        movapd    %xmm5, %xmm0 { x }
+-
+-        { %rcx: bits of the extra factor 2.0 for k=1024 or 0.5 for k=-1023, 0 otherwise }
+-        xorl      %ecx,  %ecx
+-        cmpl      $1023, %eax
+-        jg        .LBigK
+-        cmpl      $-1022, %eax
+-        jl        .LSmallK
+-    .LKReady:
+-        { Some slightly evil floating-point bit manipulation to calculate 2^k }
+-        addw      $1023, %ax
+-        shlw      $4,    %ax
+-        pinsrw $3,%eax,  %xmm3 { Insert into the most-significant 16 bits }
+-                               { %xmm3 now contains 2^k }
+-
+-        { [6/6] Padé approximant e^x = P(x) / P(-x), both evaluated with Horner, P(-x) in the low lane }
+-        shufpd $0,%xmm0, %xmm0 { x, x }
+-        movapd    %xmm0, %xmm4 { x, x }
+-        addpd     FPC_EXP_C5_ARRAY(%rip), %xmm0
+-        mulpd     %xmm4, %xmm0
+-        addpd     FPC_EXP_C4_ARRAY(%rip), %xmm0
+-        mulpd     %xmm4, %xmm0
+-        addpd     FPC_EXP_C3_ARRAY(%rip), %xmm0
+-        mulpd     %xmm4, %xmm0
+-        addpd     FPC_EXP_C2_ARRAY(%rip), %xmm0
+-        mulpd     %xmm4, %xmm0
+-        addpd     FPC_EXP_C1_ARRAY(%rip), %xmm0
+-        mulpd     %xmm4, %xmm0
+-        addpd     FPC_EXP_C0_ARRAY(%rip), %xmm0 { P(-x), P(x) }
+ 
+-        movapd    %xmm0, %xmm4
+-        shufpd $1,%xmm0, %xmm0 { P(x), P(-x) }
+-        divsd     %xmm4, %xmm0 { e^x }
++    .LTiny:
++        addsd     FPC_EXP_ONE(%rip), %xmm0 { 1 + d }
++        ret
+ 
+-        mulsd     %xmm3, %xmm0 { Apply the integer component calculated earlier }
+-        testq     %rcx,  %rcx
+-        jnz       .LExtraFactor
++    .LLarge:
++        cmpl      $0x7FF00000, %edx
++        jae       .LNotFinite
++        ucomisd   FPC_EXP_O_THRESHOLD(%rip), %xmm0
++        ja        .LOverflow
++        ucomisd   FPC_EXP_U_THRESHOLD(%rip), %xmm0
++        jae       .LReduce
++        movsd     FPC_EXP_TWOM1000(%rip), %xmm0
++        mulsd     %xmm0, %xmm0          { underflow: 0 }
++        ret
++    .LOverflow:
++        movsd     FPC_EXP_HUGE(%rip), %xmm0
++        mulsd     %xmm0, %xmm0          { overflow: +Inf }
+         ret
+-    .LExtraFactor:
+-        movq      %rcx,  %xmm1
+-        mulsd     %xmm1, %xmm0
++    .LNotFinite:
++        shlq      $12,   %rax
++        jnz       .LNaN
++        testl     %ecx,  %ecx
++        jz        .LDone                { exp(+Inf) = +Inf }
++        xorpd     %xmm0, %xmm0          { exp(-Inf) = 0 }
++    .LDone:
+         ret
+-    .LBigK:
+-        decl      %eax { 2^1024 = 2^1023 * 2.0 }
+-        movl      $0x400, %ecx
+-        shlq      $52,   %rcx
+-        jmp       .LKReady
+-    .LSmallK:
+-        incl      %eax { 2^-1023 = 2^-1022 * 0.5 }
+-        movl      $0x3FE, %ecx
+-        shlq      $52,   %rcx
+-        jmp       .LKReady
++    .LNaN:
++        addsd     %xmm0, %xmm0          { quiet the NaN }
+       end;
+     {$endif FPC_SYSTEM_HAS_EXP}
+ 
+diff --git a/tests/test/units/system/texpacc.pp b/tests/test/units/system/texpacc.pp
+new file mode 100644
+index 00000000..46c49477
+--- /dev/null
++++ b/tests/test/units/system/texpacc.pp
+@@ -0,0 +1,90 @@
++{ Exp: at most 1 ulp error, results down to the smallest subnormal, and the
++  largest finite result (follow-up of issue #41837) }
++program texpacc;
++
++{$mode objfpc}{$h+}
++
++uses
++  Math;
++
++type
++  TExpCase = record
++    x: QWord;
++    ref: QWord;
++  end;
++
++const
++  { bit patterns of x and of the correctly rounded exp(x) }
++  Cases: array[1..26] of TExpCase = (
++    { arguments where the SSE2 exp of 3.3.1 (2025-2026) was 2 ulp off }
++    (x: QWord($BFB466B3933FE345); ref: QWord($3FED8C7F73C019FF)), { exp(-0.0796921) }
++    (x: QWord($BFB82F405F6BA062); ref: QWord($3FED1D866332C366)), { exp(-0.094471) }
++    (x: QWord($BF90BB3270959451); ref: QWord($3FEF7B3CD6F51C82)), { exp(-0.0163391) }
++    (x: QWord($3FDAFB3FA6DEFC7A); ref: QWord($3FF863D7DAEF5FD7)), { exp(0.421585) }
++    (x: QWord($3FE37F562174C4CE); ref: QWord($3FFD6D1636B60CBA)), { exp(0.609294) }
++    (x: QWord($BFF007A8D64D7F0F); ref: QWord($3FD78013804AD37C)), { exp(-1.00187) }
++    (x: QWord($4041EBE0DED288CE); ref: QWord($432A2D5230961325)), { exp(35.8428) }
++    (x: QWord($4015F78AB0C88A48); ref: QWord($406E55BB32BB8DD6)), { exp(5.49174) }
++    (x: QWord($402A397F62B6AE7D); ref: QWord($411E36462D8AB4D4)), { exp(13.1123) }
++    (x: QWord($C0303E425AEE6320); ref: QWord($3E77AFD6F9B61FDB)), { exp(-16.2432) }
++    (x: QWord($C03E90AA64C2F838); ref: QWord($3D2DEFFFF211F84F)), { exp(-30.5651) }
++    (x: QWord($C036F2B6AE7D566D); ref: QWord($3DDDB5D46B138B67)), { exp(-22.9481) }
++    (x: QWord($4069F7D70A3D70A4); ref: QWord($52AA38B7BF22A8D3)), { exp(207.745) }
++    (x: QWord($4084BAA5E353F7CF); ref: QWord($7BBFA7952BC60034)), { exp(663.331) }
++    (x: QWord($407F1A147AE147AE); ref: QWord($6CCE72FFD90BB673)), { exp(497.63) }
++    (x: QWord($C07822083126E979); ref: QWord($1D1E9F34E8D626BF)), { exp(-386.127) }
++    (x: QWord($C0819EA9FBE76C8B); ref: QWord($0D179A7CF3DA776F)), { exp(-563.833) }
++    (x: QWord($C06603CED916872B); ref: QWord($300E25E5A8541AF2)), { exp(-176.119) }
++    { subnormal results; the SSE2 exp returned 0 below -709.09 }
++    (x: QWord($C0862C0000000000); ref: QWord($00054E90C99FB878)), { exp(-709.5) }
++    (x: QWord($C086820000000000); ref: QWord($000000077564144F)), { exp(-720.25) }
++    (x: QWord($C087200000000000); ref: QWord($0000000000000055)), { exp(-740.0) }
++    (x: QWord($C087480000000000); ref: QWord($0000000000000001)), { exp(-745.0) }
++    (x: QWord($C0874910D52D3051); ref: QWord($0000000000000001)), { exp(-745.1332191019411) }
++    (x: QWord($C0874910D52D3052); ref: QWord($0000000000000000)), { exp(-745.1332191019412) }
++    { largest finite result; the SSE2 exp returned +Inf }
++    (x: QWord($40862E42FEFA39EF); ref: QWord($7FEFFFFFFFFFFF2A)), { exp(709.782712893384) }
++    (x: QWord($40862E42FEFA39F0); ref: QWord($7FF0000000000000))  { exp(709.7827128933841) }
++  );
++
++  MaxUlp = 1;
++
++function BitsToDouble(aBits: QWord): Double;
++begin
++  Move(aBits,Result,SizeOf(Result));
++end;
++
++function DoubleToBits(aValue: Double): QWord;
++begin
++  Move(aValue,Result,SizeOf(Result));
++end;
++
++var
++  i: Integer;
++  lValue: Double;
++  lGot, lDiff: QWord;
++  lFailed: Boolean;
++
++begin
++  SetExceptionMask([exInvalidOp,exDenormalized,exZeroDivide,exOverflow,exUnderflow,exPrecision]);
++  lFailed:=false;
++  for i:=Low(Cases) to High(Cases) do
++    begin
++    lValue:=Exp(BitsToDouble(Cases[i].x));
++    lGot:=DoubleToBits(lValue);
++    if lGot>Cases[i].ref then
++      lDiff:=lGot-Cases[i].ref
++    else
++      lDiff:=Cases[i].ref-lGot;
++    { a nonzero result must not become zero, a finite one not infinite }
++    if (lDiff>MaxUlp) or ((Cases[i].ref<>0) and (lGot=0)) or
++       ((Cases[i].ref<>QWord($7FF0000000000000)) and (lGot=QWord($7FF0000000000000))) then
++      begin
++      writeln('exp(',BitsToDouble(Cases[i].x),'): got ',HexStr(lGot,16),', expected ',HexStr(Cases[i].ref,16));
++      lFailed:=true;
++      end;
++    end;
++  if lFailed then
++    halt(1);
++  writeln('ok');
++end.

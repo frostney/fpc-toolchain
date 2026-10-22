@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 23:16:04 +0100
+Subject: [PATCH 15/75] Do not enable excess precision by default in Delphi
+ mode
+
+Delphi mode turned on cs_excessprecision, which evaluates every float
+expression in pbestrealtype: the x87 Extended type on x86_64-linux. All
+Delphi-mode Single and Double arithmetic then compiled to x87 code: values
+are double rounded, intermediates get the Extended exponent range
+(1e308*10/10 gives 1e308 instead of overflowing), and code that masks
+float exceptions through MXCSR (SetSSECSR) traps on x87 exceptions. 3.2
+leaves excess precision off; {$EXCESSPRECISION ON} still enables it.
+---
+ compiler/scanner.pas | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/compiler/scanner.pas b/compiler/scanner.pas
+index 34c4cf09..871565fb 100644
+--- a/compiler/scanner.pas
++++ b/compiler/scanner.pas
+@@ -696,16 +696,16 @@ implementation
+                  include(init_settings.localswitches,cs_strict_var_strings);
+              end;
+ 
+-           { in delphi mode, excess precision and open strings are by default on }
++           { in delphi mode, open strings are by default on. Excess precision
++             stays off as in 3.2: it evaluates every float expression in
++             pbestrealtype, which is the x87 Extended type on x86_64-linux,
++             so Delphi-mode code would leave SSE for x87 code with its own
++             exception mask and double rounding; use $EXCESSPRECISION ON }
+            if ([m_delphi] * current_settings.modeswitches <> []) then
+              begin
+-               include(current_settings.localswitches,cs_excessprecision);
+                include(current_settings.localswitches,cs_openstring);
+                if changeinit then
+-                 begin
+-                   include(init_settings.localswitches,cs_excessprecision);
+-                   include(init_settings.localswitches,cs_openstring);
+-                 end;
++                 include(init_settings.localswitches,cs_openstring);
+              end;
+ 
+ {$ifdef i8086}

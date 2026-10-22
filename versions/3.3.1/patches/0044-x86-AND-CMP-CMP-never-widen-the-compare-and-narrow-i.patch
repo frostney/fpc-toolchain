@@ -1,0 +1,167 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 03:20:37 +0100
+Subject: [PATCH 44/75] x86 AND/CMP -> CMP: never widen the compare, and narrow
+ it only for unsigned/equality conditions on a constant in 0..mask
+
+and $255,%eax / cmpl $100,%eax / jl was turned into cmpb $100,%al / jl,
+so (a and $FF) < 100 was true for a = 200; and $65535,%eax / cmpb was
+widened to cmpw.  Trunk only (optimisation added in ccbdfa9150, 2023).
+Found by the pgen3 generator (seed 30227).
+---
+ compiler/x86/aoptx86.pas | 58 ++++++++++++++++++++++++++++++++++++-
+ tests/tbs/tb9035.pp      | 62 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 119 insertions(+), 1 deletion(-)
+ create mode 100644 tests/tbs/tb9035.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 2c8ade1b..c9faf18e 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -16310,6 +16310,29 @@ unit aoptx86;
+         MaskLength : Cardinal;
+         MaskedBits : TCgInt;
+         ActiveReg : TRegister;
++        AndBits : longint;
++      function OpsizeBits(s: topsize): longint;
++        begin
++          case s of
++            S_B: result:=8;
++            S_W: result:=16;
++            S_L: result:=32;
++            S_Q: result:=64;
++            else
++              result:=0;
++          end;
++        end;
++
++      function MaskBits(v: TCgInt): longint;
++        begin
++          case v of
++            $ff: result:=8;
++            $ffff: result:=16;
++            else
++              result:=32;
++          end;
++        end;
++
+       begin
+         Result:=false;
+ 
+@@ -16376,7 +16399,6 @@ unit aoptx86;
+                       end
+                     else if ((taicpu(p).oper[0]^.val=$ff) or (taicpu(p).oper[0]^.val=$ffff) or (taicpu(p).oper[0]^.val=$ffffffff)) and
+                       MatchOpType(taicpu(hp1),top_const,top_reg) and
+-                      (taicpu(p).oper[0]^.val>=taicpu(hp1).oper[0]^.val) and
+ {$ifndef x86_64}
+                       (
+                         (taicpu(p).oper[0]^.val <> $ff) or 
+@@ -16397,6 +16419,40 @@ unit aoptx86;
+                         UpdateUsedRegs(TmpUsedRegs, tai(p.Next));
+                         if not RegUsedAfterInstruction(taicpu(p).oper[1]^.reg, hp1, TmpUsedRegs) then
+                           begin
++                            if not(taicpu(p).opsize in [S_B,S_W,S_L,S_Q]) or
++                              not(taicpu(hp1).opsize in [S_B,S_W,S_L,S_Q]) or
++                              (getsubreg(taicpu(hp1).oper[1]^.reg)=R_SUBH) then
++                              Exit;
++                            { bits of the register the AND leaves defined (a 32-bit
++                              operation on x86_64 also clears bits 32..63) }
++                            AndBits:=OpsizeBits(taicpu(p).opsize);
++{$ifdef x86_64}
++                            if taicpu(p).opsize=S_L then
++                              AndBits:=64;
++{$endif x86_64}
++                            if OpsizeBits(taicpu(hp1).opsize) <= MaskBits(taicpu(p).oper[0]^.val) then
++                              begin
++                                { the comparison reads only bits the AND keeps
++                                  unchanged: drop the AND, but never widen the
++                                  comparison (that would read bits the AND
++                                  did not clear) }
++                                DebugMsg(SPeepholeOptimization + 'AND/CMP -> CMP (AND keeps the compared bits)', p);
++                                RemoveCurrentP(p);
++                                Result := True;
++                                Exit;
++                              end;
++                            { otherwise the comparison sees the zero-extended
++                              masked value; the narrowed comparison only gives
++                              the same flags if the AND cleared every bit the
++                              comparison reads, the constant is in 0..mask, and
++                              no signed condition (SF/OF) reads the flags:
++                              `and $255,%eax / cmp $100,%eax / jl` is not
++                              taken for 200, `cmp $100,%al / jl` is }
++                            if (AndBits < OpsizeBits(taicpu(hp1).opsize)) or
++                              (taicpu(hp1).oper[0]^.val < 0) or
++                              (taicpu(hp1).oper[0]^.val > taicpu(p).oper[0]^.val) or
++                              FlagsReadBySignedCondition(p, hp1) then
++                              Exit;
+                             DebugMsg(SPeepholeOptimization + 'AND/CMP -> CMP', p);
+                             case taicpu(p).oper[0]^.val of
+                               $ff:
+diff --git a/tests/tbs/tb9035.pp b/tests/tbs/tb9035.pp
+new file mode 100644
+index 00000000..174708dc
+--- /dev/null
++++ b/tests/tbs/tb9035.pp
+@@ -0,0 +1,62 @@
++{ %OPT=-O2 }
++{ the AND/CMP -> CMP peephole optimisation must not widen a byte compare
++  to the AND's mask size, and must not narrow a compare that feeds a signed
++  condition: after "and $255,%reg", the value is 0..255, but a byte compare
++  sees -128..127 }
++program tb9035;
++
++{$mode objfpc}
++
++function f1(a: longint): boolean;
++begin
++  result:=(a and $ff)<100;
++end;
++
++function f2(a: longint): boolean;
++begin
++  result:=(a and $ffff)<1000;
++end;
++
++function f3(a: longint): boolean;
++begin
++  result:=longint(a and $ff)>100;
++end;
++
++function f4(a: longint): boolean;
++begin
++  result:=shortint(a and $ffff)< -100;
++end;
++
++function f5(a: longint): boolean;
++begin
++  result:=smallint(a and $ff)<100;
++end;
++
++function f6(g: shortint): boolean;
++begin
++  result:=shortint(swap(word(g)))< -116;
++end;
++
++function f7(a: longint): boolean;
++begin
++  { unsigned/equality uses may still be narrowed }
++  result:=(a and $ff)=200;
++end;
++
++begin
++  if f1(200) then
++    halt(1);
++  if f2(40000) then
++    halt(2);
++  if not f3(200) then
++    halt(3);
++  if f4($ff00) then
++    halt(4);
++  if f5(200) then
++    halt(5);
++  if f6(-5) then
++    halt(6);
++  if not f7($1c8) then
++    halt(7);
++  writeln('ok');
++end.

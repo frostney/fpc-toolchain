@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 23:08:52 +0100
+Subject: [PATCH 11/75] Do not narrow a right shift of an extended value to the
+ narrow size
+
+i := T(i shr k) (load-modify-store, -O3) and the OptPass1Movx 'var3' fold
+of movzx/movsx + shift + narrowing store (-O1) turned 32-bit right shifts
+of a widened value into shifts of the narrow variable. A logical shift is
+only equivalent after zero extension and an arithmetic one only after sign
+extension: SmallInt S := S shr 3 with S=-1000 gave 8067 instead of -125,
+Byte(SarLongint(B, 2)) with B=200 gave 242 instead of 50 (all compilers).
+var3 also re-sized the shift count register, producing the invalid
+'sar mem16,%cx' (trunk with -Cr: 'Asm: [sar mem16,reg16] invalid
+combination of opcode and operands').
+---
+ compiler/optloadmodifystore.pas |  6 ++++++
+ compiler/x86/aoptx86.pas        | 11 ++++++++++-
+ 2 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/optloadmodifystore.pas b/compiler/optloadmodifystore.pas
+index 2c5562c9..e8ac518b 100644
+--- a/compiler/optloadmodifystore.pas
++++ b/compiler/optloadmodifystore.pas
+@@ -405,6 +405,12 @@ unit optloadmodifystore;
+                is_integer(tshlshrnode(ttypeconvnode(right).left).left.resultdef) and
+                is_integer(tshlshrnode(ttypeconvnode(right).left).right.resultdef) and
+                is_integer(ttypeconvnode(tshlshrnode(ttypeconvnode(right).left).left).left.resultdef) and
++               { a logical shift right of a sign-extended value brings copies of the
++                 sign bit into the narrow result: it is only equivalent to a shift of
++                 i itself if i was zero-extended (or not extended at all) }
++               ((ttypeconvnode(right).left.nodetype=shln) or
++                not(is_signed(left.resultdef)) or
++                (left.resultdef.size=tshlshrnode(ttypeconvnode(right).left).left.resultdef.size)) and
+                ((localswitches*[cs_check_overflow,cs_check_range])=[]) and
+                ((right.localswitches*[cs_check_overflow,cs_check_range])=[]) and
+                valid_for_var(ttypeconvnode(tshlshrnode(ttypeconvnode(right).left).left).left,false) and
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 877b65aa..47a5abf2 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -15098,6 +15098,11 @@ unit aoptx86;
+             )
+           ) and
+           IsFoldableArithOp(taicpu(hp1),taicpu(p).oper[1]^.reg) and
++          { A right shift brings in the bits above the destination size: done
++            in the narrow size, a logical shift is only equivalent after a zero
++            extension and an arithmetic shift only after a sign extension }
++          not ((taicpu(hp1).opcode=A_SHR) and (taicpu(p).opcode<>A_MOVZX)) and
++          not ((taicpu(hp1).opcode=A_SAR) and (taicpu(p).opcode<>A_MOVSX)) and
+           GetNextInstruction(hp1,hp2) and
+           MatchInstruction(hp2,A_MOV,[]) and
+           (taicpu(hp2).oper[0]^.typ = top_reg) and
+@@ -15141,7 +15146,11 @@ unit aoptx86;
+               2:
+                 begin
+                   taicpu(hp1).loadoper(1,taicpu(hp2).oper[1]^);
+-                  if (taicpu(hp1).oper[0]^.typ = top_reg) then
++                  { the count of a shift stays in CL }
++                  if (taicpu(hp1).oper[0]^.typ = top_reg) and
++                    (taicpu(hp1).opcode<>A_SHL) and
++                    (taicpu(hp1).opcode<>A_SHR) and
++                    (taicpu(hp1).opcode<>A_SAR) then
+                     setsubreg(taicpu(hp1).oper[0]^.reg,getsubreg(taicpu(hp2).oper[0]^.reg));
+                 end;
+               else

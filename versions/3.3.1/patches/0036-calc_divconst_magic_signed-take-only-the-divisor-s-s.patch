@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 02:55:58 +0100
+Subject: [PATCH 36/75] calc_divconst_magic_signed: take only the divisor's
+ sign bit for N < 64 (#41956)
+
+---
+ compiler/cgutils.pas | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/cgutils.pas b/compiler/cgutils.pas
+index dce252a5..60a2c712 100644
+--- a/compiler/cgutils.pas
++++ b/compiler/cgutils.pas
+@@ -425,7 +425,10 @@ uses
+         two_N_minus_1:=aWord(1) shl (N-1);
+ 
+         ad:=abs(d);
+-        t:=two_N_minus_1+(aWord(d) shr (N-1));
++        { t = 2**(N-1) + (1 if d<0 else 0). aWord may be wider than N, and then
++          aWord(d) shr (N-1) of a negative d is not 1 but 2**(aIntBits-N+1)-1,
++          which corrupts anc and with it the magic number and shift }
++        t:=two_N_minus_1+((aWord(d) shr (N-1)) and 1);
+         anc:=t-1-t mod ad;               { absolute value of nc }
+         p:=(N-1);                        { initialize p }
+         q1:=two_N_minus_1 div anc;       { initialize q1 = 2**p/abs(nc) }

@@ -1,0 +1,126 @@
+# target	class	hosts	binutils	make_args	run	notes
+# class: internal = FPC assembler+linker only; binutils = needs GNU as/ld (built from binutils 2.42, shipped in cross/bin);
+#        clang = needs clang as assembler; sdk = units build, linking needs a vendor SDK/sysroot we do not ship;
+#        excluded = not built (reason in notes). hosts = toolchain hosts that ship this target.
+# binutils = GNU tool prefix (built for every host by scripts/build-binutils.sh) ('-' internal, clang:<triple> = clang integrated assembler).
+# make_args: ;-separated VAR=value for make (SUBARCH, CROSSOPT, PPSUF); UNITDIR=<dir> ships the units where the
+# compiler looks for them; SMOKE=<options> (or SMOKE=unit) only changes the hello-world smoke test.
+x86_64-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	x86_64-linux-gnu-	-	qemu-x86_64	GNU ld (as is internal); static, no libc for plain programs; cthreads/C libs need a sysroot
+aarch64-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	aarch64-linux-gnu-	-	qemu-aarch64	static, no libc for plain programs; cthreads/C libs need a sysroot
+i386-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	i686-linux-gnu-	-	qemu-i386	
+arm-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	arm-linux-gnueabihf-	-	qemu-arm	FPC default ARM ABI (EABI); armhf via -CaEABIHF -CfVFPV3
+armeb-linux	excluded	-	arm-linux-gnueabi-	-	qemu-armeb	the big-endian ARM compiler is built under the little-endian name (ppcrossarm), so it cannot ship next to arm; only RTL built
+powerpc-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	powerpc-linux-gnu-	-	qemu-ppc	
+powerpc64-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	powerpc64-linux-gnu-	-	qemu-ppc64	big-endian ELFv1
+mips-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	mips-linux-gnu-	-	qemu-mips	
+mipsel-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	mipsel-linux-gnu-	-	qemu-mipsel	
+mips64-linux	excluded	-	mips64-linux-gnuabi64-	PPSUF=mips64	qemu-mips64	compiler internal error 2002122101 compiling rtl/inc/flt_core.inc (trunk mips64 backend)
+mips64el-linux	excluded	-	mips64el-linux-gnuabi64-	-	qemu-mips64el	compiler internal error 2002122101 compiling rtl/inc/flt_core.inc (trunk mips64 backend)
+sparc-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	sparc64-linux-gnu-	-	qemu-sparc32plus	sparc64 binutils in 32-bit mode
+sparc64-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	sparc64-linux-gnu-	-	qemu-sparc64	
+m68k-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	m68k-linux-gnu-	-	qemu-m68k	
+riscv32-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	riscv64-linux-gnu-	-	qemu-riscv32	
+riscv64-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	riscv64-linux-gnu-	-	qemu-riscv64	
+loongarch64-linux	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	loongarch64-linux-gnu-	-	qemu-loongarch64	
+xtensa-linux	excluded	-	xtensa-lx106-elf-	-	-	needs xtensa-linux-gnu binutils (not packaged; the lx106 ELF assembler rejects the Linux output)
+x86_64-win64	internal	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	-	-	wine	internal assembler + PE linker
+i386-win32	internal	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	-	-	wine	internal assembler + PE linker
+aarch64-win64	clang	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	clang:aarch64-windows-gnu	-	-	clang assembles, internal PE linker; run on Windows ARM64
+wasm32-wasip1	internal	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	-	-	wasmtime	internal assembler + wasm linker
+wasm32-wasip1threads	internal	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	-	-	wasmtime	
+wasm32-wasip2	excluded	-	-	-	-	RTL skeleton (FPC marks wasip2 under development): WasmGrowMemoryCallback undefined
+wasm32-embedded	internal	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	-	SMOKE=unit	-	linking needs wasm-ld (lld)
+i386-go32v2	internal	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	i586-pc-msdosdjgpp-	UNITDIR=go32v2	-	DOS (DJGPP): internal COFF assembler + linker; building the RTL needs the djgpp as (binutils-djgpp)
+i386-nativent	internal	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	-	-	-	Windows NT native API
+i386-wince	internal	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	-	-	-	Windows CE x86
+arm-wince	internal	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	-	-	-	Windows CE ARM
+i386-netware	excluded	-	i686-linux-gnu-	-	-	internal NetWare linker fails on hello world (undefined FPC_SYSTEMMAIN)
+i386-netwlibc	excluded	-	i686-linux-gnu-	-	-	RTL needs pre/libcpre.gcc.o from the Novell LibC SDK (not in the source tree)
+i386-wdosx	excluded	-	-	-	-	no make target in trunk (removed from MAKEFILETARGETS)
+i8086-msdos	internal	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	-	CROSSOPT=-CX -XXs;UNITDIR=msdos	-	DOS 16-bit, internal OMF assembler + linker; RTL needs nasm; RTL built smartlinked (-CX -XXs): the system unit overflows one 64 KB code segment otherwise
+i8086-embedded	internal	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	-	CROSSOPT=-CX -XXs;UNITDIR=embedded	-	RTL needs nasm; RTL built smartlinked (-CX -XXs): the system unit overflows one 64 KB code segment otherwise
+i8086-win16	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	-	CROSSOPT=-CX -XXs;UNITDIR=win16	-	linking needs OpenWatcom wlink; RTL built smartlinked (-CX -XXs): the system unit overflows one 64 KB code segment otherwise
+z80-zxspectrum	excluded	-	-	-	-	the internal z80 linker does not link hello world yet (undefined PASCALMAIN; zxspectrum also needs ihxutil)
+z80-msxdos	excluded	-	-	-	-	the internal z80 linker does not link hello world yet (undefined PASCALMAIN; zxspectrum also needs ihxutil)
+z80-amstradcpc	excluded	-	-	-	-	the internal z80 linker does not link hello world yet (undefined PASCALMAIN; zxspectrum also needs ihxutil)
+z80-embedded	internal	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	-	-	-	linking needs sdcc sdldz80
+x86_64-freebsd	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	x86_64-kfreebsd-gnu-	-	-	ld with elf_x86_64_fbsd (binutils-x86-64-kfreebsd-gnu)
+i386-freebsd	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	i686-kfreebsd-gnu-	-	-	
+aarch64-freebsd	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	aarch64-linux-gnu-	-	-	
+powerpc64-freebsd	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	powerpc64-linux-gnu-	-	-	
+x86_64-netbsd	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	x86_64-kfreebsd-gnu-	-	-	
+i386-netbsd	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	i686-kfreebsd-gnu-	-	-	
+arm-netbsd	excluded	-	arm-linux-gnueabi-	-	-	does not build from source: rtl/netbsd/arm has no syscallh.inc
+m68k-netbsd	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	m68k-linux-gnu-	-	-	
+powerpc-netbsd	excluded	-	powerpc-linux-gnu-	-	-	not needed (owner)
+x86_64-openbsd	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	x86_64-kfreebsd-gnu-	-	-	linking needs an OpenBSD libc sysroot (crt*.o, libc); x86_64 links with ld.lld
+i386-openbsd	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	i686-kfreebsd-gnu-	-	-	linking needs an OpenBSD libc sysroot (crt*.o, libc); x86_64 links with ld.lld
+x86_64-dragonfly	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	x86_64-kfreebsd-gnu-	-	-	links against libc: needs a DragonFly sysroot
+x86_64-solaris	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	x86_64-linux-gnu-	-	-	links against Solaris/illumos libc
+i386-solaris	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	i686-linux-gnu-	-	-	links against Solaris/illumos libc
+sparc-solaris	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	sparc64-linux-gnu-	CROSSOPT=-Aas	-	links against Solaris/illumos libc; Solaris targets default to `gas`, built and used with GNU as (-Aas)
+x86_64-haiku	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	x86_64-linux-gnu-	-	-	needs Haiku cross binutils + sysroot
+i386-haiku	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	i686-linux-gnu-	-	-	needs Haiku cross binutils + sysroot
+x86_64-aros	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	x86_64-linux-gnu-	-	-	needs AROS SDK
+i386-aros	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	i686-linux-gnu-	-	-	needs AROS SDK
+arm-aros	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	arm-linux-gnueabi-	-	-	needs AROS SDK
+aarch64-android	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	aarch64-linux-gnu-	-	-	linking needs the Android NDK (not redistributable)
+arm-android	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	arm-linux-gnueabi-	-	-	linking needs the Android NDK
+x86_64-android	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	x86_64-linux-gnu-	-	-	linking needs the Android NDK
+i386-android	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	i686-linux-gnu-	-	-	linking needs the Android NDK
+mipsel-android	excluded	-	-	-	-	NDK dropped MIPS (r17, 2018)
+aarch64-darwin	clang	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	clang:arm64-apple-macos11	-	native	Linux hosts: units only (link needs Apple SDK + ld64, macOS only); macOS host: native
+x86_64-darwin	clang	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	clang:x86_64-apple-macos10.9	-	-	link needs Apple SDK + ld64 (macOS host); runs under Rosetta 2
+aarch64-ios	clang	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	clang:arm64-apple-ios12	-	-	link needs Xcode iOS SDK
+aarch64-iphonesim	clang	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	clang:arm64-apple-ios12-simulator	-	-	link needs Xcode simulator SDK
+x86_64-iphonesim	clang	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	clang:x86_64-apple-ios12-simulator	-	-	link needs Xcode simulator SDK
+arm-ios	excluded	-	-	-	-	32-bit iOS: no current Xcode SDK can link it
+i386-darwin	excluded	-	-	-	-	32-bit macOS: no current SDK (removed in Xcode 10)
+i386-iphonesim	excluded	-	-	-	-	32-bit simulator: no current SDK
+powerpc-darwin	excluded	-	-	-	-	PowerPC Mac OS X: needs Apple cctools as + 10.5 SDK
+powerpc64-darwin	excluded	-	-	-	-	PowerPC Mac OS X: needs Apple cctools as + 10.5 SDK
+arm-embedded	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	arm-none-eabi-	SUBARCH=armv7m	-	units for one SUBARCH (armv7m, Cortex-M3); other SUBARCHes need their own build
+avr-embedded	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	avr-	SUBARCH=avr5	-	units for SUBARCH avr5 (ATmega328P class)
+riscv32-embedded	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	riscv64-unknown-elf-	SUBARCH=rv32imac	-	SUBARCH rv32imac
+riscv64-embedded	excluded	-	riscv64-unknown-elf-	-	-	compiler internal error 200408222 compiling rtl/inc/genmath.inc
+mipsel-embedded	excluded	-	mipsel-linux-gnu-	SUBARCH=pic32mx	-	does not build from source: rtl/embedded has no rule for mipsel/startup.s (SUBARCH pic32mx)
+aarch64-embedded	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	aarch64-linux-gnu-	-	-	
+x86_64-embedded	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	x86_64-linux-gnu-	-	-	
+i386-embedded	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	i686-linux-gnu-	-	-	
+m68k-embedded	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	m68k-linux-gnu-	-	-	
+xtensa-embedded	excluded	-	xtensa-lx106-elf-	SUBARCH=lx106	-	Debian xtensa-lx106-elf as rejects the -EL option FPC passes for the embedded target (xtensa-freertos builds)
+arm-freertos	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	arm-none-eabi-	SUBARCH=armv7m	-	linking needs FreeRTOS
+riscv32-freertos	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	riscv64-unknown-elf-	SUBARCH=rv32imac;SMOKE=unit	-	linking needs FreeRTOS and an ESP-IDF controller unit (none ships for riscv32); smoke compiles a unit
+xtensa-freertos	excluded	-	xtensa-lx106-elf-	SUBARCH=lx106;SMOKE=-WpESP8266	-	pending: needs the core-specific (lx106) GNU binutils overlay, which plain binutils sources lack
+arm-gba	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	arm-none-eabi-	-	-	Game Boy Advance: linking needs devkitARM (libsysbase.a)
+arm-nds	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	arm-none-eabi-	-	-	Nintendo DS: linking needs devkitARM libnds
+mipsel-ps1	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	mipsel-linux-gnu-	-	-	PlayStation
+powerpc-wii	sdk	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	powerpc-linux-gnu-	-	-	needs devkitPPC/libogc
+arm-palmos	excluded	-	-	-	-	needs PalmOS SDK (proprietary, not obtainable)
+arm-symbian	excluded	-	-	-	-	Symbian SDK (discontinued)
+i386-symbian	excluded	-	-	-	-	Symbian SDK (discontinued)
+i386-beos	excluded	-	-	-	-	BeOS: needs BeOS binutils/sysroot; superseded by Haiku
+i386-os2	excluded	-	-	-	-	needs OS/2 EMX toolchain (emxbind, a.out as/ld)
+i386-emx	excluded	-	-	-	-	needs EMX toolchain
+i386-watcom	excluded	-	-	-	-	RTL startup needs the OpenWatcom assembler (wasm); OpenWatcom not packaged
+powerpc-aix	excluded	-	-	-	-	needs AIX system as/ld (XCOFF)
+powerpc64-aix	excluded	-	-	-	-	needs AIX system as/ld (XCOFF)
+powerpc-amiga	excluded	-	-	-	-	needs AmigaOS 4 SDK
+powerpc-macosclassic	excluded	-	-	-	-	needs Apple MPW
+m68k-macosclassic	excluded	-	-	-	-	needs Apple MPW
+m68k-amiga	excluded	-	-	-	-	needs m68k-amigaos a.out binutils or vasm/vlink (vasm/vlink: non-commercial licence)
+m68k-atari	excluded	-	-	-	-	needs vasm/vlink (non-commercial licence)
+m68k-sinclairql	excluded	-	-	-	-	needs vasm/vlink (non-commercial licence)
+m68k-human68k	excluded	-	-	-	-	needs vasm/vlink (non-commercial licence)
+m68k-palmos	excluded	-	-	-	-	needs PalmOS SDK + m68k a.out tools
+jvm-java	excluded	-	-	-	-	needs a JDK + FPC's jasmin.jar (not in the source tree); RTL-only target
+jvm-android	excluded	-	-	-	-	as jvm-java, plus Android SDK
+armeb-embedded	excluded	-	arm-none-eabi-	SUBARCH=armv4t	-	does not build from source: rtl/embedded has no armeb/makefile.cpu
+x86_6432-linux	excluded	-	-	-	-	x32 ABI: registered in the compiler but no RTL/make target
+avr-freertosd	excluded	-	-	-	-	registered in the compiler but no RTL/make target
+i386-freertos	excluded	-	-	-	-	registered in the compiler but no RTL/make target
+i8086-freertos	excluded	-	-	-	-	registered in the compiler but no RTL/make target
+m68k-freertos	excluded	-	-	-	-	registered in the compiler but no RTL/make target
+mipsel-freertos	excluded	-	-	-	-	registered in the compiler but no RTL/make target
+riscv64-freertos	excluded	-	-	-	-	registered in the compiler but no RTL/make target
+x86_64-freertos	excluded	-	-	-	-	registered in the compiler but no RTL/make target

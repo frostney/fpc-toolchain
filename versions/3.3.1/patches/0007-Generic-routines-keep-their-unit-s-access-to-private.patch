@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 17:43:25 +0100
+Subject: [PATCH 07/75] Generic routines keep their unit's access to private
+ members (#40670)
+
+Since #40621 a private member of a generic record or class is checked
+against the generic's unit, but a global generic routine specialized in
+another unit is checked against the specializing unit, so a generic
+routine can no longer access private members of a type declared in its
+own unit. Treat code of a specialized routine (or a routine nested in
+one) as belonging to the unit that declares the generic routine.
+---
+ compiler/symtable.pas | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/compiler/symtable.pas b/compiler/symtable.pas
+index ccac2138..5d5d7bc7 100644
+--- a/compiler/symtable.pas
++++ b/compiler/symtable.pas
+@@ -3318,6 +3318,8 @@ implementation
+         curstruct : tabstractrecorddef;
+ 
+       function is_current_unit(st:tsymtable):boolean;
++        var
++          pi : tprocinfo;
+         begin
+           result :=
+             (
+@@ -3330,6 +3332,20 @@ implementation
+                 st.iscurrentunit
+               )
+             );
++          { a generic routine that is specialized in another unit keeps the
++            access rights of the unit that declares it (#40670) }
++          if not result and not assigned(curstruct) then
++            begin
++              pi:=current_procinfo;
++              while assigned(pi) do
++                begin
++                  if pi.procdef.is_specialization and
++                     assigned(pi.procdef.genericdef) and
++                     (pi.procdef.genericdef.owner.moduleid=st.moduleid) then
++                    exit(true);
++                  pi:=pi.parent;
++                end;
++            end;
+         end;
+ 
+       var

@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 22 Oct 2026 03:11:48 +0100
+Subject: [PATCH 59/75] x86 MovMovXX2MovXX: truncate the constant of a wider
+ MOV before the sign extension
+
+---
+ compiler/x86/aoptx86.pas | 14 +++++++-------
+ tests/tbs/tb9055.pp      | 40 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 47 insertions(+), 7 deletions(-)
+ create mode 100644 tests/tbs/tb9055.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 940c3446..c416f4e0 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -3350,13 +3350,13 @@ unit aoptx86;
+ 
+       procedure convert_mov_value(signed_movop: tasmop; max_value: tcgint); inline;
+         begin
+-          if taicpu(hp1).opcode = signed_movop then
+-            begin
+-              if taicpu(p).oper[0]^.val > max_value shr 1 then
+-                taicpu(p).oper[0]^.val:=taicpu(p).oper[0]^.val - max_value - 1 { Convert to signed }
+-            end
+-          else
+-            taicpu(p).oper[0]^.val:=taicpu(p).oper[0]^.val and max_value; { Trim to unsigned }
++          { The MOV may write a wider register than the MOVZX/MOVSX reads
++            (e.g. "movq $x,%rax; movsbq %al,%rax"), so only the low bits of
++            the constant are significant }
++          taicpu(p).oper[0]^.val:=taicpu(p).oper[0]^.val and max_value; { Trim to unsigned }
++          if (taicpu(hp1).opcode = signed_movop) and
++            (taicpu(p).oper[0]^.val > max_value shr 1) then
++            taicpu(p).oper[0]^.val:=taicpu(p).oper[0]^.val - max_value - 1; { Convert to signed }
+         end;
+ 
+       function GetNextHp1(const in_p: tai): Boolean;
+diff --git a/tests/tbs/tb9055.pp b/tests/tbs/tb9055.pp
+new file mode 100644
+index 00000000..56d0ccb5
+--- /dev/null
++++ b/tests/tbs/tb9055.pp
+@@ -0,0 +1,40 @@
++{ %OPT=-O2 }
++{ x86 OptPass1MOV (MovMovXX2MovXX 2): "movq $1192,%rax; movsbq %al,%rax"
++  became "movq $936,%rax": the constant of the wider MOV was not truncated
++  to the size read by MOVSX before the sign conversion }
++program tb9055;
++
++{$mode objfpc}
++
++var
++  g: int64;
++  b: boolean = true;
++
++function f: int64; inline;
++begin
++  if true then
++    exit(1192);
++  if b then
++    g:=1;
++end;
++
++function f2: int64; inline;
++begin
++  if true then
++    exit($123456789A);
++  if b then
++    g:=1;
++end;
++
++begin
++  g:=shortint(f);
++  if g<>-88 then
++    halt(1);
++  g:=smallint(f2);
++  if g<>$789A then
++    halt(2);
++  g:=longint(f2);
++  if g<>$3456789A then
++    halt(3);
++  writeln('ok');
++end.

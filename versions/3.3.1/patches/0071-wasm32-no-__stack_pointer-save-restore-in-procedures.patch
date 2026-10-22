@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 22 Oct 2026 11:49:19 +0100
+Subject: [PATCH 71/75] wasm32: no __stack_pointer save/restore in procedures
+ without a frame
+
+Every procedure saved the __stack_pointer global in its entry code
+(global.get, local.set) and restored it at its exit (local.get,
+global.set), also when it has no frame in linear memory (local size 0)
+and so never changes the global. Such procedures now skip both, unless
+they set the base pointer (fpc_wasm32_set_base_pointer), contain inline
+assembler, or catch exceptions with native wasm exception handling (a
+procedure that raised below them did not run its exit code, so their
+restore also resets __stack_pointer after a handled exception; with bf
+exceptions every procedure returns through its exit code). The entry
+code records its decision in tcpuprocinfo.RestoreStackPointer for the
+exit code.
+
+GocciaScript VM under wasmtime 49 (callgrind instruction counts): AWFY
+geomean a further 0.997x (every one of 17 workloads lower), .wasm
+29.24 MB -> 29.03 MB.
+---
+ compiler/wasm32/cpupi.pas   |  2 ++
+ compiler/wasm32/hlcgcpu.pas | 26 +++++++++++++++++++++++++-
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/wasm32/cpupi.pas b/compiler/wasm32/cpupi.pas
+index d88b7271..3ac02baa 100644
+--- a/compiler/wasm32/cpupi.pas
++++ b/compiler/wasm32/cpupi.pas
+@@ -54,6 +54,8 @@ interface
+     public
+       { label to the nearest local exception handler }
+       CurrRaiseLabel : tasmlabel;
++      { the entry code saved __stack_pointer, the exit code restores it }
++      RestoreStackPointer : boolean;
+ 
+       constructor create(aparent: tprocinfo); override;
+       destructor destroy; override;
+diff --git a/compiler/wasm32/hlcgcpu.pas b/compiler/wasm32/hlcgcpu.pas
+index 3a79f85c..1da49da1 100644
+--- a/compiler/wasm32/hlcgcpu.pas
++++ b/compiler/wasm32/hlcgcpu.pas
+@@ -2173,10 +2173,33 @@ implementation
+       pd:=tcpuprocdef(current_procinfo.procdef);
+       g_procdef(list,pd,false);
+ 
++      tcpuprocinfo(current_procinfo).RestoreStackPointer:=false;
+       if not nostackframe then
+         begin
+ 
+           ttgwasm(tg).allocframepointer(list,pd.frame_pointer_ref);
++          { A procedure without a frame in linear memory does not change
++            __stack_pointer, so it does not need to save it here and restore
++            it at its exit (one global.get and one global.set per call),
++            unless
++            - it sets the base pointer (fpc_wasm32_set_base_pointer: then the
++              base pointer is already allocated here) or uses inline assembler,
++            - it catches exceptions with native wasm exception handling: a
++              procedure that raised below it did not run its exit code, so the
++              restore at this procedure's exit also resets __stack_pointer
++              after a handled exception (with bf exceptions every procedure
++              returns through its exit code). }
++          if (localsize=0) and
++             (pd.base_pointer_ref.base<>NR_LOCAL_STACK_POINTER_REG) and
++             not(pi_has_assembler_block in current_procinfo.flags) and
++             (
++               not(pi_uses_exceptions in current_procinfo.flags) or
++               (ts_wasm_bf_exceptions in current_settings.targetswitches) or
++               (ts_wasm_no_exceptions in current_settings.targetswitches)
++             ) then
++            exit;
++
++          tcpuprocinfo(current_procinfo).RestoreStackPointer:=true;
+           if pd.base_pointer_ref.base<>NR_LOCAL_STACK_POINTER_REG then
+             ttgwasm(tg).allocbasepointer(list,pd.base_pointer_ref);
+ 
+@@ -2207,7 +2230,8 @@ implementation
+       pd: tcpuprocdef;
+     begin
+       pd:=tcpuprocdef(current_procinfo.procdef);
+-      if not nostackframe then
++      if not nostackframe and
++         tcpuprocinfo(current_procinfo).RestoreStackPointer then
+         begin
+           list.Concat(taicpu.op_ref(a_local_get,pd.base_pointer_ref));
+           incstack(list,1);

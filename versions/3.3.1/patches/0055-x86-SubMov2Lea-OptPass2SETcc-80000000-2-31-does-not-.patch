@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 09:50:36 +0100
+Subject: [PATCH 55/75] x86 SubMov2Lea / OptPass2SETcc: $80000000 (-2^31) does
+ not fit a sign-extended LEA displacement
+
+---
+ compiler/x86/aoptx86.pas |  5 ++++-
+ tests/tbs/tb9053.pp      | 34 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 38 insertions(+), 1 deletion(-)
+ create mode 100644 tests/tbs/tb9053.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index fa775fbc..99df3342 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -13381,7 +13381,7 @@ unit aoptx86;
+                                     (taicpu(next).oper[1]^.typ <> top_reg) or
+                                     { Must write to a register }
+                                     (taicpu(next).oper[0]^.typ <> top_const) or
+-                                    (taicpu(next).oper[0]^.val = $80000000) then
++                                    (abs(taicpu(next).oper[0]^.val) = $80000000) then
+                                     { Can't subtract a register with LEA - also
+                                       check that the value isn't -2^31, as this
+                                       can't be negated }
+@@ -17320,6 +17320,9 @@ unit aoptx86;
+             if MatchInstruction(hp1, A_MOV, [taicpu(p).opsize]) and
+               (taicpu(hp1).oper[1]^.typ = top_reg) and
+               MatchOperand(taicpu(hp1).oper[0]^, taicpu(p).oper[1]^.reg) and
++              { -x must fit in the signed 32-bit displacement of the LEA:
++                "subq $-2147483648,%reg" cannot become "leaq 2147483648(%reg)" }
++              (taicpu(p).oper[0]^.val <> -2147483648) and
+               (
+                 { Instructions are guaranteed to be adjacent on -O2 and under }
+                 not (cs_opt_level3 in current_settings.optimizerswitches) or
+diff --git a/tests/tbs/tb9053.pp b/tests/tbs/tb9053.pp
+new file mode 100644
+index 00000000..cc81a864
+--- /dev/null
++++ b/tests/tbs/tb9053.pp
+@@ -0,0 +1,34 @@
++{ %OPT=-O1 -Cr }
++{ x86 OptPass2SUB (SubMov2LeaSub): "subq $-2147483648,%rbx; movq %rbx,%rax"
++  became "leaq 2147483648(%rbx),%rax", whose displacement is encoded as a
++  sign-extended 32-bit value, i.e. -2147483648: the range check of
++  Dec(v, Low(LongInt)) then failed for an in-range result }
++program tb9053;
++
++{$mode objfpc}
++
++function f: longint; noinline;
++var
++  v: longint;
++begin
++  v:=-975190727;
++  dec(v,longint(-2147483648));
++  f:=v;
++end;
++
++function g(x: int64): int64; noinline;
++var
++  y: int64;
++begin
++  dec(x,int64(-2147483648));
++  y:=x;
++  g:=x+y;
++end;
++
++begin
++  if f<>1172292921 then
++    halt(1);
++  if g(10)<>2*(10+2147483648) then
++    halt(2);
++  writeln('ok');
++end.

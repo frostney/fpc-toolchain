@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 01:59:33 +0100
+Subject: [PATCH 30/75] Scale an unscaled Currency value passed as a Currency
+ parameter or array element
+
+---
+ compiler/ncal.pas |  3 +++
+ compiler/ncnv.pas | 26 +++++++++++++++++++++++++-
+ compiler/nld.pas  |  1 +
+ 3 files changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/ncal.pas b/compiler/ncal.pas
+index 8854b116..f7f6a82c 100644
+--- a/compiler/ncal.pas
++++ b/compiler/ncal.pas
+@@ -1286,6 +1286,9 @@ implementation
+                        begin
+                          check_ranges(left.fileinfo,left,parasym.vardef);
+                          inserttypeconv(left,parasym.vardef);
++                         { a Currency value parameter must be passed scaled }
++                         if parasym.varspez in [vs_value,vs_const,vs_constref] then
++                           scale_currency_value(left);
+                        end;
+                       if codegenerror then
+                         exit;
+diff --git a/compiler/ncnv.pas b/compiler/ncnv.pas
+index 5746cc24..11761717 100644
+--- a/compiler/ncnv.pas
++++ b/compiler/ncnv.pas
+@@ -318,6 +318,11 @@ interface
+     function arrayconstructor_can_be_set(p:tnode):boolean;
+     procedure insert_varargstypeconv(var p : tnode; iscvarargs: boolean);
+ 
++    { p has a Currency type: if its value is not scaled by 10000 yet (it does
++      not have nf_is_currency, e.g. the quotient of two Currency values), insert
++      the conversion that scales it, as tassignmentnode does for its right side }
++    procedure scale_currency_value(var p : tnode);
++
+     function maybe_global_proc_to_nested(var fromnode: tnode; todef: tdef): boolean;
+ 
+ 
+@@ -781,6 +786,23 @@ implementation
+       end;
+ 
+ 
++    procedure scale_currency_value(var p : tnode);
++      begin
++        if is_currency(p.resultdef) and
++           not(nf_is_currency in p.flags) then
++          begin
++            p:=ctypeconvnode.create(p,p.resultdef);
++            include(p.flags,nf_is_currency);
++            { force the conversion so the scalar is generated }
++            if s64currencytype.typ=floatdef then
++              ttypeconvnode(p).convtype:=tc_real_2_real
++            else
++              ttypeconvnode(p).convtype:=tc_int_2_int;
++            typecheckpass(p);
++          end;
++      end;
++
++
+     procedure insert_varargstypeconv(var p : tnode; iscvarargs: boolean);
+       begin
+         { procvars without arguments in variant arrays are always called by
+@@ -830,7 +852,9 @@ implementation
+               if not(iscvarargs) then
+                 begin
+                   if not(is_currency(p.resultdef)) then
+-                    p:=ctypeconvnode.create(p,pbestrealtype^);
++                    p:=ctypeconvnode.create(p,pbestrealtype^)
++                  else
++                    scale_currency_value(p);
+                 end
+               else
+                 begin
+diff --git a/compiler/nld.pas b/compiler/nld.pas
+index ea02d267..8a1be667 100644
+--- a/compiler/nld.pas
++++ b/compiler/nld.pas
+@@ -1409,6 +1409,7 @@ implementation
+            while assigned(hp) do
+             begin
+               inserttypeconv(hp.left,def);
++              scale_currency_value(hp.left);
+               hp:=tarrayconstructornode(hp.right);
+             end;
+          end;

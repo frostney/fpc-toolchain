@@ -1,0 +1,227 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 22 Oct 2026 11:49:18 +0100
+Subject: [PATCH 70/75] wasm32: encode positive reference offsets as the memarg
+ offset of loads and stores
+
+prepare_stack_for_ref computed every address with a base register as
+"local.get base; i32.const offset; i32.add" and then loaded or stored
+with memarg offset 0. Engines see the sum as an ordinary i32 value:
+Cranelift (wasmtime) hoists base+offset out of loops when the base is
+loop-invariant (the frame pointer, Self) and, in large routines such as
+an interpreter's dispatch loop, keeps the hoisted sums in spill slots,
+so each access became a reload of the address from the native stack
+plus the load. A positive offset now stays in the reference and is
+written as the memarg offset of the load/store that follows, which the
+engine folds into the addressing mode (x86: one mov off(heap,base)).
+
+The memarg offset is added without wrapping (an access whose base +
+offset exceeds 4 GiB traps), i32.add wraps. That only differs if the
+base register is not an address but an address minus a constant. The
+generic indexed array access produces exactly that: it leaves the array
+offset, minus the lower bound and plus a constant added to the index
+("a[i+5]"), times the element size, in the reference's offset, so
+base+index can be below address 0 for valid accesses (an array
+[-1000000..0] at a low address). twasmvecnode therefore adds such a
+positive offset to the address right after the index; offsets added
+later (fields, the parts of an inline record copy) are relative to the
+element itself. Negative offsets keep the explicit i32.sub.
+
+Test: tests/test/cg/tarrlow1.pp (negative lower bounds, index plus a
+constant, record copies of array elements; passes on x86_64 and wasm32).
+
+GocciaScript VM under wasmtime 49 (callgrind instruction counts): AWFY
+geomean 0.949x (all 17 workloads 0.914x..0.979x); GocciaRunner.wasm
+30.57 MB -> 29.24 MB.
+---
+ compiler/wasm32/hlcgcpu.pas  | 45 ++++++++++++------------------------
+ compiler/wasm32/nwasmmem.pas | 38 ++++++++++++++++++++++++++++++
+ tests/test/cg/tarrlow1.pp    | 28 ++++++++++++++++++++++
+ 3 files changed, 81 insertions(+), 30 deletions(-)
+ create mode 100644 tests/test/cg/tarrlow1.pp
+
+diff --git a/compiler/wasm32/hlcgcpu.pas b/compiler/wasm32/hlcgcpu.pas
+index 3b7b91ad..3a79f85c 100644
+--- a/compiler/wasm32/hlcgcpu.pas
++++ b/compiler/wasm32/hlcgcpu.pas
+@@ -1279,13 +1279,6 @@ implementation
+               incstack(list,1);
+               list.Concat(taicpu.op_none(a_i32_sub));
+               decstack(list,1);
+-            end
+-          else if ref.offset>0 then
+-            begin
+-              list.Concat(taicpu.op_const(a_i32_const,ref.offset));
+-              incstack(list,1);
+-              list.Concat(taicpu.op_none(a_i32_add));
+-              decstack(list,1);
+             end;
+           if dup then
+             begin
+@@ -1308,18 +1301,14 @@ implementation
+                   incstack(list,1);
+                   list.Concat(taicpu.op_none(a_i32_sub));
+                   decstack(list,1);
+-                end
+-              else if ref.offset>0 then
+-                begin
+-                  list.Concat(taicpu.op_const(a_i32_const,ref.offset));
+-                  incstack(list,1);
+-                  list.Concat(taicpu.op_none(a_i32_add));
+-                  decstack(list,1);
+                 end;
+             end;
+           ref.base:=NR_NO;
+           ref.index:=NR_NO;
+-          ref.offset:=0;
++          { a positive offset stays in the reference: the load or store that
++            follows encodes it as its memarg offset (see below) }
++          if ref.offset<0 then
++            ref.offset:=0;
+           ref.symbol:=nil;
+           result:=1;
+         end
+@@ -1342,13 +1331,6 @@ implementation
+                   incstack(list,1);
+                   list.Concat(taicpu.op_none(a_i32_sub));
+                   decstack(list,1);
+-                end
+-              else if ref.offset>0 then
+-                begin
+-                  list.Concat(taicpu.op_const(a_i32_const,ref.offset));
+-                  incstack(list,1);
+-                  list.Concat(taicpu.op_none(a_i32_add));
+-                  decstack(list,1);
+                 end;
+               if dup then
+                 begin
+@@ -1366,16 +1348,19 @@ implementation
+                       incstack(list,1);
+                       list.Concat(taicpu.op_none(a_i32_sub));
+                       decstack(list,1);
+-                    end
+-                  else if ref.offset>0 then
+-                    begin
+-                      list.Concat(taicpu.op_const(a_i32_const,ref.offset));
+-                      incstack(list,1);
+-                      list.Concat(taicpu.op_none(a_i32_add));
+-                      decstack(list,1);
+                     end;
+                 end;
+-              ref.offset:=0;
++              { A positive offset stays in the reference: the load or store
++                that follows encodes it as its memarg offset, so the engine
++                folds it into the address instead of computing a separate
++                i32 sum (which Cranelift hoists out of loops as a loop
++                invariant and then spills). The memarg offset is added
++                without wrapping; that only differs from i32.add if the base
++                is not an address but an address minus a constant, which
++                twasmvecnode avoids for indexed array accesses (negative
++                lower bound, "a[i+5]"). }
++              if ref.offset<0 then
++                ref.offset:=0;
+               ref.symbol:=nil;
+               ref.base:=NR_NO;
+               result:=1;
+diff --git a/compiler/wasm32/nwasmmem.pas b/compiler/wasm32/nwasmmem.pas
+index 380e92c0..9f69d309 100644
+--- a/compiler/wasm32/nwasmmem.pas
++++ b/compiler/wasm32/nwasmmem.pas
+@@ -25,6 +25,8 @@ unit nwasmmem;
+ interface
+ 
+     uses
++      globtype,cgbase,
++      symtype,
+       node,nmem,ncgmem;
+ 
+     type
+@@ -35,11 +37,20 @@ interface
+         function pass_typecheck:tnode;override;
+       end;
+ 
++      { twasmvecnode }
++
++      twasmvecnode = class(tcgvecnode)
++      protected
++        procedure update_reference_reg_mul(maybe_const_reg: tregister; regsize: tdef; l: aint); override;
++      end;
++
+ implementation
+ 
+     uses
+       globals,
+       verbose,
++      aasmdata,
++      cgutils,hlcgobj,
+       symcpu;
+ 
+     { twasmaddrnode }
+@@ -58,6 +69,33 @@ implementation
+         end;
+     end;
+ 
++    { twasmvecnode }
++
++    procedure twasmvecnode.update_reference_reg_mul(maybe_const_reg: tregister; regsize: tdef; l: aint);
++      var
++        hreg: tregister;
++      begin
++        inherited;
++        { The generic code leaves the parts of the element address that do not
++          depend on the index in the reference's offset: the array's own
++          offset, minus the lower bound and plus a constant added to the
++          index ("a[i+5]") times the element size. thlcgwasm encodes a
++          positive offset as the memarg offset of the load or store, which
++          the engine adds without wrapping, while base+index alone can be
++          below the array (a negative lower bound, i+5 with i<0), i.e. below
++          address 0. Add such an offset now, so that the reference addresses
++          the element itself; offsets added later (fields, the parts of a
++          record copy) are then always relative to a valid address. }
++        if location.reference.offset>0 then
++          begin
++            hreg:=hlcg.getaddressregister(current_asmdata.CurrAsmList,get_address_type);
++            hlcg.a_loadaddr_ref_reg(current_asmdata.CurrAsmList,resultdef,get_address_type,location.reference,hreg);
++            reference_reset_base(location.reference,hreg,0,location.reference.temppos,location.reference.alignment,location.reference.volatility);
++          end;
++      end;
++
++
+ begin
+   caddrnode:=twasmaddrnode;
++  cvecnode:=twasmvecnode;
+ end.
+diff --git a/tests/test/cg/tarrlow1.pp b/tests/test/cg/tarrlow1.pp
+new file mode 100644
+index 00000000..607ee64b
+--- /dev/null
++++ b/tests/test/cg/tarrlow1.pp
+@@ -0,0 +1,28 @@
++program tarrlow1;
++
++{ arrays with a negative lower bound and constants added to the index: the
++  element address must not depend on base+index staying above address 0 }
++{$mode objfpc}
++type TR = record a, b: Int64; end;
++var
++  g: array[-1000000..10] of Integer;
++  gs: array[-3..3] of TR;
++  fails: Integer = 0;
++procedure chk(ok: Boolean; const w: string); begin if not ok then begin writeln('FAIL ', w); inc(fails); end; end;
++procedure t(i, j, m: Integer);
++var l: array[-50000..5] of Byte; r: TR; k: Integer; p: ^TR;
++begin
++  g[i] := 7; chk(g[-1000000] = 7, 'g low');
++  g[j + 999999] := 9; chk(g[-1] = 9, 'g i+c');
++  l[i div 20] := 5; chk(l[-50000] = 5, 'local low');
++  gs[m].a := 11; gs[m].b := 12; r := gs[m]; chk((r.a = 11) and (r.b = 12), 'rec copy');
++  p := @gs[-3]; inc(p, 6); p^.b := 77; chk(gs[3].b = 77, 'ptr');
++  for k := -3 to 3 do gs[k].a := k;
++  chk(gs[-3].a + gs[3].a = 0, 'loop');
++  chk(gs[m+3].b = 77, 'm+3');
++end;
++begin
++  t(-1000000, -1000000, 0);
++  if fails <> 0 then halt(1);
++  writeln('ok');
++end.

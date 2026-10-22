@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 00:07:18 +0100
+Subject: [PATCH 21/75] Do not drop the widening of a shift by 32 or more when
+ removing int type conversions (#41820)
+
+Patch proposed in #41820: checkremoveinttypeconvs only narrows shl/shr
+when the count is a constant below the smaller width and, for shr, the
+shifted value is zero-extended. Inlined dword(q shr 32) / dword(q shl 32)
+returned 1 for q=1 at every -O level on trunk.
+---
+ compiler/ncnv.pas | 38 ++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/compiler/ncnv.pas b/compiler/ncnv.pas
+index 707c00d2..5746cc24 100644
+--- a/compiler/ncnv.pas
++++ b/compiler/ncnv.pas
+@@ -3397,6 +3397,7 @@ implementation
+         gotsigned,
+         gotunsigned,
+         gotdivmod: boolean;
++        smallerbits: longint;
+ 
+       { checks whether a node has an accepted resultdef, or originally
+         had one but was implicitly converted to s64bit                 }
+@@ -3447,7 +3448,20 @@ implementation
+         end;
+ 
+ 
++      { true when n is a constant shift count in 0..smallerbits-1; larger
++        counts do not survive reducing the shift to the smaller width
++        (they get masked by constant folding and by the hardware) }
++      function issafeshiftcount(n: tnode): boolean;
++        begin
++          result:=(n.nodetype=ordconstn) and
++            (tordconstnode(n).value>=0) and
++            (tordconstnode(n).value<smallerbits);
++        end;
++
++
+       function docheckremoveinttypeconvs(n: tnode): boolean;
++        var
++          prevsint: boolean;
+         begin
+           if wasoriginallysmallerint(n) then
+             exit(true);
+@@ -3468,12 +3482,24 @@ implementation
+               end;
+             shrn:
+               begin
++                { shr pulls bits in from above the smaller type: the shifted
++                  value must be known zero-extended, so a left operand that
++                  may be negative (sign-extended) disqualifies }
++                prevsint:=gotsint;
+                 result:=wasoriginallysmallerint(tbinarynode(n).left) and
+-                  docheckremoveinttypeconvs(tbinarynode(n).right);
++                  (prevsint or not gotsint) and
++                  docheckremoveinttypeconvs(tbinarynode(n).right) and
++                  issafeshiftcount(tbinarynode(n).right);
++              end;
++            shln:
++              begin
++                result:=docheckremoveinttypeconvs(tbinarynode(n).left) and
++                  docheckremoveinttypeconvs(tbinarynode(n).right) and
++                  issafeshiftcount(tbinarynode(n).right);
+               end;
+             notn:
+               result:=docheckremoveinttypeconvs(tunarynode(n).left);
+-            addn,muln,divn,modn,andn,shln:
++            addn,muln,divn,modn,andn:
+               begin
+                 if n.nodetype in [divn,modn] then
+                   gotdivmod:=true;
+@@ -3504,6 +3530,14 @@ implementation
+         gotminus1:=false;
+         gotsigned:=false;
+         gotunsigned:=false;
++        if u64bit in validints then
++          smallerbits:=64
++        else if u32bit in validints then
++          smallerbits:=32
++        else if u16bit in validints then
++          smallerbits:=16
++        else
++          smallerbits:=8;
+         result:=
+           docheckremoveinttypeconvs(n) and
+           (not(gotdivmod) or (gotsigned xor gotunsigned));

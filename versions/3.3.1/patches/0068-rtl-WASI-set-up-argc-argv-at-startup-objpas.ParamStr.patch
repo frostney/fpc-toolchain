@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 22 Oct 2026 12:32:11 +0100
+Subject: [PATCH 68/75] rtl: WASI: set up argc/argv at startup, objpas.ParamStr
+ returned '' before the first ParamCount
+
+The WASI system unit sets up argc/argv lazily (setup_arguments, called
+from ParamCount and System.ParamStr). objpas.ParamStr, the AnsiString
+version used in {$mode objfpc} and {$mode delphi}, reads argc/argv
+directly, so in a program that calls ParamStr(1) before ParamCount it
+saw argc=0 and returned '' for every parameter (ParamStr(0) worked, it
+goes through System.ParamStr):
+
+  {$mode objfpc} begin writeln(ParamStr(1)); end.   { empty under wasmtime p a }
+
+Call setup_arguments in the system unit's initialization, next to
+Setup_Environment.
+---
+ rtl/wasicommon/system.pp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/rtl/wasicommon/system.pp b/rtl/wasicommon/system.pp
+index 2ba1a48f..bd071ce2 100644
+--- a/rtl/wasicommon/system.pp
++++ b/rtl/wasicommon/system.pp
+@@ -528,6 +528,11 @@ begin
+   { Setup stdin, stdout and stderr }
+   SysInitStdIO;
+   Setup_Environment;
++  { set up argc/argv now: objpas.ParamStr (the AnsiString version of
++    {$mode objfpc} and {$mode delphi}) reads them directly and does not call
++    setup_arguments, so before the first ParamCount/System.ParamStr call it
++    returned '' for every parameter }
++  setup_arguments;
+   Setup_PreopenedDirs;
+ {$ifdef FPC_WASM_THREADS}
+   TLSInfoBlock:=Nil;

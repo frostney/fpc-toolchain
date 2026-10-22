@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 06:00:00 +0100
+Subject: [PATCH 52/75] x86 OptPass1_V_MOVAP: MovapXOpMovapX2Op and the FMA
+ variant need the source register unchanged up to the operation
+
+Under -O3 the arithmetic (or FMA) instruction is found with
+GetNextInstructionUsingReg, so it need not follow the movapX directly.
+Folding
+  movapd %xmm0,%xmm1; movsd D,%xmm0; divsd c,%xmm0; subsd %xmm0,%xmm1; movapd %xmm1,%xmm0
+into "subsd %xmm0,%xmm0" used the overwritten %xmm0 as the minuend.
+Require that the movapX source is not modified between the movapX and the
+operation, and not used between the operation and the closing movapX
+(the operation now writes it there).  Found by the pgen3 generator
+(seeds 30843, 30875).
+---
+ compiler/x86/aoptx86.pas | 13 ++++++++++--
+ tests/tbs/tb9047.pp      | 46 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 57 insertions(+), 2 deletions(-)
+ create mode 100644 tests/tbs/tb9047.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index b70f2c16..4abf5f3b 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -2676,7 +2676,12 @@ unit aoptx86;
+                   MatchOperand(taicpu(p).oper[1]^,taicpu(hp1).oper[2]^.reg) and
+                   GetNextInstructionUsingReg(hp1, hp2, taicpu(hp1).oper[2]^.reg) and
+                   MatchInstruction(hp2,[A_VMOVAPD,A_VMOVAPS,A_MOVAPD,A_MOVAPS],[S_NO]) and
+-                  MatchOperand(taicpu(p).oper[0]^,taicpu(hp2).oper[1]^) then
++                  MatchOperand(taicpu(p).oper[0]^,taicpu(hp2).oper[1]^) and
++                  { under -O3 the instructions need not be adjacent: hp1 now takes reg1's
++                    value, so reg1 must not change between p and hp1, and hp1 now writes reg1
++                    early, so nothing between hp1 and hp2 may use it }
++                  not RegModifiedBetween(taicpu(p).oper[0]^.reg, p, hp1) and
++                  not RegUsedBetween(taicpu(p).oper[0]^.reg, hp1, hp2) then
+                   begin
+                     TransferUsedRegs(TmpUsedRegs);
+                     UpdateUsedRegsBetween(TmpUsedRegs, p, hp2);
+@@ -2702,7 +2707,11 @@ unit aoptx86;
+                   MatchInstruction(hp2,taicpu(p).opcode,[]) and
+                   OpsEqual(taicpu(hp2).oper[1]^, taicpu(p).oper[0]^) and
+                   MatchOpType(taicpu(hp2),top_reg,top_reg) and
+-                  MatchOperand(taicpu(hp2).oper[0]^,taicpu(p).oper[1]^) then
++                  MatchOperand(taicpu(hp2).oper[0]^,taicpu(p).oper[1]^) and
++                  { see above: reg must keep its value from p to hp1 and must not be used
++                    between hp1 and hp2 (not guaranteed under -O3) }
++                  not RegModifiedBetween(taicpu(p).oper[0]^.reg, p, hp1) and
++                  not RegUsedBetween(taicpu(p).oper[0]^.reg, hp1, hp2) then
+                   { change
+                              movapX    reg,reg2
+                              addsX/subsX/... reg3, reg2
+diff --git a/tests/tbs/tb9047.pp b/tests/tbs/tb9047.pp
+new file mode 100644
+index 00000000..9aeaede8
+--- /dev/null
++++ b/tests/tbs/tb9047.pp
+@@ -0,0 +1,46 @@
++{ %CPU=x86_64,i386 }
++{ %OPT=-O3 }
++{ x86 OptPass1_V_MOVAP (MovapXOpMovapX2Op): under -O3 the movapd and the
++  arithmetic instruction need not be adjacent; folding
++    movapd %xmm0,%xmm1; movsd D,%xmm0; divsd c,%xmm0; subsd %xmm0,%xmm1; movapd %xmm1,%xmm0
++  into "subsd %xmm0,%xmm0" lost the minuend that %xmm0 held at the movapd }
++program tb9047;
++
++{$mode objfpc}{$inline on}{$goto on}
++
++function Get(A: Double): Double;
++begin
++  Result := A;
++end;
++
++function First(A, B: Double): Double;
++begin
++  Result := A;
++end;
++
++function Id(V: Double): Double; inline;
++begin
++  Result := V;
++end;
++
++var
++  D, R: Double;
++
++procedure Q;
++label
++  L;
++begin
++L:
++  R := First(Id(Get(3.0) - D / 7.0), 1.0);
++end;
++
++begin
++  D := 7.0;
++  Q;
++  if R <> 2.0 then
++    begin
++      writeln('error: ', R);
++      halt(1);
++    end;
++  writeln('ok');
++end.

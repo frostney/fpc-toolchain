@@ -1,0 +1,185 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 00:07:18 +0100
+Subject: [PATCH 22/75] x86: do not narrow a comparison that feeds a signed
+ condition (#41824)
+
+Patch proposed in #41824 (with test tb9009): cmpl $192,%eax on a
+zero-extended byte was narrowed to cmpb $192,%al with jl kept, so the
+signed outcome changed (-O2+, linux and win64).
+---
+ compiler/x86/aoptx86.pas | 66 +++++++++++++++++++++++++++++++++++++++-
+ tests/tbs/tb9009.pp      | 66 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 131 insertions(+), 1 deletion(-)
+ create mode 100644 tests/tbs/tb9009.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 615915e3..2cf9a4e6 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -252,6 +252,7 @@ unit aoptx86;
+         procedure ConvertJumpToRET(const p: tai; const ret_p: tai);
+ 
+         function CheckJumpMovTransferOpt(var p: tai; hp1: tai; LoopCount: Integer; out Count: Integer): Boolean;
++        function FlagsReadBySignedCondition(p_start, p_cmp: tai): Boolean;
+         function TrySwapMovOp(var p, hp1: tai): Boolean;
+         function TrySwapMovCmp(var p, hp1: tai): Boolean;
+         function TryCmpCMovOpts(var p, hp1: tai) : Boolean;
+@@ -10388,6 +10389,40 @@ unit aoptx86;
+       [Ch_WESP, Ch_RWESP, Ch_MESP{$ifdef x86_64}, Ch_WRSP, Ch_RWRSP, Ch_MRSP{$endif x86_64}]);
+ 
+ 
++  { Returns True if the flags set by the comparison at p_cmp are read by a
++    condition that depends on the sign or overflow flags.  Narrowing the size
++    of the comparison is then only safe if it provably keeps the same signed
++    outcome, since SF/OF get computed from the smaller operand size.  p_start
++    must be the instruction the register tracking state is currently at, so
++    the flag allocation markers in between are taken into account. }
++  function TX86AsmOptimizer.FlagsReadBySignedCondition(p_start, p_cmp: tai): Boolean;
++    var
++      hp_next: tai;
++    begin
++      Result := False;
++      TransferUsedRegs(TmpUsedRegs);
++      UpdateUsedRegsBetween(TmpUsedRegs, p_start, p_cmp);
++      UpdateUsedRegs(TmpUsedRegs, tai(p_cmp.Next));
++      while RegInUsedRegs(NR_DEFAULTFLAGS, TmpUsedRegs) and
++        GetNextInstruction(p_cmp, hp_next) do
++        begin
++          if (hp_next.typ = ait_instruction) and
++            (taicpu(hp_next).condition in [C_G, C_GE, C_L, C_LE, C_NG, C_NGE, C_NL, C_NLE, C_NO, C_NS, C_O, C_S]) then
++            begin
++              Result := True;
++              Exit;
++            end;
++
++          { Stop searching when the flags get overwritten }
++          if RegModifiedByInstruction(NR_DEFAULTFLAGS, hp_next) then
++            Break;
++
++          p_cmp := hp_next;
++          UpdateUsedRegs(TmpUsedRegs, tai(p_cmp.Next));
++        end;
++    end;
++
++
+   function TX86AsmOptimizer.TrySwapMovOp(var p, hp1: tai): Boolean;
+     var
+       hp2: tai;
+@@ -12585,6 +12620,22 @@ unit aoptx86;
+                         (taicpu(hp1).oper[0]^.val < 0) and
+                         (taicpu(hp1).oper[0]^.val >= SignedLowerLimitBottom)
+                       )
++                    ) or
++                    (
++                      { A signed condition reads SF/OF, which the narrowed
++                        comparison computes from the smaller operand size, so the
++                        register range and the constant must also fit the signed
++                        range of the minimum size to keep the same outcome
++                        (e.g. `cmp $192,%eax / jl` on a zero-extended byte is
++                        taken for 0..191, but `cmp $192,%al / jl` compares
++                        against -64 and is taken for 128..255 instead) }
++                      (
++                        (TestValMax > SignedLowerLimit) or
++                        (TestValMin < SignedLowerLimitBottom) or
++                        (taicpu(hp1).oper[0]^.val > SignedLowerLimit) or
++                        (taicpu(hp1).oper[0]^.val < SignedLowerLimitBottom)
++                      ) and
++                      FlagsReadBySignedCondition(p, hp1)
+                     ) then
+                     Break;
+ 
+@@ -18358,7 +18409,20 @@ unit aoptx86;
+                 )
+               ) and
+               (reg2opsize(taicpu(hp1).oper[1]^.reg) <= reg2opsize(taicpu(p).oper[1]^.reg)) and
+-              SuperRegistersEqual(taicpu(p).oper[1]^.reg, taicpu(hp1).oper[1]^.reg) then
++              SuperRegistersEqual(taicpu(p).oper[1]^.reg, taicpu(hp1).oper[1]^.reg) and
++              (
++                { Reordering alone is fine, but narrowing the comparison makes
++                  SF/OF reflect the smaller size, where the zero-extended value
++                  and constants such as 192 change sign, so it must not feed a
++                  signed condition (e.g. `cmpl $192,%eax / jl` is taken for
++                  0..191, but `cmpb $192,%al / jl` compares against -64 and is
++                  taken for 128..255 instead) }
++                (
++                  ((taicpu(p).opsize in [S_BW, S_BL]) and (taicpu(hp1).opsize = S_B)) or
++                  ((taicpu(p).opsize = S_WL) and (taicpu(hp1).opsize = S_W))
++                ) or
++                not FlagsReadBySignedCondition(p, hp1)
++              ) then
+               begin
+                 PreMessage := debug_op2str(taicpu(hp1).opcode) + debug_opsize2str(taicpu(hp1).opsize) + ' ' + debug_operstr(taicpu(hp1).oper[0]^) + ',' + debug_regname(taicpu(hp1).oper[1]^.reg) + ' -> ' + debug_op2str(taicpu(hp1).opcode);
+ 
+diff --git a/tests/tbs/tb9009.pp b/tests/tbs/tb9009.pp
+new file mode 100644
+index 00000000..5be3f7f2
+--- /dev/null
++++ b/tests/tbs/tb9009.pp
+@@ -0,0 +1,66 @@
++{ %OPT=-O2 }
++{ the MOVZX/CMP reordering peepholes must not narrow a compare consumed by
++  a signed condition: after `movzbl %al,%eax / cmpl $192,%eax / jl`, the
++  zero-extended value and the constant change sign when the compare is
++  narrowed to byte size, flipping the branch for values with bit 7 set }
++program tb9009;
++
++{$mode objfpc}{$H+}
++
++uses
++  SysUtils;
++
++function ReadByte(const d: TBytes; var p: Integer): Byte;
++begin
++  result := d[p];
++  Inc(p);
++end;
++
++{ cmov shape: the register stays live after the compare, so the narrowing
++  happens in the post-peephole stage }
++function LenCmov(const d: TBytes; var p: Integer): Integer;
++var
++  o1: Integer;
++begin
++  o1 := ReadByte(d, p);
++  if o1 < 192 then
++    result := o1
++  else if o1 < 255 then
++    result := ((o1 - 192) shl 8) + ReadByte(d, p) + 192
++  else
++    result := -1;
++end;
++
++{ branch shape: the register dies at the compare, so the narrowing happens
++  in the pass 2 movx data flow optimisation }
++function LenBranch(const d: TBytes; var p: Integer): string;
++var
++  o1: Integer;
++begin
++  o1 := ReadByte(d, p);
++  if o1 < 192 then
++    result := 'small'
++  else
++    result := 'big';
++end;
++
++var
++  d: TBytes;
++  p: Integer;
++begin
++  d := TBytes.Create(2, 99, 200);
++
++  p := 0;
++  if LenCmov(d, p) <> 2 then
++    Halt(1);
++
++  p := 0;
++  if LenBranch(d, p) <> 'small' then
++    Halt(2);
++
++  p := 2;
++  if LenBranch(d, p) <> 'big' then
++    Halt(3);
++
++  writeln('ok');
++end.

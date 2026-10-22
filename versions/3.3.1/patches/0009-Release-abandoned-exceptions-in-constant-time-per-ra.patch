@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 22:18:47 +0100
+Subject: [PATCH 09/75] Release abandoned exceptions in constant time per raise
+ (#41950 follow-up)
+
+7a225486bc checked every in-flight exception against the exception frame
+chain on each raise and re-raise. With N exceptions in flight and a chain of
+N frames that is O(N^2) per raise, so recursion inside except blocks became
+cubic: 2,000 levels took 2.8 s instead of 1 ms.
+
+An entry is abandoned exactly when it unwinds to the frame the new exception
+lands in, and the abandoned entries are the run directly below the top of
+the exception object stack, so stop at the first entry that unwinds
+elsewhere.
+---
+ rtl/inc/except.inc | 53 +++++++++++++++++++---------------------------
+ 1 file changed, 22 insertions(+), 31 deletions(-)
+
+diff --git a/rtl/inc/except.inc b/rtl/inc/except.inc
+index 1256a731..5febbea9 100644
+--- a/rtl/inc/except.inc
++++ b/rtl/inc/except.inc
+@@ -191,48 +191,39 @@ begin
+ end;
+ 
+ {$if not defined(FPC_SYSTEM_HAS_RAISEEXCEPTION) or not defined(FPC_SYSTEM_HAS_RERAISE)}
+-{ Return true if aFrame is found in the exception frame chain starting at aStart,
+-  or is nil }
+-function ExceptFrameInChain(aFrame, aStart : PExceptAddr) : Boolean;
+-begin
+-  while (aStart<>nil) and (aStart<>aFrame) do
+-    aStart:=aStart^.Next;
+-  Result:=aStart=aFrame;
+-end;
+-
+-
+-{ Mark the top entry of the exception object stack as unwinding to aTarget, and
+-  remove the entries below it whose unwinding stops when the top one reaches
+-  aTarget, freeing their frames and the exception objects that were not
+-  acquired. }
++{ Mark the top entry of the exception object stack as unwinding to the parent
++  of aTarget, and remove the entries below it whose unwinding stops at aTarget,
++  freeing their frames and the exception objects that were not acquired.
++
++  aTarget is the innermost exception frame: the top entry lands in it and pops
++  it, so an entry that was going to resume unwinding there is abandoned. Every
++  entry was raised or re-raised while the entries below it were in flight, so
++  it unwinds to the same frame as they do or to one pushed later. The abandoned
++  entries are therefore the run directly below the top, and the scan stops at
++  the first entry that unwinds elsewhere. Scanning the whole stack against the
++  frame chain instead makes recursion inside except blocks cubic in its depth. }
+ procedure ReleaseAbandonedExceptions(aTarget : PExceptAddr);
+ var
+-  lTop, lPrev, lEntry : PExceptObject;
++  lTop, lEntry : PExceptObject;
+   lObj : TObject;
+ begin
+   lTop:=ExceptObjectStack;
+   if lTop=nil then
+     exit;
+   lTop^.UnwindFrame:=aTarget^.Next;
+-  lPrev:=lTop;
+   lEntry:=lTop^.Next;
+-  while lEntry<>nil do
++  while (lEntry<>nil) and (lEntry^.UnwindFrame=Pointer(aTarget)) do
+     begin
+-      if ExceptFrameInChain(lEntry^.UnwindFrame,aTarget^.Next) then
+-        lPrev:=lEntry
++      lTop^.Next:=lEntry^.Next;
++      if (lEntry^.refcount=0) and (lEntry^.FObject<>lTop^.FObject) then
++        lObj:=lEntry^.FObject
+       else
+-        begin
+-          lPrev^.Next:=lEntry^.Next;
+-          if (lEntry^.refcount=0) and (lEntry^.FObject<>lTop^.FObject) then
+-            lObj:=lEntry^.FObject
+-          else
+-            lObj:=nil;
+-          if assigned(lEntry^.frames) then
+-            freemem(lEntry^.frames);
+-          dispose(lEntry);
+-          lObj.Free;
+-        end;
+-      lEntry:=lPrev^.Next;
++        lObj:=nil;
++      if assigned(lEntry^.frames) then
++        freemem(lEntry^.frames);
++      dispose(lEntry);
++      lObj.Free;
++      lEntry:=lTop^.Next;
+     end;
+ end;
+ {$endif}

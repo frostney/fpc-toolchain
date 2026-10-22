@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 00:29:04 +0100
+Subject: [PATCH 27/75] fphttpserver: call OnAllowConnect again
+
+Since the server socket's OnConnectSocketQuery was routed through
+DoOnAllowConnect (connection limit, 503), the user's OnAllowConnect was
+stored but never called. Servers that refuse connections or stop their
+accept loop from it (lantaarn's viewer server stops while connections keep
+coming) no longer could. Call it after the connection-limit check, with
+the arguments the 3.2 wiring (FServer.OnConnectQuery) passed.
+---
+ packages/fcl-web/src/base/fphttpserver.pp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/packages/fcl-web/src/base/fphttpserver.pp b/packages/fcl-web/src/base/fphttpserver.pp
+index 07f1424e..a2a85b11 100644
+--- a/packages/fcl-web/src/base/fphttpserver.pp
++++ b/packages/fcl-web/src/base/fphttpserver.pp
+@@ -1298,7 +1298,13 @@ begin
+     allow:=False;
+     end
+   else
++    begin
+     Allow:=True;
++    { The user's OnAllowConnect (wired directly to the socket server's
++      OnConnectQuery up to 3.2) still decides on the connection }
++    if Assigned(FOnAllowConnect) then
++      FOnAllowConnect(Sender,ASocket.FD,Allow);
++    end;
+ end;
+ 
+ procedure TFPCustomHttpServer.DoAcceptIdle(Sender: TObject);

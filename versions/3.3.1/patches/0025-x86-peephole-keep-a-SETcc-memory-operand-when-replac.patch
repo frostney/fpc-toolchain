@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 00:26:37 +0100
+Subject: [PATCH 25/75] x86 peephole: keep a SETcc memory operand when
+ replacing it by a constant MOV
+
+OptPass1Cmp (and OptPass1MOV) rewrite a SETcc whose result is known into
+movb $0/$1 but copied the operand with loadreg(1, oper[0]^.reg). SETcc
+can write to memory; .reg then read half of the reference pointer, giving
+an access violation, Internal error 2018030701 or a bad mov at -O1..-O4
+(e.g. B := Byte(G()) >= 0 with B an out parameter). Use loadoper.
+---
+ compiler/x86/aoptx86.pas | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 2cf9a4e6..77bb06de 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -4029,12 +4029,12 @@ unit aoptx86;
+                                                 A_SETcc:
+                                                   begin
+                                                     DebugMsg(SPeepholeOptimization + 'Condition is always true (changed to MOV 1)', hp3);
+-                                                    { Convert "set(c) %reg" instruction to "movb 1,%reg" }
++                                                    { Convert "set(c) %reg/ref" instruction to "movb 1,%reg/ref" }
+                                                     taicpu(hp3).opcode := A_MOV;
+                                                     taicpu(hp3).ops := 2;
+                                                     taicpu(hp3).condition := C_None;
+                                                     taicpu(hp3).opsize := S_B;
+-                                                    taicpu(hp3).loadreg(1,taicpu(hp3).oper[0]^.reg);
++                                                    taicpu(hp3).loadoper(1,taicpu(hp3).oper[0]^);
+                                                     taicpu(hp3).loadconst(0, 1);
+                                                     Result := True;
+                                                   end;
+@@ -4066,12 +4066,12 @@ unit aoptx86;
+                                                 A_SETcc:
+                                                   begin
+                                                     DebugMsg(SPeepholeOptimization + 'Condition is always false (changed to MOV 0)', hp3);
+-                                                    { Convert "set(c) %reg" instruction to "movb 0,%reg" }
++                                                    { Convert "set(c) %reg/ref" instruction to "movb 0,%reg/ref" }
+                                                     taicpu(hp3).opcode := A_MOV;
+                                                     taicpu(hp3).ops := 2;
+                                                     taicpu(hp3).condition := C_None;
+                                                     taicpu(hp3).opsize := S_B;
+-                                                    taicpu(hp3).loadreg(1,taicpu(hp3).oper[0]^.reg);
++                                                    taicpu(hp3).loadoper(1,taicpu(hp3).oper[0]^);
+                                                     taicpu(hp3).loadconst(0, 0);
+                                                     Result := True;
+                                                   end;
+@@ -9345,12 +9345,12 @@ unit aoptx86;
+                            else
+                              begin
+                                DebugMsg(SPeepholeOptimization + 'Cmpcc2Testcc - condition B/C/NAE/O --> Never (set -> mov 0)', hp1);
+-                               { Convert "set(c) %reg" instruction to "movb 0,%reg" }
++                               { Convert "set(c) %reg/ref" instruction to "movb 0,%reg/ref" }
+                                taicpu(hp1).opcode := A_MOV;
+                                taicpu(hp1).ops := 2;
+                                taicpu(hp1).condition := C_None;
+                                taicpu(hp1).opsize := S_B;
+-                               taicpu(hp1).loadreg(1,taicpu(hp1).oper[0]^.reg);
++                               taicpu(hp1).loadoper(1,taicpu(hp1).oper[0]^);
+                                taicpu(hp1).loadconst(0, 0);
+                              end;
+                          end;
+@@ -9379,12 +9379,12 @@ unit aoptx86;
+                              end
+                            else
+                              begin
+-                               { Convert "set(c) %reg" instruction to "movb 1,%reg" }
++                               { Convert "set(c) %reg/ref" instruction to "movb 1,%reg/ref" }
+                                taicpu(hp1).opcode := A_MOV;
+                                taicpu(hp1).ops := 2;
+                                taicpu(hp1).condition := C_None;
+                                taicpu(hp1).opsize := S_B;
+-                               taicpu(hp1).loadreg(1,taicpu(hp1).oper[0]^.reg);
++                               taicpu(hp1).loadoper(1,taicpu(hp1).oper[0]^);
+                                taicpu(hp1).loadconst(0, 1);
+                              end;
+                          end;

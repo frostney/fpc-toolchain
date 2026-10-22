@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 03:41:18 +0100
+Subject: [PATCH 40/75] x86 ShrShr2Shr: do not merge SHRs whose combined count
+ reaches the operand size, or a narrower SHR before the bits above it are
+ cleared
+
+HandleSHRMerge (6757bf3832, refactored in b611c0011d) adds the counts of
+consecutive SHRs of the same register without a limit: "shrq $60; shrq $4"
+became "shrq $64", which the CPU masks to a shift by 0, so (x shr 60) shr 4
+returned x and (x div 1699722277574559715) shr 4 returned the quotient's
+input. The size check compared the combined count with the size difference,
+so "shrq $20; shrl $20" (Cardinal(x shr 20) shr 20) became "shrq $40" and
+kept bits 52..63. Stop merging in both cases.
+---
+ compiler/x86/aoptx86.pas | 13 ++++++++++
+ tests/tbs/tb9043.pp      | 52 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 65 insertions(+)
+ create mode 100644 tests/tbs/tb9043.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 0d4b313e..5845b6ac 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -8574,6 +8574,19 @@ unit aoptx86;
+                   if Shift < topsize2memsize[taicpu(p).opsize] - topsize2memsize[LimitSize] then
+                     Exit;
+ 
++                  { Merging needs the combined shift to stay below the operand
++                    size (the CPU masks the shift count, so "shrq $64" is a no-op),
++                    and a narrower SHR only sees the low bits of the register, so
++                    the shifts before it must already have cleared the bits above
++                    them ("shrq $20; shrl $20" is not "shrq $40"). Once an SHR
++                    stays in place, later ones must not be moved before it }
++                  if not DoNotMerge and (taicpu(hp1).opcode = A_SHR) and
++                    (
++                      (Shift >= topsize2memsize[taicpu(p).opsize]) or
++                      (Shift - taicpu(hp1).oper[0]^.val < topsize2memsize[taicpu(p).opsize] - topsize2memsize[taicpu(hp1).opsize])
++                    ) then
++                    DoNotMerge := True;
++
+                   { Since we've established that the combined shift is within
+                     limits, we can actually combine the adjacent SHR
+                     instructions even if they're different sizes }
+diff --git a/tests/tbs/tb9043.pp b/tests/tbs/tb9043.pp
+new file mode 100644
+index 00000000..84b5c77b
+--- /dev/null
++++ b/tests/tbs/tb9043.pp
+@@ -0,0 +1,52 @@
++{ %OPT=-O1 }
++{ x86 ShrShr2Shr: merged SHR instructions must not reach the operand size
++  (the shift count is masked, "shrq $64" leaves the value unchanged), and a
++  narrower SHR must not be merged into a wider one before the wider shifts
++  have cleared the bits above it ("shrq $20; shrl $20" is not "shrq $40") }
++program tb9043;
++
++{$mode objfpc}
++
++function a(x: qword): qword;
++begin
++  result:=(x div 1699722277574559715) shr 4;
++end;
++
++function b(x: qword): qword;
++begin
++  result:=(x shr 60) shr 4;
++end;
++
++function c(x: cardinal): cardinal;
++begin
++  result:=(x shr 20) shr 20;
++end;
++
++function d(x: qword): cardinal;
++begin
++  result:=cardinal(x shr 20) shr 20;
++end;
++
++function e(x: qword): qword;
++begin
++  result:=(x shr 40) shr 10;
++end;
++
++var
++  q: qword;
++  l: cardinal;
++begin
++  q:=high(qword);
++  l:=high(cardinal);
++  if a(q)<>0 then
++    halt(1);
++  if b(q)<>0 then
++    halt(2);
++  if c(l)<>0 then
++    halt(3);
++  if d(q)<>4095 then
++    halt(4);
++  if e(q)<>16383 then
++    halt(5);
++  writeln('ok');
++end.

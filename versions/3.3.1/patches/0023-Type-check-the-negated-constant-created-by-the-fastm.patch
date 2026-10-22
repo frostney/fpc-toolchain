@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 00:23:11 +0100
+Subject: [PATCH 23/75] Type check the negated constant created by the fastmath
+ reassociation rules
+
+The fastmath rules for a+c1-c2 and a-c1+c2 wrap the constant in a new
+unary minus node inside a copied, already typed tree, so nothing type
+checks it. In inline or constant propagation simplification the always-on
+rule left+(-right) => left-right turns it back and the two rules loop
+forever (an inline Result := (A - B) + C called with constants hangs at
+-O2 -OoFASTMATH, -O3 -OoFASTMATH and -O4); through constant propagation
+the untyped node reaches code generation and crashes instead.
+---
+ compiler/nadd.pas | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/compiler/nadd.pas b/compiler/nadd.pas
+index 72a60666..3d06eb22 100644
+--- a/compiler/nadd.pas
++++ b/compiler/nadd.pas
+@@ -1725,6 +1725,11 @@ const
+                     Result:=getcopy;
+                     Result.nodetype:=addn;
+                     taddnode(result).right:=cunaryminusnode.create(taddnode(result).right);
++                    { fold the negation into the constant right away: the copied tree keeps its
++                      resultdef, so nothing else type checks the new node; left alone, simplify
++                      in inline/constprop context turns a+(-const) back into a-const and loops,
++                      or the untyped node reaches code generation }
++                    do_typecheckpass(taddnode(result).right);
+                     exit;
+                   end;
+ 
+@@ -1737,6 +1742,8 @@ const
+                     Result:=getcopy;
+                     taddnode(Result).left.nodetype:=addn;
+                     taddnode(taddnode(Result).left).right:=cunaryminusnode.create(taddnode(taddnode(Result).left).right);
++                    { see above }
++                    do_typecheckpass(taddnode(taddnode(Result).left).right);
+                     exit;
+                   end;
+ 

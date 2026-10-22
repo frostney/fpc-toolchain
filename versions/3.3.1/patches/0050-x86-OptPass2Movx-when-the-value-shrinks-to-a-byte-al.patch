@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 16 Oct 2026 03:31:37 +0100
+Subject: [PATCH 50/75] x86 OptPass2Movx: when the value shrinks to a byte,
+ also narrow a following movzwl/movzwq of the register for a 32-bit input
+ MOVZX
+
+movzbl %al,%eax / movzwl %ax,%eax: the DFA removed the movzbl (Movzx2Nop 1)
+but converted the movzwl to movzbl only when MaxSize = S_W, so it read
+%ah, which is undefined for a boolean function result.  Trunk only.
+Found by the pgen3 generator (seed 30179, -O2 -Cr / -O3 -Cr).
+---
+ compiler/x86/aoptx86.pas | 23 ++++++++++++++++++++---
+ tests/tbs/tb9045.pp      | 20 ++++++++++++++++++++
+ 2 files changed, 40 insertions(+), 3 deletions(-)
+ create mode 100644 tests/tbs/tb9045.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 5e9b2138..b70f2c16 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -12172,13 +12172,30 @@ unit aoptx86;
+                         taicpu(hp1).opsize := TargetSize;
+                       end;
+                   end
+-                else if (TargetSize = S_B) and (MaxSize = S_W) and (taicpu(hp1).opsize = S_WL) then
++                else if (TargetSize = S_B) and (taicpu(hp1).opsize = S_WL) and
++                  (taicpu(hp1).oper[0]^.typ = top_reg) and
++                  SuperRegistersEqual(taicpu(hp1).oper[0]^.reg, ThisReg) then
+                   begin
+-                    { Need to change the size of the output }
++                    { Need to change the size of the output: only the low byte
++                      of the register is defined now (the input MOVZX may have
++                      been removed or turned into a byte MOV), also when the
++                      input zero-extended to 32 bits (movzbl %al,%eax /
++                      movzwl %ax,%eax must not read %ah) }
+                     DebugMsg(SPeepholeOptimization + 'movzwl2movzbl 2', hp1);
+                     taicpu(hp1).oper[0]^.reg := ThisReg;
+                     taicpu(hp1).opsize := S_BL;
+-                  end;
++                  end
++{$ifdef x86_64}
++                else if (TargetSize = S_B) and (taicpu(hp1).opsize = S_WQ) and
++                  (taicpu(hp1).oper[0]^.typ = top_reg) and
++                  SuperRegistersEqual(taicpu(hp1).oper[0]^.reg, ThisReg) then
++                  begin
++                    DebugMsg(SPeepholeOptimization + 'movzwq2movzbq 2', hp1);
++                    taicpu(hp1).oper[0]^.reg := ThisReg;
++                    taicpu(hp1).opsize := S_BQ;
++                  end
++{$endif x86_64}
++                  ;
+               end;
+           end;
+ 
+diff --git a/tests/tbs/tb9045.pp b/tests/tbs/tb9045.pp
+new file mode 100644
+index 00000000..61fff0f5
+--- /dev/null
++++ b/tests/tbs/tb9045.pp
+@@ -0,0 +1,20 @@
++{ %CPU=x86_64 }
++{ %OPT=-O2 -Cr }
++{ OptPass2Movx: after removing "movzbl %al,%eax" the following
++  "movzwl %ax,%eax" must become "movzbl %al,%eax": a boolean result is only
++  defined in %al }
++program tb9045;
++{$mode objfpc}{$asmmode att}
++var GU64: QWord; M0: Int64;
++{ returns False in %al with other bits set in %eax, as the ABI allows }
++function GetFalse: Boolean; assembler; nostackframe;
++asm
++  movl $0x4400, %eax
++end;
++begin
++  M0 := 11;
++  GU64 := QWord(M0) + Word(Int64(Ord(GetFalse)));
++  if GU64<>11 then
++    halt(1);
++  writeln('ok');
++end.

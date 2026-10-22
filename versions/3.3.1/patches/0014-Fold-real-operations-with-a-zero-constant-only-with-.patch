@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Thu, 15 Oct 2026 23:08:52 +0100
+Subject: [PATCH 14/75] Fold real operations with a zero constant only with
+ fastmath
+
+x*0.0, 0.0*x, x+0.0, x-0.0, 0.0+x, 0.0-x and 0.0/x were simplified at every
+optimisation level (the fastmath check guarded only one case, inverted),
+which loses the sign of zero and NaN/Inf propagation: (-0.0)*(-0.0) gave
+-0.0 and (-3.0)*0.0 gave +0.0 even at -O-. 3.2.x has no such folds.
+---
+ compiler/nadd.pas | 20 ++++++++++----------
+ 1 file changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/compiler/nadd.pas b/compiler/nadd.pas
+index aa650ec3..1758a79e 100644
+--- a/compiler/nadd.pas
++++ b/compiler/nadd.pas
+@@ -1264,18 +1264,15 @@ const
+               begin
+                 if lt=realconstn then
+                   begin
+-                    if (trealconstnode(left).value_real=0) and (nodetype in [addn,muln,subn,slashn]) then
++                    { 0.0+x, 0.0*x, 0.0/x and 0.0-x differ from x, 0.0, 0.0 and -x for
++                      x=-0.0, x=+-0.0 (sign of the product) and NaN/Inf operands }
++                    if (trealconstnode(left).value_real=0) and (nodetype in [addn,muln,subn,slashn]) and
++                      (cs_opt_fastmath in current_settings.optimizerswitches) then
+                       begin
+                         case nodetype of
+                           addn:
+-                            begin
+-                              { -0.0+(+0.0)=+0.0 so we cannot carry out this optimization if no fastmath is passed }
+-                              if not(cs_opt_fastmath in current_settings.optimizerswitches) then
+-                                begin
+-                                  result:=PruneKeepRight();
+-                                  exit;
+-                                end;
+-                            end;
++                            { left as is: 0.0+x was never folded with fastmath }
++                            ;
+                           slashn,
+                           muln:
+                             if not(might_have_sideeffects(right,[mhs_exceptions])) then
+@@ -1307,7 +1304,10 @@ const
+                   end
+                 else if rt=realconstn then
+                   begin
+-                    if (trealconstnode(right).value_real=0) and (nodetype in [addn,muln,subn]) then
++                    { x+0.0, x-0.0 and x*0.0 differ from x, x and 0.0 for x=-0.0 or a
++                      zero of the other sign, and x*0.0 also for NaN/Inf }
++                    if (trealconstnode(right).value_real=0) and (nodetype in [addn,muln,subn]) and
++                      (cs_opt_fastmath in current_settings.optimizerswitches) then
+                       begin
+                         case nodetype of
+                           subn,
