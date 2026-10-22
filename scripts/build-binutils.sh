@@ -18,13 +18,23 @@ out=${1:?usage: build-binutils.sh [--host TRIPLE] OUT TRIPLE...}; shift
 mkdir -p "$out"; out=$(cd "$out" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-mkdir -p "$out-src"
-tarball=${BINUTILS_SRC:-$out-src/binutils-$BINUTILS_VERSION.tar.xz}
-[ -s "$tarball" ] || curl -fsSL --retry 3 -o "$tarball" "https://ftpmirror.gnu.org/gnu/binutils/binutils-$BINUTILS_VERSION.tar.xz" \
-  || curl -fsSL --retry 3 -o "$tarball" "https://ftp.gnu.org/gnu/binutils/binutils-$BINUTILS_VERSION.tar.xz"
-got=$( (sha256sum "$tarball" 2>/dev/null || shasum -a 256 "$tarball") | cut -d' ' -f1)
-[ "$got" = "$BINUTILS_SHA256" ] || { echo "build-binutils.sh: sha256 mismatch for $tarball" >&2; exit 1; }
-xz -dc "$tarball" | tar -xf - -C "$work"
+# the source tarball lives in OUT/src (cached with the tools); fetched only when a triple must be built,
+# or always with BINUTILS_FETCH_SOURCE=1 (the release attaches it)
+missing=; for t in "$@"; do [ -e "$out/bin/$t-as" ] || [ -e "$out/bin/$t-as.exe" ] || missing=1; done
+tarball=${BINUTILS_SRC:-$out/src/binutils-$BINUTILS_VERSION.tar.xz}
+if [ -n "$missing" ] || [ -n "${BINUTILS_FETCH_SOURCE:-}" ]; then
+  mkdir -p "$out/src"
+  for m in https://ftpmirror.gnu.org/gnu/binutils https://ftp.gnu.org/gnu/binutils \
+           https://mirrors.kernel.org/gnu/binutils https://sourceware.org/pub/binutils/releases; do
+    [ -s "$tarball" ] && break
+    curl -fsSL --connect-timeout 20 --retry 2 -o "$tarball.part" "$m/binutils-$BINUTILS_VERSION.tar.xz" \
+      && mv "$tarball.part" "$tarball" || { rm -f "$tarball.part"; echo "binutils source: $m failed" >&2; }
+  done
+  [ -s "$tarball" ] || { echo "build-binutils.sh: cannot download binutils-$BINUTILS_VERSION.tar.xz" >&2; exit 1; }
+  got=$( (sha256sum "$tarball" 2>/dev/null || shasum -a 256 "$tarball") | cut -d' ' -f1)
+  [ "$got" = "$BINUTILS_SHA256" ] || { echo "build-binutils.sh: sha256 mismatch for $tarball" >&2; exit 1; }
+fi
+[ -n "$missing" ] && xz -dc "$tarball" | tar -xf - -C "$work"
 jobs=$( (nproc || sysctl -n hw.ncpu) 2>/dev/null || echo 4)
 for t in "$@"; do
   if [ -e "$out/bin/$t-as" ] || [ -e "$out/bin/$t-as.exe" ]; then echo "binutils $t: cached"; continue; fi

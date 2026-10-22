@@ -140,6 +140,8 @@ jobs:
         if: steps.plan.outputs.ship == 'true'
         run: |
           host=; [ -z '${{ matrix.cross }}' ] || host='--host ${{ matrix.cross }}'
+          # the x86_64-linux job also provides the source tarball for the release
+          [ '${{ matrix.host }}' != x86_64-linux ] || export BINUTILS_FETCH_SOURCE=1
           # shellcheck disable=SC2086
           scripts/build-binutils.sh $host "$RUNNER_TEMP/xb" ${{ steps.plan.outputs.triples }}
           # ship only this version's triples (a restored cache may hold more)
@@ -151,7 +153,7 @@ jobs:
         with: { name: 'binutils-${{ matrix.host }}', path: '${{ runner.temp }}/binutils-${{ matrix.host }}.tar' }
       - if: steps.plan.outputs.ship == 'true' && matrix.host == 'x86_64-linux'
         uses: actions/upload-artifact@v4
-        with: { name: dist-binutils-source, path: '${{ runner.temp }}/xb-src/binutils-2.42.tar.xz' }
+        with: { name: dist-binutils-source, path: '${{ runner.temp }}/xb/src/binutils-2.42.tar.xz' }
 
   # Canonical build: native x86_64-linux, every cross target with its units archive, both Windows hosts.
   linux-x86_64:
