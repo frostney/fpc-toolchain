@@ -83,8 +83,13 @@ case $host_cpu in x86_64) ppcname=ppcx64 ;; aarch64) ppcname=ppca64 ;; esac
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 
+# macOS: the bootstrap and the new compilers have no fpc.cfg while building, so tell them where the SDK is
+hostopt=''
+[ "$host_os" = darwin ] && hostopt="-XR$(xcrun --show-sdk-path)"
+
 run_make() { # run_make LOGFILE make-args...
   local lf=$1; shift
+  [ -n "$hostopt" ] && set -- "$@" OPT="$hostopt"
   if [ -n "$memcap" ] && [ "$host_os" = linux ]; then
     systemd-run --user --scope -q -p MemoryMax="$memcap" -p MemorySwapMax=0 -- make "$@" >>"$lf" 2>&1
   else

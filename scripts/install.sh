@@ -179,6 +179,10 @@ mkdir -p "$dest.new/etc"
     printf '#ENDIF\n'
   done
   echo "#ENDIF FPC_CROSSCOMPILING"
+  # macOS: link Darwin targets against the active Xcode / Command Line Tools SDK
+  if [ "$(uname -s)" = Darwin ] && sdk=$(xcrun --show-sdk-path 2>/dev/null); then
+    printf '#IFDEF DARWIN\n-XR%s\n#ENDIF\n' "$sdk"
+  fi
 } >> "$dest.new/etc/fpc.cfg"
 # Linux resolves the compiler's own path (/proc/self/exe), so it looks for <lib/fpc>/../etc/fpc.cfg
 ln -sfn ../../etc "$dest.new/lib/fpc/etc"
