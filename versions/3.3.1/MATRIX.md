@@ -5,11 +5,11 @@ Which host ships which target. `x` ships, `r` ships through the x86_64 macOS bui
 | host | targets (incl. native) |
 |---|---|
 | x86_64-linux | 68 |
-| aarch64-linux | 68 |
-| aarch64-darwin | 68 |
+| aarch64-linux | 65 |
+| aarch64-darwin | 65 |
 | x86_64-darwin | 68 |
 | x86_64-win64 | 68 |
-| aarch64-win64 | 68 |
+| aarch64-win64 | 65 |
 
 | target | class | L64 | La64 | Ma64 | Mx64 | W64 | Wa64 | compile | link | run | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -37,9 +37,9 @@ Which host ships which target. `x` ships, `r` ships through the x86_64 macOS bui
 | i386-nativent | internal | x | x | x | x | x | x | ok | ok | no-emulator | Windows NT native API |
 | i386-wince | internal | x | x | x | x | x | x | ok | ok | no-emulator | Windows CE x86 |
 | arm-wince | internal | x | x | x | x | x | x | ok | ok | no-emulator | Windows CE ARM |
-| i8086-msdos | internal | x | x | x | x | x | x | ok | ok | no-emulator | DOS 16-bit, internal OMF assembler + linker; RTL needs nasm; RTL built smartlinked (-CX -XXs): the system unit overflows one 64 KB code segment otherwise |
-| i8086-embedded | internal | x | x | x | x | x | x | ok | - | - | RTL needs nasm; RTL built smartlinked (-CX -XXs): the system unit overflows one 64 KB code segment otherwise |
-| i8086-win16 | sdk | x | x | x | x | x | x | ok | needs-sdk | - | linking needs OpenWatcom wlink; RTL built smartlinked (-CX -XXs): the system unit overflows one 64 KB code segment otherwise |
+| i8086-msdos | internal | x | - | - | x | x | - | ok | ok | no-emulator | DOS 16-bit, internal OMF assembler + linker; RTL needs nasm; RTL built smartlinked (-CX -XXs): the system unit overflows one 64 KB code segment otherwise; not on arm64 hosts: trunk's i8086/cpuinfo.pas has no branch for hosts without 80-bit Extended (bestrealrec = TExtended80Rec; i386 and x86_64 have one), so ppcross8086 does not build there |
+| i8086-embedded | internal | x | - | - | x | x | - | ok | - | - | RTL needs nasm; RTL built smartlinked (-CX -XXs): the system unit overflows one 64 KB code segment otherwise; not on arm64 hosts: trunk's i8086/cpuinfo.pas has no branch for hosts without 80-bit Extended (bestrealrec = TExtended80Rec; i386 and x86_64 have one), so ppcross8086 does not build there |
+| i8086-win16 | sdk | x | - | - | x | x | - | ok | needs-sdk | - | linking needs OpenWatcom wlink; RTL built smartlinked (-CX -XXs): the system unit overflows one 64 KB code segment otherwise; not on arm64 hosts: trunk's i8086/cpuinfo.pas has no branch for hosts without 80-bit Extended (bestrealrec = TExtended80Rec; i386 and x86_64 have one), so ppcross8086 does not build there |
 | z80-embedded | internal | x | x | x | x | x | x | ok | - | - | linking needs sdcc sdldz80 |
 | x86_64-freebsd | binutils | x | x | x | x | x | x | ok | ok | no-emulator | ld with elf_x86_64_fbsd (binutils-x86-64-kfreebsd-gnu) |
 | i386-freebsd | binutils | x | x | x | x | x | x | ok | ok | no-emulator |  |

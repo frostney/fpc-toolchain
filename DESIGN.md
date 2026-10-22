@@ -80,6 +80,8 @@ Limits:
 - 3.2.4 on Windows x64: Windows has no x87 `Extended` either, but FPC can turn it on there
   (`FPC_SUPPORT_X87_TYPES_ON_WIN64`). The build makes an x87 Linux-to-win64 compiler, a win64 RTL with it, and
   then the i386 and i8086 cross compilers for Windows.
+- 3.3.1 builds i386 and x86_64 cross compilers on arm64 hosts with soft x80, but not i8086: trunk's
+  `i8086/cpuinfo.pas` has no branch for hosts without `Extended` (i386 and x86_64 have one).
 - FPC 3.2 has no Windows arm64 host.
 
 Build details in `targets.tsv`: one SUBARCH per embedded target; i8086 RTLs with `-CX -XXs` (the system unit
