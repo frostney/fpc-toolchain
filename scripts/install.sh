@@ -162,7 +162,8 @@ if [ "$host" = aarch64-darwin ] && [ -n "$x86" ] && grep -q '^ROSETTA_X86=1' "$d
   mkdir -p "$dest.new/rosetta"
   xz -dc "$tmp/$assetid-x86_64-darwin.tar.xz" | (cd "$dest.new/rosetta" && tar -xf - --strip-components=1)
   rm -f "$tmp/$assetid-x86_64-darwin.tar.xz"
-  for c in ppcrossx64:ppcx64 ppcross386:ppcross386 ppcross8086:ppcross8086; do
+  # named ppc<cpu>: on macOS the fpc driver runs ppc<cpu> for cross targets too (compiler/utils/fpc.pp)
+  for c in ppcx64:ppcx64 ppc386:ppcross386 ppc8086:ppcross8086; do
     w=${c%%:*}; real="$dest/rosetta/lib/fpc/$ver/${c#*:}"
     [ -f "$dest.new/rosetta/lib/fpc/$ver/${c#*:}" ] || continue
     printf '#!/bin/sh

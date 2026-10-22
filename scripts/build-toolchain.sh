@@ -366,6 +366,14 @@ compiler_suffix() {
 
 step_finish() {
   local b=$stage/bin l=$stage/lib/fpc/$FPC_VERSION f
+  # macOS: the fpc driver runs ppc<cpu> for every CPU (Mach-O "fat binary" convention, compiler/utils/fpc.pp),
+  # never ppcross<cpu>, so give each cross compiler that name too
+  case $host in *-darwin)
+    for f in "$l"/ppcross*; do
+      [ -f "$f" ] || continue
+      f=$(basename "$f"); [ -e "$l/ppc${f#ppcross}" ] || ln -s "$f" "$l/ppc${f#ppcross}"
+    done ;;
+  esac
   # make every compiler reachable from bin/ with a relative link (crossinstall leaves absolute ones)
   for f in "$l"/ppc*; do
     [ -f "$f" ] || continue
