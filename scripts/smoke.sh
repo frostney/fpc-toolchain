@@ -90,6 +90,7 @@ for td in "$units"/*/; do
         win64|win32) command -v wine >/dev/null 2>&1 && runner="wine" ; [ "$cpu" = aarch64 ] && runner= ;;
         wasip1) command -v wasmtime >/dev/null 2>&1 && runner="wasmtime run" ;;
         # wasmtime 49 dropped wasi-threads (-S threads), so wasip1threads binaries are linked, not run
+        darwin) [ "$hostos" = darwin ] && { [ "$cpu" = "$hostcpu" ] || [ "$cpu" = x86_64 ]; } && runner="env" ;;   # x86_64 via Rosetta 2
         linux)
           q=$cpu
           case $cpu in x86_64) q=x86_64 ;; i386) q=i386 ;; powerpc) q=ppc ;; powerpc64) q=ppc64 ;; sparc) q=sparc32plus ;; esac

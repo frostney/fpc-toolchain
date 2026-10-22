@@ -15,7 +15,7 @@ OS/2 only.
 ## Candidates
 
 Compiler bugs from the GocciaScript bug hunt that also affect 3.2.4. None of our projects hits them, so none is
-carried. If one does, start from the trunk fix in `fpc-toolchain-3.3.1/patches/`.
+carried. If one does, start from the trunk fix in `versions/3.3.1/patches/`.
 
 | bug | effect | switches | trunk fix |
 |---|---|---|---|

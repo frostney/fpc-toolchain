@@ -1,33 +1,48 @@
 # Test the action (uses: ./) on every host: install, compile and run hello world natively, cross-compile,
-# then a second job that must come back from the cache. Called by build.yml before a release is published;
-# can also be run by hand against any release.
+# install the other FPC version next to it, then a second job that must come back from the cache.
+# Called by build.yml before a release is published; can also be run by hand against any release.
 name: action-test
 
 on:
   workflow_call:
     inputs:
-      release:
+      version:
+        description: 'build to test (tag, e.g. 3.2.4-rc2-b1)'
         type: string
         required: true
       artifacts:
         description: 'install from this run''s dist-* artifacts instead of the release'
         type: boolean
         default: false
+      other:
+        description: 'second version to install side by side (version or tag); empty = none'
+        type: string
+        default: ''
+      other-run:
+        description: 'run ID whose dist-* artifacts hold the second version (dry runs); empty = its release'
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
-      release:
-        description: 'release tag to test, e.g. 3.3.1-b1 (default: newest release)'
+      version:
+        description: 'version or build to test, e.g. 3.2.4 or 3.3.1-b1'
+        required: true
+        default: '3.2.4'
+      other:
+        description: 'second version to install side by side (empty = none)'
         required: false
+        default: ''
 
 permissions:
   contents: write   # draft releases are only visible to tokens with push access
+  actions: read     # artifacts of another run (other-run)
 
 jobs:
   install:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest, windows-11-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -35,15 +50,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: plan
-        run: scripts/action-test-plan.sh
+        run: scripts/action-test-plan.sh '${{ inputs.version }}'
+      - id: plan2
+        if: inputs.other != ''
+        run: scripts/action-test-plan.sh '${{ inputs.other }}'
       - if: steps.plan.outputs.ship == 'true' && inputs.artifacts
         uses: actions/download-artifact@v4
         with: { pattern: 'dist-*', merge-multiple: true, path: '${{ runner.temp }}/dist' }
+      - if: steps.plan2.outputs.ship == 'true' && inputs.other-run != ''
+        uses: actions/download-artifact@v4
+        with:
+          pattern: 'dist-*'
+          merge-multiple: true
+          path: '${{ runner.temp }}/dist-other'
+          run-id: ${{ inputs.other-run }}
+          github-token: ${{ github.token }}
       - id: fpc
         if: steps.plan.outputs.ship == 'true'
         uses: ./
         with:
-          release: ${{ inputs.release }}
+          version: ${{ inputs.version }}
           targets: ${{ steps.plan.outputs.cross }}
           archives: ${{ inputs.artifacts && format('{0}/dist', runner.temp) || '' }}
       - if: steps.plan.outputs.ship == 'true'
@@ -53,18 +79,34 @@ jobs:
         if: steps.plan.outputs.ship == 'true'
         uses: ./
         with:
-          release: ${{ inputs.release }}
+          version: ${{ inputs.version }}
           targets: ${{ steps.plan.outputs.cross }}
           archives: ${{ inputs.artifacts && format('{0}/dist', runner.temp) || '' }}
       - if: steps.plan.outputs.ship == 'true'
         run: test '${{ steps.again.outputs.cache-hit }}' = true
+      - name: 'Other version, side by side'
+        id: other
+        if: steps.plan2.outputs.ship == 'true'
+        uses: ./
+        with:
+          version: ${{ inputs.other }}
+          targets: ${{ steps.plan2.outputs.cross }}
+          archives: ${{ inputs.other-run != '' && format('{0}/dist-other', runner.temp) || '' }}
+      - if: steps.plan2.outputs.ship == 'true'
+        run: |
+          scripts/action-test-check.sh '${{ steps.other.outputs.version }}' '${{ steps.other.outputs.identity }}' '${{ steps.plan2.outputs.cross }}'
+          if [ '${{ steps.plan.outputs.ship }}' = true ]; then
+            fe=fpc-${{ steps.fpc.outputs.version }}; [ "$RUNNER_OS" != Windows ] || fe=$fe.cmd
+            got=$("$fe" -iW | tr -d '\r'); test "$got" = '${{ steps.fpc.outputs.identity }}'
+            echo "side by side: $fe -> $got, fpc -> $(fpc -iW | tr -d '\r')"
+          fi
 
   cached:
     needs: install
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest, windows-11-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -72,12 +114,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: plan
-        run: scripts/action-test-plan.sh
+        run: scripts/action-test-plan.sh '${{ inputs.version }}'
       - id: fpc
         if: steps.plan.outputs.ship == 'true'
         uses: ./
         with:
-          release: ${{ inputs.release }}
+          version: ${{ inputs.version }}
           targets: ${{ steps.plan.outputs.cross }}
           archives: ${{ inputs.artifacts && format('{0}/dist', runner.temp) || '' }}
       - name: Restored from actions/cache, identity checked

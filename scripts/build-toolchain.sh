@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # build-toolchain.sh — build one host toolchain (native compiler + cross compilers + units) and package it.
 #
-#   scripts/build-toolchain.sh --src DIR --work DIR --bootstrap PPC --build N [options] STEP...
+#   scripts/build-toolchain.sh --version X.Y.Z --src DIR --work DIR --bootstrap PPC --build N [options] STEP...
 #
 # Steps (run in order given; each is restartable):
 #   native        stamp the build identity, `make all` with the bootstrap compiler, `make install` into
@@ -32,16 +32,17 @@
 #   --keep-going       record failing cross targets and continue (default: stop at first failure)
 #   --memcap SIZE      wrap each make in `systemd-run --user --scope -p MemoryMax=SIZE` (Linux only)
 #   --unit-archives    package: also write one units archive per cross target (canonical build only)
+#   --binutils H=DIR   finish: ship the cross binutils in DIR/bin as cross/bin of host H's archive (repeatable)
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")/.." && pwd)
-# shellcheck source=/dev/null
-. "$here/toolchain.conf"
+. "$here/scripts/lib.sh"
 
-src='' work='' bootstrap='' build='' targets_spec=host canadian='' jobs='' lanes=1 toolpath='' keepgoing=0 memcap='' unitarchives=0
+binutils_dirs=() version='' src='' work='' bootstrap='' build='' targets_spec=host canadian='' jobs='' lanes=1 toolpath='' keepgoing=0 memcap='' unitarchives=0
 steps=()
 while [ $# -gt 0 ]; do
   case $1 in
+    --version) version=$2; shift 2 ;;
     --src) src=$2; shift 2 ;;
     --work) work=$2; shift 2 ;;
     --bootstrap) bootstrap=$2; shift 2 ;;
@@ -54,12 +55,14 @@ while [ $# -gt 0 ]; do
     --keep-going) keepgoing=1; shift ;;
     --memcap) memcap=$2; shift 2 ;;
     --unit-archives) unitarchives=1; shift ;;
+    --binutils) binutils_dirs+=("$2"); shift 2 ;;
     -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     -*) echo "unknown option $1" >&2; exit 2 ;;
     *) steps+=("$1"); shift ;;
   esac
 done
-[ -n "$src" ] && [ -n "$work" ] && [ -n "$build" ] || { echo "need --src --work --build" >&2; exit 2; }
+[ -n "$version" ] && [ -n "$src" ] && [ -n "$work" ] && [ -n "$build" ] || { echo "need --version --src --work --build" >&2; exit 2; }
+load_version "$version"
 [ ${#steps[@]} -gt 0 ] || steps=(native cross finish package)
 src=$(cd "$src" && pwd)
 mkdir -p "$work"; work=$(cd "$work" && pwd)
@@ -111,12 +114,11 @@ stamp_identity() { # stamp_identity TREE
 }
 
 # ---- targets table -------------------------------------------------------------------------------
-# targets/targets.tsv columns (tab separated, '#' comments):
+# versions/<version>/targets.tsv columns (tab separated, '#' comments):
 #   target  class  hosts  binutils  make_args  run  notes
 # class: internal | binutils | sdk | excluded ; hosts: comma list of build hosts or '*'
 # binutils: prefix of the GNU binutils to use on Linux build hosts ('-' = none/internal,
 #           'clang:<triple>' = clang integrated assembler via a shim)
-tsv=$here/targets/targets.tsv
 target_field() { # target_field TARGET COLUMN(1-based)
   awk -F'\t' -v t="$1" -v c="$2" '$0 !~ /^#/ && $1==t {print $c; exit}' "$tsv"
 }
@@ -280,6 +282,11 @@ step_canadian() {
       tcpu=${t%%-*}
       [ "$tcpu" = "$cpu2" ] && continue
       local cname; cname=$(compiler_suffix "$tcpu")
+      if [ ! -f "$root/bin/$h2/ppcross$cname.exe" ] && [ "$h2" = x86_64-win64 ] && { [ "$tcpu" = i386 ] || [ "$tcpu" = i8086 ]; }; then
+        log "canadian $h2: ppcross$cname.exe (x87 types on win64)"
+        win64_x87_compiler "$tree" "$tcpu" "$root/bin/$h2/ppcross$cname.exe" "$lf" || log "canadian $h2: ppcross$cname failed"
+        continue
+      fi
       if [ ! -f "$root/bin/$h2/ppcross$cname.exe" ]; then
         log "canadian $h2: ppcross$cname.exe"
         # Windows has no 80-bit Extended: x86 cross compilers need FPC's soft x80 (compiler/Makefile.fpc)
@@ -299,6 +306,10 @@ step_compilers() {
   cpus=$(select_targets | cut -d- -f1 | sort -u)
   for c in $cpus; do
     [ "$c" = "$host_cpu" ] && continue
+    # 3.2.x: no x86 cross compilers without 80-bit Extended (aarch64-darwin uses the x86_64-darwin build instead)
+    if [ "${ROSETTA_X86:-0}" = 1 ] && [ "$host_cpu" != x86_64 ]; then
+      case $c in i386|i8086|x86_64) log "compilers: no ppcross for $c on $host (FPC 3.2.x limit)"; continue ;; esac
+    fi
     cname=$(compiler_suffix "$c")
     [ -x "$stage/lib/fpc/$FPC_VERSION/ppcross$cname" ] && continue
     log "compilers: ppcross$cname"
@@ -313,6 +324,22 @@ step_compilers() {
       [ $keepgoing = 1 ] || exit 1
     fi
   done
+}
+
+# win64_x87_compiler TREE CPU OUT LOG — a Windows x64 compiler for i386/i8086, which need 80-bit Extended.
+# Win64 code normally has no x87 types; a compiler built with -dFPC_SUPPORT_X87_TYPES_ON_WIN64 keeps them.
+# Chain: that compiler (Linux-hosted), a win64 RTL built with it (only used here), then compiler/ for CPU.
+win64_x87_compiler() {
+  local tree=$1 cpu=$2 dest=$3 lf=$4 x=$1.x87
+  rm -rf "$x"; mkdir -p "$x"; (cd "$tree" && tar --exclude=./rtl/units --exclude='./compiler/*/units' -cf - .) | (cd "$x" && tar -xf -)
+  (cd "$x" && run_make "$lf" -C rtl all FPC="$(native_ppc)" -j"$jobs" \
+     && run_make "$lf" -C compiler x86_64 LOCALOPT=-dFPC_SUPPORT_X87_TYPES_ON_WIN64 FPC="$(native_ppc)" \
+     && cp compiler/ppcx64 ppcx64-x87 \
+     && run_make "$lf" -C rtl all OS_TARGET=win64 CPU_TARGET=x86_64 FPC="$x/ppcx64-x87" -j"$jobs" \
+     && run_make "$lf" -C compiler clean \
+     && run_make "$lf" -C compiler "$cpu" RELEASE=1 OS_TARGET=win64 CPU_TARGET=x86_64 FPC="$x/ppcx64-x87" \
+     && cp "compiler/ppc$(compiler_suffix "$cpu").exe" "$dest") || return 1
+  rm -rf "$x"
 }
 
 x87opt() { # x87opt CPU NOEXTENDED -> LOCALOPT for x86 targets on hosts without 80-bit Extended
@@ -339,9 +366,18 @@ step_finish() {
     if [ -L "$f" ]; then case $(readlink "$f") in /*) ln -sfn "../lib/fpc/$FPC_VERSION/$(basename "$(readlink "$f")")" "$f" ;; esac; fi
   done
   mkdir -p "$stage/share/fpc-toolchain" "$stage/etc"
-  cp "$here/toolchain.conf" "$tsv" "$stage/share/fpc-toolchain/"
+  # cross binutils built from source (scripts/build-binutils.sh): <tree>/cross/bin, found through fpc.cfg -FD
+  local spec bh bd dst
+  for spec in ${binutils_dirs[@]+"${binutils_dirs[@]}"}; do
+    bh=${spec%%=*}; bd=${spec#*=}
+    if [ "$bh" = "$host" ]; then dst=$stage; else dst=$work/stage-$bh; fi
+    [ -d "$dst" ] && [ -d "$bd/bin" ] || continue
+    mkdir -p "$dst/cross/bin"; cp -R "$bd/bin/." "$dst/cross/bin/"
+    log "finish: $(find "$bd/bin" -name '*-as*' | wc -l | tr -d ' ') cross binutils for $bh"
+  done
+  cp "$vdir/toolchain.conf" "$tsv" "$stage/share/fpc-toolchain/"
   for f in install.sh install.ps1 fpc-toolchain fpc-toolchain.ps1 fpc-sysroot.sh; do cp "$here/scripts/$f" "$stage/share/fpc-toolchain/"; done
-  [ -d "$here/patches" ] && (cd "$here/patches" && ls *.patch 2>/dev/null) > "$stage/share/fpc-toolchain/patches.txt" || true
+  (cd "$vdir/patches" 2>/dev/null && ls -- *.patch 2>/dev/null) > "$stage/share/fpc-toolchain/patches.txt" || true
   {
     echo "identity=$identity"
     echo "tag=$tag"
@@ -358,7 +394,7 @@ step_finish() {
   for r in "$work"/stage-*; do
     [ -d "$r" ] || continue
     mkdir -p "$r/share/fpc-toolchain"
-    cp "$here/toolchain.conf" "$tsv" "$r/share/fpc-toolchain/"
+    cp "$vdir/toolchain.conf" "$tsv" "$r/share/fpc-toolchain/"
     cp "$here/scripts/install.ps1" "$r/share/fpc-toolchain/" 2>/dev/null || true
     sed -e "s/^host=.*/host=${r##*/stage-}/" -e "s/^unit_targets=.*/unit_targets=$(cd "$r/units" && ls | tr '\n' ' ')/" \
       "$stage/share/fpc-toolchain/BUILDINFO" > "$r/share/fpc-toolchain/BUILDINFO"

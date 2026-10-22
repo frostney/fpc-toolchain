@@ -1,17 +1,17 @@
 name: 'Free Pascal toolchain'
-description: 'Install a cached Free Pascal toolchain from this repository''s releases, with the cross targets you ask for.'
+description: 'Install cached Free Pascal toolchains (3.2.4, 3.3.1) with the cross targets you ask for. Use it twice for both versions side by side.'
 author: 'Johannes Stein'
 branding:
   icon: 'package'
   color: 'blue'
 
 inputs:
-  targets:
-    description: 'Cross targets to add, comma separated (for example x86_64-win64,wasm32-wasip1). Default: native only.'
+  version:
+    description: 'FPC version (3.2.4 or 3.3.1: the newest build), or a build (3.2.4-rc2-b1 or 3.2.4-rc2+1). Default: the identity in toolchain.lock.'
     required: false
     default: ''
-  release:
-    description: 'Release to install (tag 3.3.1-b1 or identity 3.3.1+1). Default: the tag the action is used at, else the newest release.'
+  targets:
+    description: 'Cross targets to add, comma separated (for example x86_64-win64,wasm32-wasip1). Default: native only.'
     required: false
     default: ''
   repository:
@@ -76,9 +76,8 @@ runs:
       shell: bash
       env:
         INPUT_TARGETS: ${{ inputs.targets }}
-        INPUT_RELEASE: ${{ inputs.release }}
+        INPUT_VERSION: ${{ inputs.version }}
         INPUT_REPOSITORY: ${{ inputs.repository }}
-        ACTION_REF: ${{ github.action_ref }}
         ACTION_REPOSITORY: ${{ github.action_repository }}
         GH_TOKEN: ${{ inputs.token }}
       run: bash "$GITHUB_ACTION_PATH/scripts/action.sh" resolve
@@ -92,6 +91,7 @@ runs:
       shell: bash
       env:
         INPUT_DIR: ${{ steps.resolve.outputs.dir }}
+        INPUT_VDIR: ${{ steps.resolve.outputs.vdir }}
         INPUT_HOST: ${{ steps.resolve.outputs.host }}
         INPUT_TAG: ${{ steps.resolve.outputs.tag }}
         INPUT_IDENTITY: ${{ steps.resolve.outputs.identity }}

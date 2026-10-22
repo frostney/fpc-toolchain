@@ -1,5 +1,5 @@
-# Install a published release with the installers on every host platform, side by side with the sibling
-# version's latest release, and smoke-test it: build identity, version selection, hello world for every target.
+# Install a published release with the installers on every host platform, side by side with the other
+# version's newest release, and smoke-test it: build identity, version selection, hello world for every target.
 name: smoke
 
 on:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       identity:
-        description: 'release to test, e.g. 3.3.1-b1 or 3.3.1+1 (default: latest release)'
+        description: 'release to test, e.g. 3.2.4-rc2-b1 or 3.2.4-rc2+1 (default: latest release)'
         required: false
   schedule:
     - cron: '17 4 * * 1'   # weekly: catches runner image drift (glibc, Xcode, Windows SDK)
@@ -18,8 +18,6 @@ permissions:
 
 env:
   WASMTIME: v49.0.3
-  # the sibling toolchain installed next to this one to prove side-by-side installs
-  SIBLING_REPO: ${{ github.repository == 'frostney/fpc-toolchain-3.2.4' && 'frostney/fpc-toolchain-3.3.1' || 'frostney/fpc-toolchain-3.2.4' }}
 
 jobs:
   resolve:
@@ -28,6 +26,7 @@ jobs:
       identity: ${{ steps.r.outputs.identity }}
       sibling: ${{ steps.r.outputs.sibling }}
       hosts: ${{ steps.r.outputs.hosts }}
+      version: ${{ steps.r.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - id: r
@@ -36,11 +35,17 @@ jobs:
         run: |
           id='${{ inputs.identity || github.event.release.tag_name }}'
           [ -n "$id" ] || id=$(gh release view -R "$GITHUB_REPOSITORY" --json tagName -q .tagName)
-          sib=$(gh release view -R "$SIBLING_REPO" --json tagName -q .tagName 2>/dev/null || true)
+          v=${id%%[-+]*}
+          # the other version's newest published release, installed next to this one
+          o=$(cd versions && for d in *; do [ "$d" = "$v" ] || echo "$d"; done | head -n 1)
+          sib=$(gh api "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | select(.draft == false) | .tag_name' | grep "^$o-" | head -n 1 || true)
           # release tags are <ver>-bN; the identity fpc -iW prints is <ver>+N
           id=$(echo "$id" | sed 's/-b\([0-9][0-9]*\)$/+\1/'); sib=$(echo "$sib" | sed 's/-b\([0-9][0-9]*\)$/+\1/')
-          echo "identity=$id" >> "$GITHUB_OUTPUT"; echo "sibling=$sib" >> "$GITHUB_OUTPUT"
-          echo "hosts=$(. ./toolchain.conf; echo "$TOOLCHAIN_HOSTS")" >> "$GITHUB_OUTPUT"
+          {
+            echo "identity=$id"; echo "sibling=$sib"; echo "version=$v"
+            # shellcheck source=/dev/null
+            echo "hosts=$(. "versions/$v/toolchain.conf"; echo "$TOOLCHAIN_HOSTS")"
+          } >> "$GITHUB_OUTPUT"
 
   posix:
     needs: resolve
@@ -55,15 +60,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Emulators, cross binutils, wasmtime
+      - name: Emulators, clang, wasmtime (cross binutils come with the toolchain)
         run: |
           if command -v apt-get >/dev/null; then
             sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends qemu-user-static clang lld xz-utils \
-              $(awk -F'\t' '$0 !~ /^#/ && $2!="excluded" && $4 ~ /-$/ {print $4}' targets/targets.tsv | sort -u | scripts/binutils-packages.sh)
+            sudo apt-get install -y --no-install-recommends qemu-user-static clang lld xz-utils
           else
-            brew install xz x86_64-linux-gnu-binutils arm-linux-gnueabihf-binutils mips-linux-gnu-binutils \
-              mipsel-linux-gnu-binutils arm-none-eabi-binutils
+            brew install xz
           fi
           curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/$WASMTIME/wasmtime-$WASMTIME-${{ matrix.wasmtime }}.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/wasmtime-$WASMTIME-${{ matrix.wasmtime }}" >> "$GITHUB_PATH"
@@ -93,7 +96,7 @@ jobs:
           id='${{ needs.resolve.outputs.identity }}'; v=${id%%[-+]*}
           scripts/smoke.sh --fpc "$RUNNER_TEMP/fpc-toolchains/bin/fpc-$v" --out "$RUNNER_TEMP/smoke" --emulators
           cat "$RUNNER_TEMP/smoke/smoke.tsv" >> "$GITHUB_STEP_SUMMARY"
-          scripts/check-smoke.sh targets/targets.tsv "$RUNNER_TEMP/smoke/smoke.tsv"
+          scripts/check-smoke.sh "versions/$v/targets.tsv" "$RUNNER_TEMP/smoke/smoke.tsv" ${{ matrix.host }}
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: 'smoke-${{ matrix.host }}', path: '${{ runner.temp }}/smoke/smoke.tsv' }

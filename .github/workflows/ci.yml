@@ -1,0 +1,41 @@
+# Every push to main and every pull request: lint the workflows and scripts, and check that both versions'
+# source + patch series still produce their pinned trees. Builds run from build.yml (tags and dispatch).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color -shellcheck=
+      - name: shellcheck (errors)
+        run: shellcheck -S error scripts/*.sh scripts/fpc-toolchain
+      - name: PowerShell parses
+        shell: pwsh
+        run: |
+          foreach ($f in Get-ChildItem scripts/*.ps1) {
+            $e = $null; [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$e) | Out-Null
+            if ($e) { $e | ForEach-Object { Write-Error "$($f.Name): $_" }; exit 1 }
+          }
+
+  source:
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['3.2.4', '3.3.1']
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source + series give the pinned tree
+        run: scripts/fetch-source.sh ${{ matrix.version }} "$RUNNER_TEMP/src"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fetch-source.sh DEST
+# fetch-source.sh VERSION DEST
 #
 # Produce the exact FPC source tree this repository builds:
 #   FPC_SOURCE_URL @ FPC_SOURCE_COMMIT (shallow fetch by SHA)
@@ -11,18 +11,19 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")/.." && pwd)
-dest=${1:?usage: fetch-source.sh DEST}
+ver=${1:?usage: fetch-source.sh VERSION DEST}; dest=${2:?usage: fetch-source.sh VERSION DEST}
 
 env_url=${FPC_SOURCE_URL-}; env_commit=${FPC_SOURCE_COMMIT-}; env_pdir=${FPC_PATCH_DIR-}
 env_pgit=${FPC_PATCH_GIT-}; env_tree=${FPC_EXPECT_TREE-unset}
 # shellcheck source=/dev/null
-. "$here/toolchain.conf"
+. "$here/scripts/lib.sh"
+load_version "$ver"
 FPC_SOURCE_URL=${env_url:-$FPC_SOURCE_URL}
 FPC_SOURCE_COMMIT=${env_commit:-$FPC_SOURCE_COMMIT}
 FPC_PATCH_DIR=${env_pdir:-$FPC_PATCH_DIR}
 FPC_PATCH_GIT=${env_pgit:-${FPC_PATCH_GIT-}}
 [ "$env_tree" != unset ] && FPC_EXPECT_TREE=$env_tree
-case $FPC_PATCH_DIR in /*) ;; *) FPC_PATCH_DIR=$here/$FPC_PATCH_DIR ;; esac
+case $FPC_PATCH_DIR in /*) ;; *) FPC_PATCH_DIR=$vdir/$FPC_PATCH_DIR ;; esac
 
 if [ -e "$dest" ]; then
   echo "fetch-source: $dest exists; remove it first" >&2; exit 1

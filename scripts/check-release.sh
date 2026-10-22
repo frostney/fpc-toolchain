@@ -1,18 +1,22 @@
 #!/bin/sh
-# check-release.sh DIR — a release is complete only if DIR has: a host archive for every TOOLCHAIN_HOSTS entry
+# check-release.sh VERSION DIR BUILD — a release is complete only if DIR has: a host archive for every TOOLCHAIN_HOSTS entry
 # (.tar.xz, .zip for Windows), a units archive for every target some other host ships (.zip as well when a
 # Windows host ships it), the source archives, and a SHA256SUMS that covers every file and matches.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
-. "$here/toolchain.conf"
-dir=$1; tsv=$here/targets/targets.tsv
-tag="${FPC_VERSION}${FPC_UPSTREAM_MINORPATCH}-b${2:?usage: check-release.sh DIR BUILD}"
+v=${1:?usage: check-release.sh VERSION DIR BUILD}; v=${v%%[-+]*}
+vdir=$here/versions/$v; vdir_conf=$vdir/toolchain.conf
+[ -f "$vdir_conf" ] || { echo "unknown version $1" >&2; exit 2; }
+. "$vdir_conf"
+dir=$2; tsv=$vdir/targets.tsv
+tag="${FPC_VERSION}${FPC_UPSTREAM_MINORPATCH}-b${3:?usage: check-release.sh VERSION DIR BUILD}"
 id="fpc-$tag"; missing=0
 need() { [ -f "$dir/$1" ] || { echo "missing: $1"; missing=1; }; }
 for h in $TOOLCHAIN_HOSTS; do
   case $h in *-win64) need "$id-$h.zip" ;; *) need "$id-$h.tar.xz" ;; esac
 done
 need "$id-source.tar.xz"; need "$id-source-patches.tar.xz"
+need "binutils-2.42.tar.xz"   # source of the cross binutils shipped in cross/bin (GPL)
 awk -F'\t' -v hosts=" $TOOLCHAIN_HOSTS " '$0 !~ /^#/ && $2!="excluded" {
     n=split($3,h,","); u=0; z=0
     for(i=1;i<=n;i++) if (h[i]!=$1 && index(hosts," " h[i] " ")) { u=1; if (h[i] ~ /-win64$/) z=1 }

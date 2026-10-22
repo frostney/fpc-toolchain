@@ -7,6 +7,7 @@
   of an internal-class target, a run failure, or a missing run of a target listed in SMOKE_REQUIRE_RUN.
   Compile-only (-Cn) for embedded/freertos targets and for targets whose class is sdk or that need an Apple SDK.
   Runs: the host's own target, i386-win32 on x64, x86_64-win64 on ARM64 (emulation), wasm32 with wasmtime.
+  Links every internal and binutils target (with the binutils shipped in cross\bin).
 #>
 param([Parameter(Mandatory)][string]$Fpc, [Parameter(Mandatory)][string]$Tree, [Parameter(Mandatory)][string]$Out,
       [string]$HostId)
@@ -64,7 +65,7 @@ foreach ($dir in Get-ChildItem (Join-Path $Tree 'units') -Directory) {
   }
   if ($c -eq 'FAIL') { $detail = (Select-String -Path (Join-Path $o 'compile.log') -Pattern 'Error|Fatal' | Select-Object -First 1).Line }
   if ($lk -eq 'FAIL') { $detail = (Select-String -Path (Join-Path $o 'link.log') -Pattern 'Error|Fatal' | Select-Object -First 1).Line }
-  if ($c -eq 'FAIL' -or $r -eq 'FAIL' -or ($lk -eq 'FAIL' -and $cls[$t] -eq 'internal') -or ($t -in $req -and $r -ne 'ok')) { $bad = $true }
+  if ($c -eq 'FAIL' -or $r -eq 'FAIL' -or ($lk -eq 'FAIL' -and $cls[$t] -in @('internal', 'binutils')) -or ($t -in $req -and $r -ne 'ok')) { $bad = $true }
   $rows += "$t`t$c`t$lk`t$r`t$detail"
   Write-Host ("{0,-24} compile={1,-4} link={2,-5} run={3,-11} {4}" -f $t, $c, $lk, $r, $detail)
 }

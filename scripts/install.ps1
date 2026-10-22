@@ -87,7 +87,7 @@ try {
   if (-not $From) {
     if (-not $Identity) { throw 'say what to install: -Identity, -Lock or -From' }
     $ver = ($Identity -split '[-+]')[0]
-    if (-not $Repo) { $Repo = "frostney/fpc-toolchain-$ver" }
+    if (-not $Repo) { $Repo = "frostney/fpc-toolchain" }
     $assetId = "fpc-$Tag"
     $script:base = "https://github.com/$Repo/releases/download/$Tag"
     $sumsFile = Join-Path $tmp 'SHA256SUMS'
@@ -144,8 +144,25 @@ try {
   $cfg = Join-Path $hb 'fpc.cfg'
   & (Join-Path $hb 'fpcmkcfg.exe') -d "basepath=$dest" -o $cfg | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'fpcmkcfg failed' }
-  # cross targets shipped on Windows hosts use FPC's internal tools or clang (targets.tsv): no -XP prefix
-  Add-Content -Path $cfg -Value "`n# --- fpc-toolchain ${bident}: cross targets use FPC's internal tools or clang`n#IFDEF FPC_CROSSCOMPILING`n-XP`n#ENDIF"
+  # cross binutils: shipped in cross\bin (-FD), one prefix per target (targets.tsv; empty = internal or clang)
+  $lines = @('', "# --- fpc-toolchain ${bident}: cross binutils", '#IFDEF FPC_CROSSCOMPILING')
+  $xb = Join-Path $dest 'cross\bin'
+  if (Test-Path $xb) { $lines += "-FD$xb" }
+  $osdef = @{ win64 = 'WIN64'; win32 = 'WIN32'; wasip1 = 'WASIP1'; wasip1threads = 'WASIP1THREADS'; wasip2 = 'WASIP2' }
+  foreach ($l in Get-Content (Join-Path $dest 'share\fpc-toolchain\targets.tsv')) {
+    if ($l -match '^#') { continue }
+    $f = $l -split "`t"; if ($f.Count -lt 5 -or $f[1] -eq 'excluded') { continue }
+    $cpu, $os = $f[0] -split '-', 2
+    $xp = if ($f[3] -eq '-' -or $f[3] -like 'clang:*') { '' } else { $f[3] }
+    $ucpu = $cpu.ToUpper(); $uos = @(if ($osdef.ContainsKey($os)) { $osdef[$os] } else { $os.ToUpper() })
+    if ($cpu -eq 'armeb') { $ucpu = 'ARM'; $uos += 'FPC_BIG_ENDIAN' }
+    $lines += "#IFDEF CPU$ucpu"; foreach ($d in $uos) { $lines += "#IFDEF $d" }
+    $lines += "-XP$xp"
+    foreach ($m in ($f[4] -split ';')) { if ($m -like 'CROSSOPT=*') { $lines += ($m.Substring(9) -split ' ' | Where-Object { $_ }) } }
+    foreach ($d in $uos) { $lines += '#ENDIF' }; $lines += '#ENDIF'
+  }
+  $lines += '#ENDIF FPC_CROSSCOMPILING'
+  Add-Content -Path $cfg -Value $lines
 
   if (-not $NoActivate) {
     $link = Join-Path $tc $ver

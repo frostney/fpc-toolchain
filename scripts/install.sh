@@ -11,7 +11,7 @@
 #   --from-dir DIR       install an unpacked tree (copied)
 # Options:
 #   --root DIR           install root (default $FPC_TOOLCHAIN_ROOT or ~/.local/share/fpc-toolchains)
-#   --repo OWNER/NAME    GitHub repository (default derived from the version: frostney/fpc-toolchain-<x.y.z>)
+#   --repo OWNER/NAME    GitHub repository (default frostney/fpc-toolchain)
 #   --host HOST          host to download for (default: this machine, e.g. x86_64-linux, aarch64-darwin)
 #   --targets LIST       cross targets whose units to install: comma list, "all", or "none"
 #                        (default: the lock's `targets`, else none; the host's own units are always there)
@@ -94,7 +94,7 @@ fetch() { # fetch ASSET -> $tmp/ASSET, verified against SHA256SUMS
 if [ -z "$from" ] && [ -z "$fromdir" ]; then
   [ -n "$ident" ] || die "say what to install: IDENTITY, --lock, --from or --from-dir"
   ver=${ident%%[-+]*}
-  [ -n "$repo" ] || repo=frostney/fpc-toolchain-$ver
+  [ -n "$repo" ] || repo=frostney/fpc-toolchain
   assetid="fpc-$tag"
   base="https://github.com/$repo/releases/download/$tag"
   curl -fsSL --retry 3 -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || die "no SHA256SUMS in release $ident of $repo"
@@ -154,6 +154,28 @@ if [ -n "$targets" ] && [ "$targets" != none ]; then
   done
 fi
 
+# --- 3.2.x on Apple Silicon: x86 targets through the x86_64-darwin build under Rosetta 2 ------------------
+x86=$(for t in $(echo "$targets" | tr ',' ' '); do case $t in i386-*|i8086-*|x86_64-*) echo "$t" ;; esac; done)
+if [ "$host" = aarch64-darwin ] && [ -n "$x86" ] && grep -q '^ROSETTA_X86=1' "$dest.new/share/fpc-toolchain/toolchain.conf"; then
+  [ -n "$assetid" ] || die "x86 targets on Apple Silicon need the x86_64-darwin archive next to $from"
+  fetch "$assetid-x86_64-darwin.tar.xz"
+  mkdir -p "$dest.new/rosetta"
+  xz -dc "$tmp/$assetid-x86_64-darwin.tar.xz" | (cd "$dest.new/rosetta" && tar -xf - --strip-components=1)
+  rm -f "$tmp/$assetid-x86_64-darwin.tar.xz"
+  for c in ppcrossx64:ppcx64 ppcross386:ppcross386 ppcross8086:ppcross8086; do
+    w=${c%%:*}; real="$dest/rosetta/lib/fpc/$ver/${c#*:}"
+    [ -f "$dest.new/rosetta/lib/fpc/$ver/${c#*:}" ] || continue
+    printf '#!/bin/sh
+# x86 cross compiler of the x86_64-darwin build, run by Rosetta 2 (FPC 3.2.x has no arm64-hosted one)
+exec "%s" -n "@%s" "$@"
+' \
+      "$real" "$dest/etc/fpc.cfg" > "$dest.new/lib/fpc/$ver/$w"
+    chmod +x "$dest.new/lib/fpc/$ver/$w"; ln -sfn "../lib/fpc/$ver/$w" "$dest.new/bin/$w"
+  done
+  arch -x86_64 /usr/bin/true 2>/dev/null || echo "warning: Rosetta 2 is not installed (softwareupdate --install-rosetta); x86 targets need it" >&2
+  echo "  + x86 targets through the x86_64-darwin build (Rosetta 2)" >&2
+fi
+
 # --- per-build fpc.cfg (FPC's own template via fpcmkcfg, plus cross binutils prefixes) -------------
 cfg=$dest/etc/fpc.cfg
 mkdir -p "$dest.new/etc"
@@ -162,6 +184,8 @@ mkdir -p "$dest.new/etc"
   echo ""
   echo "# --- fpc-toolchain $bident: cross binutils (targets.tsv binutils column; empty = internal/clang) ---"
   echo "#IFDEF FPC_CROSSCOMPILING"
+  # cross binutils shipped with this build (built from GNU binutils sources, see the release's binutils-*.tar.xz)
+  [ -d "$dest.new/cross/bin" ] && echo "-FD$dest/cross/bin"
   awk -F'\t' '$0 !~ /^#/ && NF>=4 && $2!="excluded" {print $1 "\t" $4 "\t" $5}' "$dest.new/share/fpc-toolchain/targets.tsv" |
   while IFS="$(printf '\t')" read -r t bu margs; do
     cpu=${t%%-*}; os=${t#*-}
