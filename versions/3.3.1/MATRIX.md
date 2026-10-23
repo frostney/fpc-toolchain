@@ -72,7 +72,7 @@ Which host ships which target. `x` ships, `r` ships through the x86_64 macOS bui
 | avr-embedded | binutils | x | x | x | x | x | x | ok | - | - | units for SUBARCH avr5 (ATmega328P class) |
 | riscv32-embedded | binutils | x | x | x | x | x | x | ok | - | - | SUBARCH rv32imac |
 | aarch64-embedded | binutils | x | x | x | x | x | x | ok | - | - |  |
-| x86_64-embedded | binutils | x | x | x | x | x | x | ok | - | - |  |
+| x86_64-embedded | binutils | x | x | x | x | x | x | ok | - | - | GNU as (-Aas): on macOS hosts 3.3.1 otherwise calls x86_64-linux-gnu-clang as its assembler (checked on macos-15-intel) |
 | i386-embedded | binutils | x | x | x | x | x | x | ok | - | - |  |
 | m68k-embedded | binutils | x | x | x | x | x | x | ok | - | - |  |
 | arm-freertos | sdk | x | x | x | x | x | x | ok | - | - | linking needs FreeRTOS |

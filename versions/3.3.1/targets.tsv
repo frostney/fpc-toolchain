@@ -85,7 +85,7 @@ riscv32-embedded	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwi
 riscv64-embedded	excluded	-	riscv64-unknown-elf-	-	-	compiler internal error 200408222 compiling rtl/inc/genmath.inc
 mipsel-embedded	excluded	-	mipsel-linux-gnu-	SUBARCH=pic32mx	-	does not build from source: rtl/embedded has no rule for mipsel/startup.s (SUBARCH pic32mx)
 aarch64-embedded	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	aarch64-linux-gnu-	-	-	
-x86_64-embedded	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	x86_64-linux-gnu-	-	-	
+x86_64-embedded	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	x86_64-linux-gnu-	CROSSOPT=-Aas	-	GNU as (-Aas): on macOS hosts 3.3.1 otherwise calls x86_64-linux-gnu-clang as its assembler (checked on macos-15-intel)
 i386-embedded	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	i686-linux-gnu-	-	-	
 m68k-embedded	binutils	x86_64-linux,aarch64-linux,aarch64-darwin,x86_64-darwin,x86_64-win64,aarch64-win64	m68k-linux-gnu-	-	-	
 xtensa-embedded	excluded	-	xtensa-lx106-elf-	SUBARCH=lx106	-	Debian xtensa-lx106-elf as rejects the -EL option FPC passes for the embedded target (xtensa-freertos builds)
