@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 23 Oct 2026 02:33:14 +0100
-Subject: [PATCH 76/77] x86 shift/rotate by a register: release ECX after the
+Subject: [PATCH 76/78] x86 shift/rotate by a register: release ECX after the
  instruction, so a spill reload cannot take it
 
 tcgx86.a_op_reg_reg and a_op_reg_ref load the shift count into ECX and,

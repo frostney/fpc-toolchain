@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 00:01:52 +0100
-Subject: [PATCH 18/77] x86 OptPass2Movx: do not narrow SAR unless the value
+Subject: [PATCH 18/78] x86 OptPass2Movx: do not narrow SAR unless the value
  fits the smaller signed range
 
 The register-size optimisation assumed SAR after MOVZX behaves like SHR,

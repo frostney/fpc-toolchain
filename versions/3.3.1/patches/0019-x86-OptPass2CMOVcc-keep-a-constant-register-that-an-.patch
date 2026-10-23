@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 00:04:38 +0100
-Subject: [PATCH 19/77] x86 OptPass2CMOVcc: keep a constant register that an
+Subject: [PATCH 19/78] x86 OptPass2CMOVcc: keep a constant register that an
  earlier CMOV still reads (#41867)
 
 Patch proposed in #41867 (rasberryrabbit): before removing the MOV that

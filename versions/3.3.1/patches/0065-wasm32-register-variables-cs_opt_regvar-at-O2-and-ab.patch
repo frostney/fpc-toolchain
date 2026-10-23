@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 22 Oct 2026 09:43:56 +0100
-Subject: [PATCH 65/77] wasm32: register variables (cs_opt_regvar at -O2 and
+Subject: [PATCH 65/78] wasm32: register variables (cs_opt_regvar at -O2 and
  above)
 
 wasm32 had no register variables: every local, parameter and function

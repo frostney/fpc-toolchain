@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 02:48:08 +0100
-Subject: [PATCH 34/77] Fastmath: do not move a constant between
+Subject: [PATCH 34/78] Fastmath: do not move a constant between
  multiplications when Currency scaling is involved (#41865)
 
 ---

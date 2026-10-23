@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 22 Oct 2026 09:48:26 +0100
-Subject: [PATCH 73/77] x86_64 win64 Exp: use the fdlibm algorithm of
+Subject: [PATCH 73/78] x86_64 win64 Exp: use the fdlibm algorithm of
  genmath.inc in the SSE2 routine (#41837 follow-up)
 
 On x86_64-win64 (no extended type, so the x87 exp of rtl/x86_64/math.inc

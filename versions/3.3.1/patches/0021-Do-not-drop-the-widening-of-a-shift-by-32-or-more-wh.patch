@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 00:07:18 +0100
-Subject: [PATCH 21/77] Do not drop the widening of a shift by 32 or more when
+Subject: [PATCH 21/78] Do not drop the widening of a shift by 32 or more when
  removing int type conversions (#41820)
 
 Patch proposed in #41820: checkremoveinttypeconvs only narrows shl/shr

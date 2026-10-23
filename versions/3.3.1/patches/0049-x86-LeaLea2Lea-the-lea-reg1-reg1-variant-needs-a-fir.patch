@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 03:30:08 +0100
-Subject: [PATCH 49/77] x86 LeaLea2Lea: the lea (reg1,reg1) variant needs a
+Subject: [PATCH 49/78] x86 LeaLea2Lea: the lea (reg1,reg1) variant needs a
  first LEA of a single register
 
 "lea (%r12,%rax),%rax / lea (%rax,%rax),%r12" became "lea (,%rax,4),%r12":

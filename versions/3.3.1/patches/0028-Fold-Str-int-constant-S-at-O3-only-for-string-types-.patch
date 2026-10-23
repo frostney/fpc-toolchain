@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 00:50:22 +0100
-Subject: [PATCH 28/77] Fold Str(<int constant>, S) at -O3 only for string
+Subject: [PATCH 28/78] Fold Str(<int constant>, S) at -O3 only for string
  types without a code page
 
 tcallnode.handle_compilerproc (in_str_x_string) rewrites Str(<const>, S)

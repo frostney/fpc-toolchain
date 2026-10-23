@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 22 Oct 2026 12:32:11 +0100
-Subject: [PATCH 68/77] rtl: WASI: set up argc/argv at startup, objpas.ParamStr
+Subject: [PATCH 68/78] rtl: WASI: set up argc/argv at startup, objpas.ParamStr
  returned '' before the first ParamCount
 
 The WASI system unit sets up argc/argv lazily (setup_arguments, called

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 15 Oct 2026 23:08:52 +0100
-Subject: [PATCH 12/77] x86 OptPass2Movx: truncate constant operands when
+Subject: [PATCH 12/78] x86 OptPass2Movx: truncate constant operands when
  narrowing instructions
 
 Narrowing 'andw $1023' to byte size kept the constant and produced

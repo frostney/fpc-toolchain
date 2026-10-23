@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 01:59:33 +0100
-Subject: [PATCH 30/77] Scale an unscaled Currency value passed as a Currency
+Subject: [PATCH 30/78] Scale an unscaled Currency value passed as a Currency
  parameter or array element
 
 ---

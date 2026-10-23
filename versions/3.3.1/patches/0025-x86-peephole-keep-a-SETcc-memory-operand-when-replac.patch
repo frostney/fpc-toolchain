@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 00:26:37 +0100
-Subject: [PATCH 25/77] x86 peephole: keep a SETcc memory operand when
+Subject: [PATCH 25/78] x86 peephole: keep a SETcc memory operand when
  replacing it by a constant MOV
 
 OptPass1Cmp (and OptPass1MOV) rewrite a SETcc whose result is known into

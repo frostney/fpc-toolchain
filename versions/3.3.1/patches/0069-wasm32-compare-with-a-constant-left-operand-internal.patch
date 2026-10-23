@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 22 Oct 2026 14:28:44 +0100
-Subject: [PATCH 69/77] wasm32: compare with a constant left operand (internal
+Subject: [PATCH 69/78] wasm32: compare with a constant left operand (internal
  error 2010120430 at -O3)
 
 twasmaddnode.second_generic_compare dispatches on the operands'

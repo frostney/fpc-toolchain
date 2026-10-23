@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 22 Oct 2026 09:44:30 +0100
-Subject: [PATCH 66/77] wasm32: register variables also in procedures that use
+Subject: [PATCH 66/78] wasm32: register variables also in procedures that use
  exceptions
 
 tabstractvarsym.is_regvar excludes every procedure with

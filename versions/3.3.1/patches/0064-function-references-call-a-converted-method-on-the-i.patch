@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 22 Oct 2026 09:43:22 +0100
-Subject: [PATCH 64/77] function references: call a converted method on the
+Subject: [PATCH 64/78] function references: call a converted method on the
  instance taken at the conversion (#42006)
 
 Converting a method of an object expression to a function reference

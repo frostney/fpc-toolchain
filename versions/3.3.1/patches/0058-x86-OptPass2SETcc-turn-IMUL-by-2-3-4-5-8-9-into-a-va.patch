@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 22 Oct 2026 03:11:48 +0100
-Subject: [PATCH 58/77] x86 OptPass2SETcc: turn IMUL by 2,3,4,5,8,9 into a
+Subject: [PATCH 58/78] x86 OptPass2SETcc: turn IMUL by 2,3,4,5,8,9 into a
  valid 2-operand LEA only
 
 ---

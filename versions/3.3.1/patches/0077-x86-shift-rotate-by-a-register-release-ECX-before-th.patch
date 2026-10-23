@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 23 Oct 2026 02:46:59 +0100
-Subject: [PATCH 77/77] x86 shift/rotate by a register: release ECX before the
+Subject: [PATCH 77/78] x86 shift/rotate by a register: release ECX before the
  instruction again, bound to it
 
 Follow-up to the previous commit. Releasing ECX after the shift

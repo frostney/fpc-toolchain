@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 22 Oct 2026 11:59:33 +0100
-Subject: [PATCH 67/77] wasm32: while/repeat with a 64-bit boolean condition
+Subject: [PATCH 67/78] wasm32: while/repeat with a 64-bit boolean condition
  produced an invalid module
 
 twasmwhilerepeatnode.pass_generate_code_condition loaded the condition

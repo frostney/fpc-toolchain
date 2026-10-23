@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 00:23:11 +0100
-Subject: [PATCH 23/77] Type check the negated constant created by the fastmath
+Subject: [PATCH 23/78] Type check the negated constant created by the fastmath
  reassociation rules
 
 The fastmath rules for a+c1-c2 and a-c1+c2 wrap the constant in a new

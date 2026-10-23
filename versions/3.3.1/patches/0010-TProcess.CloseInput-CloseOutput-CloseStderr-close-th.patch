@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 15 Oct 2026 22:50:17 +0100
-Subject: [PATCH 10/77] TProcess.CloseInput/CloseOutput/CloseStderr close the
+Subject: [PATCH 10/78] TProcess.CloseInput/CloseOutput/CloseStderr close the
  pipe after its stream was used (#41845)
 
 ResolveStream hands our pipe handle to the stream and forgets it, so

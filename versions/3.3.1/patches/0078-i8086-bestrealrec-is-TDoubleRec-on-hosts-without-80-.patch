@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 23 Oct 2026 10:57:19 +0100
+Subject: [PATCH 78/78] i8086: bestrealrec is TDoubleRec on hosts without
+ 80-bit Extended
+
+compiler/i8086/cpuinfo.pas declares bestrealrec = TExtended80Rec
+unconditionally. The system unit only declares TExtended80Rec when
+SUPPORT_EXTENDED or FPC_SOFT_FPUX80 is defined (rtl/inc/mathh.inc), so a
+compiler built on a host without 80-bit Extended (aarch64, arm, win64,
+...) cannot compile the i8086 code generator:
+
+    cpuinfo.pas(33,18) Error: Identifier not found "TExtended80Rec"
+
+On such hosts bestreal (= extended) is Double, and the i386 and x86_64
+cpuinfo units already declare bestrealrec = TDoubleRec there. Do the same
+for i8086. Where FPC_HAS_TYPE_EXTENDED is defined, the declaration is
+unchanged: on x86_64 the resulting ppc8086 is byte-identical to a build of
+the original file with the same line layout.
+---
+ compiler/i8086/cpuinfo.pas | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/compiler/i8086/cpuinfo.pas b/compiler/i8086/cpuinfo.pas
+index 4c63472f..0d376cde 100644
+--- a/compiler/i8086/cpuinfo.pas
++++ b/compiler/i8086/cpuinfo.pas
+@@ -30,7 +30,11 @@ Interface
+ 
+ Type
+    bestreal = extended;
++{$ifdef FPC_HAS_TYPE_EXTENDED}
+    bestrealrec = TExtended80Rec;
++{$else}
++   bestrealrec = TDoubleRec;
++{$endif}
+    ts32real = single;
+    ts64real = double;
+    ts80real = extended;

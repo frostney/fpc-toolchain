@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 09:50:36 +0100
-Subject: [PATCH 55/77] x86 SubMov2Lea / OptPass2SETcc: $80000000 (-2^31) does
+Subject: [PATCH 55/78] x86 SubMov2Lea / OptPass2SETcc: $80000000 (-2^31) does
  not fit a sign-extended LEA displacement
 
 ---

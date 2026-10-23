@@ -80,8 +80,8 @@ Limits:
 - 3.2.4 on Windows x64: Windows has no x87 `Extended` either, but FPC can turn it on there
   (`FPC_SUPPORT_X87_TYPES_ON_WIN64`). The build makes an x87 Linux-to-win64 compiler, a win64 RTL with it, and
   then the i386 and i8086 cross compilers for Windows.
-- 3.3.1 builds i386 and x86_64 cross compilers on arm64 hosts with soft x80, but not i8086: trunk's
-  `i8086/cpuinfo.pas` has no branch for hosts without `Extended` (i386 and x86_64 have one).
+- 3.3.1 builds the x86 cross compilers on arm64 hosts with soft x80. Patch 0078 gives `i8086/cpuinfo.pas` the
+  branch for hosts without `Extended` that i386 and x86_64 already have.
 - Units store real constants at the compiler's `Extended` size. Windows x64 has none, so its `ppcx64.exe` reads
   them as Double and fails on the 80-bit units of the other x86_64 targets (internal error 200208151). For
   3.3.1 (`SOFT_FPUX80=1`) the build replaces it with a soft-x80 `ppcx64.exe`; win64 output is byte-identical.
@@ -128,6 +128,10 @@ Windows, under `%LOCALAPPDATA%\fpc-toolchains`, uses FPC's Windows layout per bu
 | release | ubuntu-24.04 | `check-release.sh`: every host archive, every units archive, sources, sums; on a tag, a draft release |
 | action-test | all six | the action from the checkout: install, run, cross-compile, the other version next to it, cache hit |
 | publish | ubuntu-24.04 | on a tag: publish the draft |
+
+Artifacts are split by who needs them: `host-<host>`, `units-tar`, `units-zip` and `src-*`. A verify job downloads
+its host archive and the units in its format, and a dry run's action test only `act-<host>` (host archive, one
+units archive, `SHA256SUMS`). The release job takes all of them.
 
 A run by hand is a dry run: build 0, nothing published. Its `other-run` input names a dry run of the other
 version, so the action test installs both side by side before either is released. `ci.yml` lints and checks

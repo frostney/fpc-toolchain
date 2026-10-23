@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 15 Oct 2026 22:18:47 +0100
-Subject: [PATCH 09/77] Release abandoned exceptions in constant time per raise
+Subject: [PATCH 09/78] Release abandoned exceptions in constant time per raise
  (#41950 follow-up)
 
 7a225486bc checked every in-flight exception against the exception frame

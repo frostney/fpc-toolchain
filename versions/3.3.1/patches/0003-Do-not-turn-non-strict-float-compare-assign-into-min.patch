@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 15 Oct 2026 17:34:39 +0100
-Subject: [PATCH 03/77] Do not turn non-strict float compare+assign into
+Subject: [PATCH 03/78] Do not turn non-strict float compare+assign into
  min/max without fastmath
 
 MINSD/MAXSD return the second operand when both compare equal, so

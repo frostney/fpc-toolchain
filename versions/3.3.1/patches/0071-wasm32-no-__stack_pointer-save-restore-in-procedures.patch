@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 22 Oct 2026 11:49:19 +0100
-Subject: [PATCH 71/77] wasm32: no __stack_pointer save/restore in procedures
+Subject: [PATCH 71/78] wasm32: no __stack_pointer save/restore in procedures
  without a frame
 
 Every procedure saved the __stack_pointer global in its entry code
