@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 00:07:18 +0100
-Subject: [PATCH 22/75] x86: do not narrow a comparison that feeds a signed
+Subject: [PATCH 22/77] x86: do not narrow a comparison that feeds a signed
  condition (#41824)
 
 Patch proposed in #41824 (with test tb9009): cmpl $192,%eax on a

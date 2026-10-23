@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 15 Oct 2026 23:16:04 +0100
-Subject: [PATCH 15/75] Do not enable excess precision by default in Delphi
+Subject: [PATCH 15/77] Do not enable excess precision by default in Delphi
  mode
 
 Delphi mode turned on cs_excessprecision, which evaluates every float

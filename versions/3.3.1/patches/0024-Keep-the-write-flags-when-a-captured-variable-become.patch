@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 00:24:51 +0100
-Subject: [PATCH 24/75] Keep the write flags when a captured variable becomes a
+Subject: [PATCH 24/77] Keep the write flags when a captured variable becomes a
  closure field access (#41828)
 
 convert_captured_sym replaces a captured variable by Self.field but drops

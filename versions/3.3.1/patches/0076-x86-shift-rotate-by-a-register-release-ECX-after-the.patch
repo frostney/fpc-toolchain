@@ -1,0 +1,138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 23 Oct 2026 02:33:14 +0100
+Subject: [PATCH 76/77] x86 shift/rotate by a register: release ECX after the
+ instruction, so a spill reload cannot take it
+
+tcgx86.a_op_reg_reg and a_op_reg_ref load the shift count into ECX and,
+since 2e6d9cc2ec ("Corrected placement of ECX deallocation for
+shift/rotate instructions"), release ECX right before the shift
+instruction, expecting the register allocator to correct the position.
+It does not: ungetcpuregister emits a dealloc that is not bound to an
+instruction, and trgobj.instr_spill_register treats such deallocs as
+belonging to the previous instruction, so ECX is not live while the
+reloads for the shift are inserted. When the shifted register variable
+is spilled, its reload can be coloured ECX and overwrites the count:
+
+    movslq %r15d,%rcx        # count
+    movl   280(%rsp),%ecx    # reload of x (spilled) into ECX
+    shrl   %cl,%ecx          # x shr (x and 31)
+
+This shows at -O3/-O4 (load-modify-store turns x := x shr n into
+in_shr_assign_x_y and calls a_op_reg_reg with x's register variable),
+on i386 and x86_64; it miscompiled the progressive JPEG encoder of
+Vampyre Imaging (encode_mcu_AC_refine, temp := temp shr Al).
+
+Release ECX after the instruction again, as before 2e6d9cc2ec (3.2.x).
+
+New test tests/test/cg/tshrspill1.pp (-O3).
+---
+ compiler/x86/cgx86.pas      | 16 +++++-----
+ tests/test/cg/tshrspill1.pp | 62 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 70 insertions(+), 8 deletions(-)
+ create mode 100644 tests/test/cg/tshrspill1.pp
+
+diff --git a/compiler/x86/cgx86.pas b/compiler/x86/cgx86.pas
+index bd9a767a..47bd490c 100644
+--- a/compiler/x86/cgx86.pas
++++ b/compiler/x86/cgx86.pas
+@@ -2351,11 +2351,12 @@ unit cgx86;
+               { Use ecx to load the value, that allows better coalescing }
+               getcpuregister(list,REGCX);
+               a_load_reg_reg(list,reg_cgsize(src),REGCX_Size,src,REGCX);
+-              { Deallocate right before the instruction - it will be corrected
+-                later by the register allocator (not correcting it will cause
+-                it to be deallocated one instruction too late) }
+-              ungetcpuregister(list,REGCX);
+               list.concat(taicpu.op_reg_reg(Topcg2asmop[op],tcgsize2opsize[size],NR_CL,dst));
++              { Deallocate after the instruction: the register allocator treats
++                a dealloc that is not bound to an instruction as belonging to the
++                previous one, so ECX released before the shift would be free for
++                the reload of a spilled dst inserted before the shift }
++              ungetcpuregister(list,REGCX);
+             end;
+           else
+             begin
+@@ -2446,11 +2447,10 @@ unit cgx86;
+               { Use ecx to load the value, that allows better coalescing }
+               getcpuregister(list,REGCX);
+               a_load_reg_reg(list,reg_cgsize(reg),REGCX_Size,reg,REGCX);
+-              { Deallocate right before the instruction - it will be corrected
+-                later by the register allocator (not correcting it will cause
+-                it to be deallocated one instruction too late) }
+-              ungetcpuregister(list,REGCX);
+               list.concat(taicpu.op_reg_ref(TOpCG2AsmOp[op],tcgsize2opsize[size],NR_CL,tmpref));
++              { Deallocate after the instruction, see a_op_reg_reg (a spilled
++                base or index register of tmpref must not be reloaded into ECX) }
++              ungetcpuregister(list,REGCX);
+             end;
+           OP_IMUL:
+             begin
+diff --git a/tests/test/cg/tshrspill1.pp b/tests/test/cg/tshrspill1.pp
+new file mode 100644
+index 00000000..e1110109
+--- /dev/null
++++ b/tests/test/cg/tshrspill1.pp
+@@ -0,0 +1,62 @@
++{ %OPT=-O3 }
++{ x := x shr n with x a spilled register variable: at -O3 (load-modify-store)
++  the spill reload of x must not be put into ECX, which already holds the
++  shift count (x86: the shift count register was released before the shift) }
++program tshrspill1;
++{$mode objfpc}
++type
++  PBuf = ^TBuf;
++  TBuf = array[0..63] of Byte;
++  TEnt = record Pos: Cardinal; Buf: PBuf; N: Integer; end;
++  PEnt = ^TEnt;
++var
++  Data: array[0..3] of Integer = (100, 200, 300, 400);
++  Store: TBuf;
++  Ent: TEnt;
++  Shifted: array[0..3] of Integer;
++
++procedure Flush(E: PEnt; B: PBuf; N: Cardinal);
++begin
++  Inc(E^.N, N);
++end;
++
++function Encode(E: PEnt; First, Last, Al: Integer): Integer;
++var
++  Temp, K, Last1: Integer;
++  B: PBuf;
++  BR: Cardinal;
++begin
++  Last1 := 0;
++  for K := First to Last do
++  begin
++    Temp := Data[K];
++    Temp := Temp shr Al;
++    Shifted[K] := Temp;
++    if Temp = 1 then Last1 := K;
++  end;
++  BR := 0;
++  B := PBuf(@E^.Buf^[E^.Pos]);
++  for K := First to Last do
++  begin
++    Temp := Shifted[K];
++    if Temp > 1 then begin B^[BR] := Byte(Temp and 1); Inc(BR); Continue; end;
++    Flush(E, B, BR);
++    B := E^.Buf;
++    BR := 0;
++  end;
++  Result := BR;
++end;
++
++var
++  I: Integer;
++begin
++  Ent.Buf := @Store;
++  I := Encode(@Ent, 0, 3, 2);
++  for I := 0 to 3 do
++    Write(Shifted[I], ' ');
++  WriteLn(Ord(Ent.N = 0));
++  if (Shifted[0] <> 25) or (Shifted[1] <> 50) or (Shifted[2] <> 75) or
++     (Shifted[3] <> 100) or (Ent.N <> 0) then
++    halt(1);
++  WriteLn('ok');
++end.

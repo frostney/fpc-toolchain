@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 15 Oct 2026 23:41:16 +0100
-Subject: [PATCH 17/75] Integer constant folding during inline/propagation
+Subject: [PATCH 17/77] Integer constant folding during inline/propagation
  simplification does not report overflow
 
 simplify(forinline=true) runs on inlined bodies and after constant

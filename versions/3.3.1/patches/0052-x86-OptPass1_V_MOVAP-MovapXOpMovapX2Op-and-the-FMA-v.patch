@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 06:00:00 +0100
-Subject: [PATCH 52/75] x86 OptPass1_V_MOVAP: MovapXOpMovapX2Op and the FMA
+Subject: [PATCH 52/77] x86 OptPass1_V_MOVAP: MovapXOpMovapX2Op and the FMA
  variant need the source register unchanged up to the operation
 
 Under -O3 the arithmetic (or FMA) instruction is found with

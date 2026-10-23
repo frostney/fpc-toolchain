@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 01:59:33 +0100
-Subject: [PATCH 31/75] Round of a Currency constant found by propagation:
+Subject: [PATCH 31/77] Round of a Currency constant found by propagation:
  round the unscaled value
 
 ---

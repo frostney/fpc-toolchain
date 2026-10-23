@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 15 Oct 2026 23:08:52 +0100
-Subject: [PATCH 13/75] x86 DoZeroUpper32Opt: stop when an instruction writes
+Subject: [PATCH 13/77] x86 DoZeroUpper32Opt: stop when an instruction writes
  the source or target register (#41813)
 
 Fix proposed by the reporter in #41813: a partial write to the target

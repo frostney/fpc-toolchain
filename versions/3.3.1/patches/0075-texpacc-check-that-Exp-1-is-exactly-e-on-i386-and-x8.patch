@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 22 Oct 2026 16:46:40 +0100
-Subject: [PATCH 75/75] texpacc: check that Exp(1) is exactly e on i386 and
+Subject: [PATCH 75/77] texpacc: check that Exp(1) is exactly e on i386 and
  x86_64
 
 Exp(1) must give 2.718281828459045 (bits $4005BF0A8B145769), the value

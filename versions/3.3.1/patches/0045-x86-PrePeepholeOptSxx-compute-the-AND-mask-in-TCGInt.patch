@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 03:20:38 +0100
-Subject: [PATCH 45/75] x86 PrePeepholeOptSxx: compute the AND mask in TCGInt,
+Subject: [PATCH 45/77] x86 PrePeepholeOptSxx: compute the AND mask in TCGInt,
  so shr 31 / shl n on a 64-bit register gives $ffffffff80000000
 
 (1 shl 31)-1 was evaluated in 32 bits and the mask became +$80000000,

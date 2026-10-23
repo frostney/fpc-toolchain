@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 15 Oct 2026 23:25:10 +0100
-Subject: [PATCH 16/75] IsPosZero/IsNegZero: test the sign bit when bestreal is
+Subject: [PATCH 16/77] IsPosZero/IsNegZero: test the sign bit when bestreal is
  wider than a double
 
 For an extended bestreal both functions compared SizeOf(bestreal) bytes

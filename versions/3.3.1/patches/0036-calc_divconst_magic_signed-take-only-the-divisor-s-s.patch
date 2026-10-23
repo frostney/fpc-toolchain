@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 02:55:58 +0100
-Subject: [PATCH 36/75] calc_divconst_magic_signed: take only the divisor's
+Subject: [PATCH 36/77] calc_divconst_magic_signed: take only the divisor's
  sign bit for N < 64 (#41956)
 
 ---

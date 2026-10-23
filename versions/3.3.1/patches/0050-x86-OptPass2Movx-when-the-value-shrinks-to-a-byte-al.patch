@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 03:31:37 +0100
-Subject: [PATCH 50/75] x86 OptPass2Movx: when the value shrinks to a byte,
+Subject: [PATCH 50/77] x86 OptPass2Movx: when the value shrinks to a byte,
  also narrow a following movzwl/movzwq of the register for a 32-bit input
  MOVZX
 

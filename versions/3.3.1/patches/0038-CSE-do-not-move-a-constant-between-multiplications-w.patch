@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 03:52:48 +0100
-Subject: [PATCH 38/75] CSE: do not move a constant between multiplications
+Subject: [PATCH 38/77] CSE: do not move a constant between multiplications
  when Currency scaling is involved (#41865 follow-up)
 
 ---

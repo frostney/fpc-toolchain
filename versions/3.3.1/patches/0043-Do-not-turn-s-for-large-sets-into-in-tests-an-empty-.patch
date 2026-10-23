@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 03:20:37 +0100
-Subject: [PATCH 43/75] Do not turn (s*[])=[] / <>[] for large sets into
+Subject: [PATCH 43/77] Do not turn (s*[])=[] / <>[] for large sets into
  in-tests: an empty constant set gave a not-node without operand (AV) or
  internal error 200109041
 

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 15 Oct 2026 17:34:39 +0100
-Subject: [PATCH 04/75] is_range_test: do not treat a constant as the tested
+Subject: [PATCH 04/77] is_range_test: do not treat a constant as the tested
  variable
 
 After inlining with constant arguments '(3 <= 0) or (1 <= 0)' reaches

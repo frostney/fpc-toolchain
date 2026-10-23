@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 15 Oct 2026 17:37:08 +0100
-Subject: [PATCH 05/75] Keep string elements passed by reference from being
+Subject: [PATCH 05/77] Keep string elements passed by reference from being
  folded to constants (#41836)
 
 tvecnode.simplify folds 'const'[n] into an ordinal constant unless

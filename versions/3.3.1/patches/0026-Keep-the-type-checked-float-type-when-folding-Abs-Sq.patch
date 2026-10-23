@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 00:26:37 +0100
-Subject: [PATCH 26/75] Keep the type-checked float type when folding
+Subject: [PATCH 26/77] Keep the type-checked float type when folding
  Abs/Sqr/Sqrt of a constant late
 
 setconstrealvalue and handle_sqrt_const always created an Extended

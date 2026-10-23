@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 15:29:42 +0100
-Subject: [PATCH 61/75] vcl-compat: System.IOUtils: do not call GetLastOSError
+Subject: [PATCH 61/77] vcl-compat: System.IOUtils: do not call GetLastOSError
  on WASI
 
 The wasm32-wasip1 crossall build stops in packages/vcl-compat:

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 11:00:44 +0100
-Subject: [PATCH 56/75] x86 OptPass2Movx Movzx2Nop 3: allocate the register in
+Subject: [PATCH 56/77] x86 OptPass2Movx Movzx2Nop 3: allocate the register in
  UsedRegs, not in a temporary copy (FuncMov2Func then kept a read register)
 
 ---

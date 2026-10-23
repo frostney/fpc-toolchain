@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 03:20:37 +0100
-Subject: [PATCH 44/75] x86 AND/CMP -> CMP: never widen the compare, and narrow
+Subject: [PATCH 44/77] x86 AND/CMP -> CMP: never widen the compare, and narrow
  it only for unsigned/equality conditions on a constant in 0..mask
 
 and $255,%eax / cmpl $100,%eax / jl was turned into cmpb $100,%al / jl,

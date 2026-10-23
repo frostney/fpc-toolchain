@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 03:20:38 +0100
-Subject: [PATCH 48/75] Constant propagation: expand inc/dec to add/sub with
+Subject: [PATCH 48/77] Constant propagation: expand inc/dec to add/sub with
  the inc/dec's own local switches
 
 The add/sub tree was built with the switches of the end of the routine,

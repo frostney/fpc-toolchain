@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 05:36:11 +0100
-Subject: [PATCH 51/75] Val into an unsigned integer from
+Subject: [PATCH 51/77] Val into an unsigned integer from
  AnsiString/UnicodeString/WideString: pass DestSize on, so the overflow of a
  narrow destination is detected (#41981)
 

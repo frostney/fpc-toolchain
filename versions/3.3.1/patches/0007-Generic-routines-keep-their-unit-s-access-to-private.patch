@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 15 Oct 2026 17:43:25 +0100
-Subject: [PATCH 07/75] Generic routines keep their unit's access to private
+Subject: [PATCH 07/77] Generic routines keep their unit's access to private
  members (#40670)
 
 Since #40621 a private member of a generic record or class is checked

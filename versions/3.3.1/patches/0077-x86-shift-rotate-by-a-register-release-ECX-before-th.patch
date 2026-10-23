@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 23 Oct 2026 02:46:59 +0100
+Subject: [PATCH 77/77] x86 shift/rotate by a register: release ECX before the
+ instruction again, bound to it
+
+Follow-up to the previous commit. Releasing ECX after the shift
+instruction (as 3.2.x did) fixes the spill reload clobber, but it undoes
+what 2e6d9cc2ec wanted: with the release before the instruction, the
+peephole optimizer sees ECX as dead at the shift and can drop a now
+unneeded zero extension of the count (e.g. "movzbl %cl,%ecx" before
+"shl %cl,%eax" in NormalizeFloat64Subnormal of the win64 softfpu units).
+
+Keep the release before the instruction, but bind the dealloc to the
+shift instruction (tai_regalloc.dealloc(REGCX,instr)), the same way
+trgobj.insert_regalloc_info binds the deallocs it places before the last
+instruction that uses a register. trgobj.instr_spill_register adds the
+deallocs bound to an instruction back to the live registers while it
+inserts that instruction's spill reloads, so a reload can no longer be
+coloured ECX. The installed RTL and packages for x86_64-linux and
+x86_64-win64 are then byte-identical to those built without the fix
+(except for the build date in pas2jscompiler.o).
+---
+ compiler/x86/cgx86.pas | 19 +++++++++----------
+ 1 file changed, 9 insertions(+), 10 deletions(-)
+
+diff --git a/compiler/x86/cgx86.pas b/compiler/x86/cgx86.pas
+index 47bd490c..67ddbbe3 100644
+--- a/compiler/x86/cgx86.pas
++++ b/compiler/x86/cgx86.pas
+@@ -2351,12 +2351,11 @@ unit cgx86;
+               { Use ecx to load the value, that allows better coalescing }
+               getcpuregister(list,REGCX);
+               a_load_reg_reg(list,reg_cgsize(src),REGCX_Size,src,REGCX);
+-              list.concat(taicpu.op_reg_reg(Topcg2asmop[op],tcgsize2opsize[size],NR_CL,dst));
+-              { Deallocate after the instruction: the register allocator treats
+-                a dealloc that is not bound to an instruction as belonging to the
+-                previous one, so ECX released before the shift would be free for
+-                the reload of a spilled dst inserted before the shift }
+-              ungetcpuregister(list,REGCX);
++              { Deallocate right before the instruction, bound to it, so the
++                spiller keeps ECX live while it inserts reloads for it }
++              instr:=taicpu.op_reg_reg(Topcg2asmop[op],tcgsize2opsize[size],NR_CL,dst);
++              list.concat(tai_regalloc.dealloc(REGCX,instr));
++              list.concat(instr);
+             end;
+           else
+             begin
+@@ -2421,6 +2420,7 @@ unit cgx86;
+ {$endif}
+       var
+         tmpref  : treference;
++        instr   : taicpu;
+       begin
+         tmpref:=ref;
+         make_simple_ref(list,tmpref);
+@@ -2447,10 +2447,9 @@ unit cgx86;
+               { Use ecx to load the value, that allows better coalescing }
+               getcpuregister(list,REGCX);
+               a_load_reg_reg(list,reg_cgsize(reg),REGCX_Size,reg,REGCX);
+-              list.concat(taicpu.op_reg_ref(TOpCG2AsmOp[op],tcgsize2opsize[size],NR_CL,tmpref));
+-              { Deallocate after the instruction, see a_op_reg_reg (a spilled
+-                base or index register of tmpref must not be reloaded into ECX) }
+-              ungetcpuregister(list,REGCX);
++              instr:=taicpu.op_reg_ref(TOpCG2AsmOp[op],tcgsize2opsize[size],NR_CL,tmpref);
++              list.concat(tai_regalloc.dealloc(REGCX,instr));
++              list.concat(instr);
+             end;
+           OP_IMUL:
+             begin

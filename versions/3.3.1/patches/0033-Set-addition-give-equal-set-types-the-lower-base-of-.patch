@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 02:14:02 +0100
-Subject: [PATCH 33/75] Set addition: give equal set types the lower base of
+Subject: [PATCH 33/77] Set addition: give equal set types the lower base of
  the two so constant range checks see the real type
 
 ---

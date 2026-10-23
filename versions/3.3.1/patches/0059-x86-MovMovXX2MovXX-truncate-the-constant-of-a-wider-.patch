@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 22 Oct 2026 03:11:48 +0100
-Subject: [PATCH 59/75] x86 MovMovXX2MovXX: truncate the constant of a wider
+Subject: [PATCH 59/77] x86 MovMovXX2MovXX: truncate the constant of a wider
  MOV before the sign extension
 
 ---

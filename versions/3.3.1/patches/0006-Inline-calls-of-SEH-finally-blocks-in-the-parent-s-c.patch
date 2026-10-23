@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 15 Oct 2026 17:42:04 +0100
-Subject: [PATCH 06/75] Inline calls of SEH finally blocks in the parent's
+Subject: [PATCH 06/77] Inline calls of SEH finally blocks in the parent's
  context (#41842)
 
 On x86_64-win64, finally blocks become exception-filter procedures
