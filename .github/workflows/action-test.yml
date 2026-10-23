@@ -11,7 +11,7 @@ on:
         type: string
         required: true
       artifacts:
-        description: 'install from this run''s dist-* artifacts instead of the release'
+        description: 'install from this run''s act-<host> artifacts instead of the release'
         type: boolean
         default: false
       other:
@@ -19,11 +19,11 @@ on:
         type: string
         default: ''
       other-run:
-        description: 'run ID whose dist-* artifacts hold the second version (dry runs); empty = its release'
+        description: 'run ID whose act-<host> artifacts hold the second version (dry runs); empty = its release'
         type: string
         default: ''
       run:
-        description: 'run ID whose dist-* artifacts to install (default: this run, when artifacts is set)'
+        description: 'run ID whose act-<host> artifacts to install (default: this run, when artifacts is set)'
         type: string
         default: ''
   workflow_dispatch:
@@ -37,7 +37,7 @@ on:
         required: false
         default: ''
       run:
-        description: 'install the dist-* artifacts of this build run (a dry run) instead of a release'
+        description: 'install the act-<host> artifacts of this build run (a dry run) instead of a release'
         required: false
         default: ''
 
@@ -65,16 +65,14 @@ jobs:
       - if: steps.plan.outputs.ship == 'true' && (inputs.artifacts || inputs.run != '')
         uses: actions/download-artifact@v4
         with:
-          pattern: 'dist-*'
-          merge-multiple: true
+          name: 'act-${{ steps.plan.outputs.host }}'
           path: '${{ runner.temp }}/dist'
           run-id: ${{ inputs.run || github.run_id }}
           github-token: ${{ github.token }}
       - if: steps.plan2.outputs.ship == 'true' && inputs.other-run != ''
         uses: actions/download-artifact@v4
         with:
-          pattern: 'dist-*'
-          merge-multiple: true
+          name: 'act-${{ steps.plan2.outputs.host }}'
           path: '${{ runner.temp }}/dist-other'
           run-id: ${{ inputs.other-run }}
           github-token: ${{ github.token }}

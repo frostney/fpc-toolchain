@@ -47,6 +47,7 @@ jobs:
       windows: ${{ steps.id.outputs.windows }}
       hosts: ${{ steps.id.outputs.hosts }}
       other: ${{ steps.id.outputs.other }}
+      rosetta: ${{ steps.id.outputs.rosetta }}
     steps:
       - uses: actions/checkout@v4
       - id: id
@@ -65,7 +66,7 @@ jobs:
             echo "version=$v"; echo "build=$build"
             echo "identity=${FPC_VERSION}${FPC_UPSTREAM_MINORPATCH}+${build}"
             echo "tag=${FPC_VERSION}${FPC_UPSTREAM_MINORPATCH}-b${build}"
-            echo "windows=${win%,}"; echo "hosts=$TOOLCHAIN_HOSTS"
+            echo "windows=${win%,}"; echo "hosts=$TOOLCHAIN_HOSTS"; echo "rosetta=${ROSETTA_X86:-0}"
           } >> "$GITHUB_OUTPUT"
           # the action test also installs the other version: from a dry run (other-run), else its newest release
           o=$(cd versions && for d in *; do [ "$d" = "$v" ] || echo "$d"; done | head -n 1)
@@ -88,7 +89,7 @@ jobs:
           tar -C "$RUNNER_TEMP" --exclude=.git --transform "s,^fpc-src,$name," -cf - fpc-src | xz -T0 -6 > "dist/$name.tar.xz"
           tar -C versions/${{ steps.id.outputs.version }} -cf - patches | xz -6 > "dist/$name-patches.tar.xz"
       - uses: actions/upload-artifact@v4
-        with: { name: dist-source, path: dist/ }
+        with: { name: src-fpc, path: dist/ }
       - uses: actions/upload-artifact@v4
         with:
           name: fpc-src-tree
@@ -153,7 +154,7 @@ jobs:
         with: { name: 'binutils-${{ matrix.host }}', path: '${{ runner.temp }}/binutils-${{ matrix.host }}.tar' }
       - if: steps.plan.outputs.ship == 'true' && matrix.host == 'x86_64-linux'
         uses: actions/upload-artifact@v4
-        with: { name: dist-binutils-source, path: '${{ runner.temp }}/xb/src/binutils-2.42.tar.xz' }
+        with: { name: src-binutils, path: '${{ runner.temp }}/xb/src/binutils-2.42.tar.xz' }
 
   # Canonical build: native x86_64-linux, every cross target with its units archive, both Windows hosts.
   linux-x86_64:
@@ -202,8 +203,40 @@ jobs:
           path: |
             /mnt/w/logs
             /mnt/w/cross-status.tsv
+      # Release files by consumer, so each verify job downloads only its own host's files:
+      # host-<host> (host archive), units-tar (Linux/macOS hosts), units-zip (Windows hosts).
+      # Each carries this job's SHA256SUMS.x86_64-linux for the installers' checks.
       - uses: actions/upload-artifact@v4
-        with: { name: dist-x86_64-linux, path: /mnt/w/dist/ }
+        with:
+          name: host-x86_64-linux
+          path: |
+            /mnt/w/dist/fpc-*-x86_64-linux.tar.xz
+            /mnt/w/dist/SHA256SUMS.x86_64-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: host-x86_64-win64
+          path: |
+            /mnt/w/dist/fpc-*-x86_64-win64.zip
+            /mnt/w/dist/SHA256SUMS.x86_64-linux
+      - uses: actions/upload-artifact@v4
+        if: contains(needs.source.outputs.windows, 'aarch64-win64')
+        with:
+          name: host-aarch64-win64
+          path: |
+            /mnt/w/dist/fpc-*-aarch64-win64.zip
+            /mnt/w/dist/SHA256SUMS.x86_64-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: units-tar
+          path: |
+            /mnt/w/dist/fpc-*-units-*.tar.xz
+            /mnt/w/dist/SHA256SUMS.x86_64-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: units-zip
+          path: |
+            /mnt/w/dist/fpc-*-units-*.zip
+            /mnt/w/dist/SHA256SUMS.x86_64-linux
 
   # Other Unix hosts: native toolchain, its cross compilers and binutils; units come from the canonical archives.
   native:
@@ -243,7 +276,7 @@ jobs:
         if: always()
         with: { name: 'logs-${{ matrix.host }}', path: '${{ runner.temp }}/w/logs' }
       - uses: actions/upload-artifact@v4
-        with: { name: 'dist-${{ matrix.host }}', path: '${{ runner.temp }}/w/dist/' }
+        with: { name: 'host-${{ matrix.host }}', path: '${{ runner.temp }}/w/dist/' }
 
   # Install the archives as users will, on every host OS, and smoke-test every shipped target with only the
   # tools the archives ship (no distribution binutils).
@@ -261,7 +294,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { pattern: 'dist-*', merge-multiple: true, path: dist }
+        with: { name: 'host-${{ matrix.host }}', path: dist }
+      - uses: actions/download-artifact@v4
+        with: { name: units-tar, path: dist }
+      - name: x86_64 macOS build for the Rosetta route
+        if: matrix.host == 'aarch64-darwin' && needs.source.outputs.rosetta == '1'
+        uses: actions/download-artifact@v4
+        with: { name: host-x86_64-darwin, path: dist }
       - name: Emulators, clang, wasmtime
         run: |
           if command -v apt-get >/dev/null; then
@@ -306,7 +345,10 @@ jobs:
           "ship=$(('${{ needs.source.outputs.windows }}' -split ',') -contains '${{ matrix.host }}')" >> $env:GITHUB_OUTPUT
       - uses: actions/download-artifact@v4
         if: steps.ship.outputs.ship == 'True'
-        with: { name: dist-x86_64-linux, path: dist }
+        with: { name: 'host-${{ matrix.host }}', path: dist }
+      - uses: actions/download-artifact@v4
+        if: steps.ship.outputs.ship == 'True'
+        with: { name: units-zip, path: dist }
       - name: clang + wasmtime
         if: steps.ship.outputs.ship == 'True'
         run: |
@@ -338,12 +380,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { pattern: 'dist-*', merge-multiple: true, path: out }
+        with: { pattern: 'host-*', merge-multiple: true, path: out }
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'units-*', merge-multiple: true, path: out }
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'src-*', merge-multiple: true, path: out }
       - name: Collect and check completeness
         run: |
           (cd out && rm -f SHA256SUMS.* && sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS") && mv "$RUNNER_TEMP/SHA256SUMS" out/SHA256SUMS
           scripts/check-release.sh ${{ needs.source.outputs.version }} out ${{ needs.source.outputs.build }}
           ls -la out >> "$GITHUB_STEP_SUMMARY"
+      # A dry run's action test installs from these: per host only the host archive, the units of the one cross
+      # target it tests, SHA256SUMS and, for the Rosetta route, the x86_64 macOS build.
+      - name: Action-test files per host
+        if: github.ref_type != 'tag'
+        run: |
+          tag=${{ needs.source.outputs.tag }}
+          for h in ${{ needs.source.outputs.hosts }}; do
+            o=act/$h; mkdir -p "$o"; GITHUB_OUTPUT=$o.plan scripts/action-test-plan.sh ${{ needs.source.outputs.version }} "$h"
+            cross=$(sed -n 's/^cross=//p' "$o.plan"); ext=tar.xz; case $h in *-win64) ext=zip ;; esac
+            cp "out/fpc-$tag-$h.$ext" out/SHA256SUMS "$o/"
+            [ -z "$cross" ] || cp "out/fpc-$tag-units-$cross.$ext" "$o/"
+            if [ "$h" = aarch64-darwin ] && [ '${{ needs.source.outputs.rosetta }}' = 1 ]; then
+              case $cross in i386-*|i8086-*|x86_64-*) cp "out/fpc-$tag-x86_64-darwin.tar.xz" "$o/" ;; esac
+            fi
+            echo "$h: $(ls "$o" | tr '\n' ' ')"
+          done
+      - { uses: actions/upload-artifact@v4, if: github.ref_type != 'tag', with: { name: act-x86_64-linux, path: act/x86_64-linux/, if-no-files-found: ignore } }
+      - { uses: actions/upload-artifact@v4, if: github.ref_type != 'tag', with: { name: act-aarch64-linux, path: act/aarch64-linux/, if-no-files-found: ignore } }
+      - { uses: actions/upload-artifact@v4, if: github.ref_type != 'tag', with: { name: act-aarch64-darwin, path: act/aarch64-darwin/, if-no-files-found: ignore } }
+      - { uses: actions/upload-artifact@v4, if: github.ref_type != 'tag', with: { name: act-x86_64-darwin, path: act/x86_64-darwin/, if-no-files-found: ignore } }
+      - { uses: actions/upload-artifact@v4, if: github.ref_type != 'tag', with: { name: act-x86_64-win64, path: act/x86_64-win64/, if-no-files-found: ignore } }
+      - { uses: actions/upload-artifact@v4, if: github.ref_type != 'tag', with: { name: act-aarch64-win64, path: act/aarch64-win64/, if-no-files-found: ignore } }
       - name: Draft release (tags only; published after the action test)
         if: github.ref_type == 'tag'
         env:
