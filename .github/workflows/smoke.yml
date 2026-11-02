@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       identity:
-        description: 'release to test, e.g. 3.2.4-rc2-b1 or 3.2.4-rc2+1 (default: latest release)'
+        description: 'release to test, e.g. 3.2.4-rc2-b1 or 3.2.4-rc2+1 (default: newest published release, prereleases included)'
         required: false
   schedule:
     - cron: '17 4 * * 1'   # weekly: catches runner image drift (glibc, Xcode, Windows SDK)
@@ -34,7 +34,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           id='${{ inputs.identity || github.event.release.tag_name }}'
-          [ -n "$id" ] || id=$(gh release view -R "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          [ -n "$id" ] || id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --jq '[.[] | select(.draft == false)][0].tag_name // empty')
+          [ -n "$id" ] || { echo "::error::no published release to smoke-test"; exit 1; }
           v=${id%%[-+]*}
           # the other version's newest published release, installed next to this one
           o=$(cd versions && for d in *; do [ "$d" = "$v" ] || echo "$d"; done | head -n 1)
