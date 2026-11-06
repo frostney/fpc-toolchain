@@ -16,7 +16,8 @@ the action are shared; every script takes the version (`fetch-source.sh 3.3.1 DI
 | | 3.2.4 | 3.3.1 |
 |---|---|---|
 | base | `release_3_2_4-branch` at `82947b0d`: tag `release_3_2_4_rc2` plus 8 commits, the commit the final will be cut from | `main` at `fa51767875` |
-| patches | 2 fcl-process fixes from `fixes_3_2` | the bug-hunt series and the wasm32 work |
+| patches | 2 fcl-process fixes from `fixes_3_2` | the bug-hunt series, the wasm32 work and the TLS model of libraries |
+| compiler defines | none | `tls_threadvars` |
 
 `scripts/update-series.sh <version> <url>#<ref>` replaces `patches/` with the commits of a branch on top of the base and
 updates `FPC_EXPECT_TREE`. Patches by `SERIES_AUTHOR` (in `toolchain.conf`) get that author's address.
@@ -35,6 +36,14 @@ and the action accept either form.
 
 A tag builds only its version (`3.2.4-rc2-b1` builds 3.2.4), and each version has its own releases and
 `SHA256SUMS`.
+
+`FPC_COMPILER_DEFINES` in `toolchain.conf` names the defines every compiler is built with, native, cross and
+canadian alike (make `OPT=-d<name>`; the RTL and packages builds see them too and ignore them). With
+`tls_threadvars`, the compilers for Linux x86_64, i386 and arm and for FreeBSD i386 put threadvars in ELF TLS
+sections (`%fs`/`%gs` on x86) instead of finding each one through `pthread_getspecific`
+(`compiler/systems/i_linux.pas`, `i_bsd.pas`). Programs use the local-exec model and libraries global-dynamic:
+patch 0079 switches a library or package to it, which the compiler otherwise did only with `-Cg`. The smoke row
+`<host>:threads` (Linux hosts) runs a program and a library with threadvars across threads.
 
 Each archive carries `share/fpc-toolchain/BUILDINFO` (build, source commit, patch series hash, tree, bootstrap
 compiler, build run), `targets.tsv`, `cross-status.tsv` and the installer scripts.

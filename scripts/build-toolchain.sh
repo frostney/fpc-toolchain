@@ -89,6 +89,8 @@ log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 # macOS: the bootstrap and the new compilers have no fpc.cfg while building, so tell them where the SDK is
 hostopt=''
 [ "$host_os" = darwin ] && hostopt="-XR$(xcrun --show-sdk-path)"
+# FPC_COMPILER_DEFINES (toolchain.conf): defines every compiler is built with, native, cross and canadian alike
+for d in ${FPC_COMPILER_DEFINES:-}; do hostopt="${hostopt:+$hostopt }-d$d"; done
 
 run_make() { # run_make LOGFILE make-args...
   local lf=$1; shift
@@ -402,6 +404,7 @@ step_finish() {
     echo "host=$host"
     cat "$src/.fpc-toolchain-source" 2>/dev/null || true
     echo "bootstrap=$( [ -x "${bootstrap:-}" ] && "$bootstrap" -iW || echo unknown)"
+    echo "compiler_defines=${FPC_COMPILER_DEFINES:-}"
     echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "builder=${GITHUB_REPOSITORY:+github:$GITHUB_REPOSITORY/actions/runs/${GITHUB_RUN_ID:-?}}${GITHUB_REPOSITORY:-local:$(uname -n)}"
     echo "unit_targets=$(cd "$l/units" && ls | tr '\n' ' ')"

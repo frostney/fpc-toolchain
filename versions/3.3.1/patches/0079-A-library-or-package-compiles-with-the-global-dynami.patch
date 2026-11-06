@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Fri, 6 Nov 2026 14:58:13 +0000
+Subject: [PATCH 79/79] A library or package compiles with the global-dynamic
+ TLS model
+
+With section threadvars (Linux x86_64, i386 and arm when the compiler is
+built with -dtls_threadvars), the options pass picks the TLS model before
+the first module is parsed: global-dynamic with -Cg, otherwise
+local-exec. A library or package without -Cg therefore accessed its
+threadvars with local-exec code, which is only valid in the executable:
+
+- x86_64-linux turns on PIC when the parser reaches `library`, after
+  that choice. Each threadvar access took the address RIP-relative and
+  added a %fs override, and the library crashed on its first threadvar
+  access:
+
+      lea  Counter(%rip),%rdx
+      addl $1,%fs:(%rdx)
+
+- i386-linux libraries are not PIC by default. dlopen refused them:
+  "cannot allocate memory in static TLS block".
+
+Use global-dynamic for a library or package, and for the units a library
+compiles, whenever the local-exec model was chosen. An explicit
+-CVlocal-exec cannot be told apart and is switched too, which a shared
+object needs anyway. Programs keep local-exec; -Cg builds are unchanged.
+---
+ compiler/pmodules.pas | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/compiler/pmodules.pas b/compiler/pmodules.pas
+index 89bec8e2..d81dec6e 100644
+--- a/compiler/pmodules.pas
++++ b/compiler/pmodules.pas
+@@ -2002,6 +2002,10 @@ type
+ 
+          if tf_library_needs_pic in target_info.flags then
+            include(current_settings.moduleswitches,cs_create_pic);
++         { a shared object cannot use the local-exec TLS model }
++         if (tf_section_threadvars in target_info.flags) and
++            (current_settings.tlsmodel=tlsm_local_exec) then
++           current_settings.tlsmodel:=tlsm_global_dynamic;
+ 
+          { setup things using the switches, do this before the semicolon, because after the semicolon has been
+            read, all following directives are parsed as well }
+@@ -2846,6 +2850,14 @@ type
+            { also set create_pic for all unit compilation }
+            include(init_settings.moduleswitches,cs_create_pic);
+          end;
++        { a shared object cannot use the local-exec TLS model, neither in its own code nor in the units it compiles }
++        if tf_section_threadvars in target_info.flags then
++          begin
++            if current_settings.tlsmodel=tlsm_local_exec then
++              current_settings.tlsmodel:=tlsm_global_dynamic;
++            if init_settings.tlsmodel=tlsm_local_exec then
++              init_settings.tlsmodel:=tlsm_global_dynamic;
++          end;
+ 
+         { setup things using the switches, do this before the semicolon, because after the semicolon has been
+          read, all following directives are parsed as well }
