@@ -3,7 +3,8 @@
 Free Pascal 3.2.4 and 3.3.1 for Linux, macOS and Windows, with every cross compiler each host can build from free tools. Both versions install side by side, next to any other FPC on the machine, and as a GitHub Action they cache themselves between runs.
 
 - **3.2.4**: release candidate 2, with two fcl-process fixes.
-- **3.3.1**: trunk, with our compiler and wasm32 fixes.
+- **3.3.1**: trunk, with our compiler and wasm32 fixes. On Linux x86_64, i386 and arm, threadvars live in ELF TLS
+  sections instead of being looked up through `pthread_getspecific`.
 
 ## GitHub Actions
 

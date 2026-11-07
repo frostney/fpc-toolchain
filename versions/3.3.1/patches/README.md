@@ -1,7 +1,8 @@
 # Patches
 
 Applied in name order on FPC `main` at `fa51767875` (2026-10-14). They fix the wrong-code, internal-error and
-RTL bugs the GocciaScript compiler bug hunt found, and carry the wasm32 work. `toolchain.conf` pins the
+RTL bugs the GocciaScript compiler bug hunt found, carry the wasm32 work, and (0079) give a library or package
+the global-dynamic TLS model that a compiler with section threadvars otherwise used only with `-Cg`. `toolchain.conf` pins the
 resulting tree (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
 To take a new series from a branch built on the same base:
