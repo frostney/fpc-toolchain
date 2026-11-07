@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 01:35:57 +0000
+Subject: [PATCH 089/113] The temps of an inlined routine may be registers in a
+ caller with exception frames
+
+createlocaltemps and the parameter temps asked is_regvar, which refuses all
+register variables once the caller uses exceptions (pi_uses_exceptions), so a
+dispatch loop under try..except kept every inlined helper's locals and
+parameters in memory, with a store and reload for each. Those temps live only
+inside the inlined body: when the routine itself has no exception frame they
+are written before they are read in each run of it and dead once an exception
+leaves it, so the caller's exception rule does not apply to them
+(is_regvar_for_inline). A routine with an exception frame (see the previous
+commit) keeps them in memory.
+---
+ compiler/ncal.pas   | 24 +++++++++++++++++++++---
+ compiler/symsym.pas | 14 ++++++++++++++
+ 2 files changed, 35 insertions(+), 3 deletions(-)
+
+diff --git a/compiler/ncal.pas b/compiler/ncal.pas
+index 290c91b0..ae0f828b 100644
+--- a/compiler/ncal.pas
++++ b/compiler/ncal.pas
+@@ -118,6 +118,7 @@ interface
+           procedure createinlineparas;
+           procedure wrapcomplexinlinepara(para: tcallparanode); virtual;
+           function  replaceparaload(var n: tnode; arg: pointer): foreachnoderesult;
++          function inline_temp_may_be_in_reg(sym: tabstractvarsym; refpara: boolean): boolean;
+           procedure createlocaltemps(p:TObject;arg:pointer);
+           function  optimize_funcret_assignment(inlineblock: tblocknode): tnode;
+           procedure check_inlining;
+@@ -5362,6 +5363,23 @@ implementation
+       end;
+ 
+ 
++    { The temps of an inlined routine's locals and parameters live only inside
++      the inlined body: when the routine itself has no exception frame, they
++      are written before they are read in each run of it and dead once an
++      exception leaves it, so they may be registers even in a caller with an
++      exception frame (where is_regvar refuses the caller's own variables).
++      A routine with an exception frame keeps them in memory. }
++    function tcallnode.inline_temp_may_be_in_reg(sym: tabstractvarsym; refpara: boolean): boolean;
++      begin
++        if (procdefinition.typ=procdef) and
++           tprocdef(procdefinition).has_inlininginfo and
++           not(pi_uses_exceptions in tprocdef(procdefinition).inlininginfo^.flags) then
++          result:=sym.is_regvar_for_inline(refpara)
++        else
++          result:=sym.is_regvar(refpara);
++      end;
++
++
+     procedure tcallnode.createlocaltemps(p:TObject;arg:pointer);
+       var
+         tempnode: ttempcreatenode;
+@@ -5381,7 +5399,7 @@ implementation
+         else
+           begin
+             tempnode :=ctempcreatenode.create(tabstractvarsym(p).vardef,
+-              tabstractvarsym(p).vardef.size,tt_persistent,tabstractvarsym(p).is_regvar(false));
++              tabstractvarsym(p).vardef.size,tt_persistent,inline_temp_may_be_in_reg(tabstractvarsym(p),false));
+             addstatement(inlineinitstatement,tempnode);
+ 
+             if localvartrashing <> -1 then
+@@ -5585,7 +5603,7 @@ implementation
+         if paraneedsinlinetemp(para,pushconstaddr,complexpara) then
+           begin
+             tempnode:=ctempcreatenode.create(para.parasym.vardef,para.parasym.vardef.size,
+-              tt_persistent,tparavarsym(para.parasym).is_regvar(false));
++              tt_persistent,inline_temp_may_be_in_reg(tparavarsym(para.parasym),false));
+             addstatement(inlineinitstatement,tempnode);
+ 
+             addstatement(inlinecleanupstatement,ctempdeletenode.create(tempnode));
+@@ -5607,7 +5625,7 @@ implementation
+                   ttempcreatenode does
+ 
+                   this way, dyn. array, ansistrings etc. can be put into registers as well }
+-                if tparavarsym(para.parasym).is_regvar(false) then
++                if inline_temp_may_be_in_reg(tparavarsym(para.parasym),false) then
+                   tempnode.includetempflag(ti_may_be_in_reg);
+               end;
+ 
+diff --git a/compiler/symsym.pas b/compiler/symsym.pas
+index 2de84369..b46cb69d 100644
+--- a/compiler/symsym.pas
++++ b/compiler/symsym.pas
+@@ -204,6 +204,9 @@ interface
+           function  getsize : asizeint;
+           function  getpackedbitsize : longint;
+           function  is_regvar(refpara: boolean):boolean;
++          { is_regvar for the temp of an inlined routine's local or parameter:
++            without the caller's exception rule, see tcallnode.createlocaltemps }
++          function  is_regvar_for_inline(refpara: boolean):boolean;
+         private
+           _vardef     : tdef;
+           vardefderef : tderef;
+@@ -2033,6 +2036,17 @@ implementation
+       end;
+ 
+ 
++    function tabstractvarsym.is_regvar_for_inline(refpara: boolean):boolean;
++      var
++        oldflags: tprocinfoflags;
++      begin
++        oldflags:=current_procinfo.flags;
++        exclude(current_procinfo.flags,pi_uses_exceptions);
++        result:=is_regvar(refpara);
++        current_procinfo.flags:=oldflags;
++      end;
++
++
+     procedure tabstractvarsym.setvardef_and_regable(def:tdef);
+       begin
+         setvardef(def);

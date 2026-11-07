@@ -1,0 +1,164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 14:02:08 +0000
+Subject: [PATCH 100/113] Register variables with try: a raise or a noreturn
+ call ends the path
+
+In the definite-assignment walk of a protected block inside a loop, raise
+counted as a path end, but by then the first pass has lowered it to a call
+of fpc_raiseexception, which was treated like any other node, so after
+"if prod then begin op := ...; a := ...; end else raise ..." op and a
+were not definitely assigned and stayed in memory for the whole dispatch
+loop. A call of fpc_raiseexception or of a noreturn routine (halt) now ends
+the path as well. vm2: op, a, b in registers. tests/test/texcregvar2.pp.
+---
+ compiler/optexcregvar.pas |  16 +++++-
+ tests/test/texcregvar2.pp | 102 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 116 insertions(+), 2 deletions(-)
+ create mode 100644 tests/test/texcregvar2.pp
+
+diff --git a/compiler/optexcregvar.pas b/compiler/optexcregvar.pas
+index 1a84261e..bc4855fa 100644
+--- a/compiler/optexcregvar.pas
++++ b/compiler/optexcregvar.pas
+@@ -56,11 +56,11 @@ procedure mark_exceptsafe_regvars(code: tnode; pd: tprocdef);
+ implementation
+ 
+ uses
+-  cclasses,
++  cclasses,cutils,
+   globtype,globals,
+   symconst,symbase,symtype,symsym,symtable,
+   procinfo,
+-  nutils,nbas,nld,nflw;
++  nutils,nbas,nld,nflw,ncal;
+ 
+ type
+   tboolarray = array of boolean;
+@@ -228,6 +228,18 @@ procedure walk(info: pexcregvarinfo; n: tnode);
+             check_reads_in(info,ttryfinallynode(n).third);
+           info^.assigned_:=saved;
+         end;
++      calln:
++        begin
++          check_reads_in(info,n);
++          { raise is lowered to a call of fpc_raiseexception in the first pass;
++            neither it nor a noreturn routine (halt) returns here }
++          if (tcallnode(n).procdefinition.typ=procdef) and
++             ((po_noreturn in tprocdef(tcallnode(n).procdefinition).procoptions) or
++              (assigned(tprocdef(tcallnode(n).procdefinition).procsym) and
++               (upper(tprocdef(tcallnode(n).procdefinition).procsym.name)='FPC_RAISEEXCEPTION'))) then
++            for i:=0 to high(info^.assigned_) do
++              info^.assigned_[i]:=true;
++        end;
+       raisen,exitn,breakn,continuen,goton:
+         begin
+           check_reads_in(info,n);
+diff --git a/tests/test/texcregvar2.pp b/tests/test/texcregvar2.pp
+new file mode 100644
+index 00000000..79c34214
+--- /dev/null
++++ b/tests/test/texcregvar2.pp
+@@ -0,0 +1,102 @@
++{ %OPT=-O3 }
++{ register variables in a protected block inside a loop: a branch that
++  raises (or halts) does not continue, so variables assigned on every other
++  path are written before they are read (optexcregvar) }
++program texcregvar2;
++
++{$mode objfpc}
++
++uses
++  sysutils;
++
++var
++  errors: longint = 0;
++
++function decode(n: longint): int64;
++var
++  i, op, a, b: longint;
++begin
++  result := 0;
++  i := 0;
++  while i < n do
++    try
++      inc(i);
++      if i mod 5 <> 0 then
++        begin
++          op := i and 3;
++          a := i shr 2;
++          b := i * 3;
++        end
++      else
++        raise Exception.Create('every fifth');
++      case op of
++        0: result := result + a;
++        1: result := result + b;
++        2: result := result + a * b;
++      else
++        result := result - 1;
++      end;
++    except
++      result := result + 1000;
++    end;
++end;
++
++{ k is assigned only on one path and read after the if: it must keep its
++  value from the previous run of the block }
++function notdefinite(n: longint): int64;
++var
++  i, k: longint;
++begin
++  result := 0;
++  k := 7;
++  i := 0;
++  while i < n do
++    try
++      inc(i);
++      if i mod 3 = 0 then
++        k := i;
++      if i mod 4 = 0 then
++        raise Exception.Create('x');
++      result := result + k;
++    except
++      result := result + 100;
++    end;
++end;
++
++function ref_decode(n: longint): int64;
++var
++  i, op, a, b: longint;
++begin
++  result := 0;
++  for i := 1 to n do
++    if i mod 5 = 0 then
++      result := result + 1000
++    else
++      begin
++        op := i and 3; a := i shr 2; b := i * 3;
++        case op of
++          0: result := result + a;
++          1: result := result + b;
++          2: result := result + a * b;
++        else
++          result := result - 1;
++        end;
++      end;
++end;
++
++begin
++  if decode(40) <> ref_decode(40) then
++    begin
++      writeln('decode: ', decode(40), ' expected ', ref_decode(40));
++      inc(errors);
++    end;
++  { k: 7,7,3,(raise),3,6,6,(raise),9,9,9,(raise) }
++  if notdefinite(12) <> 7 + 7 + 3 + 3 + 6 + 6 + 9 + 9 + 9 + 300 then
++    begin
++      writeln('notdefinite: ', notdefinite(12));
++      inc(errors);
++    end;
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

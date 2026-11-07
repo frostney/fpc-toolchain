@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 10:44:00 +0000
+Subject: [PATCH 098/113] x86_64: -O3 inlines small routines that only their
+ own unit or program can call
+
+A C compiler inlines small static functions at -O2; FPC inlined only what
+was declared inline (cs_opt_autoinline was not part of any level), so
+fasta's random-number helper and table lookup stayed two calls per output
+character. From -O3 on, a routine in the implementation section of a unit
+or in a program (owner staticsymtable, not nested, not generic, without
+var, out or constref parameters) is inlined when node count plus
+complexity of its body is at most 60: the code growth stays inside the unit
+and its interface does not change. Routines with by-reference parameters
+are left out because the node DFA does not order the parts of an
+expression, so a write through the inlined parameter would make it warn
+about an uninitialised caller variable (tests/test/opt/tdfa*). Other
+routines are inlined only with -OoAUTOINLINE and the old limit of 25.
+Needs the two previous fixes (constant propagation order, procvar from an
+inline routine).
+---
+ compiler/psub.pas | 44 +++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 39 insertions(+), 5 deletions(-)
+
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index 642fd812..341a9d67 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -1911,7 +1911,22 @@ implementation
+              end;
+          end;
+ 
+-       function heuristics_favors_autoinlining(code: tnode): boolean;
++       { var, out and constref parameters: once inlined, a write through such a
++         parameter becomes a write to the caller's variable inside an
++         expression, and the node DFA (which does not order the parts of an
++         expression) then warns that the variable is used uninitialised
++         where the call left it alone (tests/test/opt/tdfa6/10/12/15/17) }
++       function has_byref_paras(pd: tprocdef): boolean;
++         var
++           i: longint;
++         begin
++           result:=false;
++           for i:=0 to pd.paras.count-1 do
++             if tparavarsym(pd.paras[i]).varspez in [vs_var,vs_out,vs_constref] then
++               exit(true);
++         end;
++
++       function heuristics_favors_autoinlining(code: tnode; limit: integer): boolean;
+          var
+            complexityAvail : integer;
+          begin
+@@ -1924,7 +1939,7 @@ implementation
+ 
+            { This is a shortcutted version of
+              "result:=node_count(code)+node_complexity(code)<=25". }
+-           complexityAvail:=25-node_complexity(code);
++           complexityAvail:=limit-node_complexity(code);
+            result:=(complexityAvail>0) and (node_count(code,complexityAvail+1)<=dword(complexityAvail));
+          end;
+ 
+@@ -1936,6 +1951,8 @@ implementation
+         oldswitches : tlocalswitches;
+         templist : TAsmList;
+         headertai : tai;
++        autoinline_local : boolean;
++        autoinline_limit : integer;
+ 
+       procedure delete_marker(anode: tasmnode);
+         var
+@@ -2002,8 +2019,25 @@ implementation
+         if not(current_procinfo.procdef.proctypeoption in [potype_unitinit,potype_unitfinalize]) then
+           code:=cnodeutils.wrap_proc_body(procdef,code);
+ 
+-        { automatic inlining? }
+-        if (cs_opt_autoinline in current_settings.optimizerswitches) and
++        { automatic inlining? A routine that only its own unit or program can
++          call (implementation section, program) is inlined from -O3 on with a
++          larger size limit, as C compilers treat static functions: the code
++          growth stays inside the unit and its interface does not change.
++          Other routines only with -OoAUTOINLINE. }
++        autoinline_local:={$ifdef x86_64}
++          (cs_opt_level3 in current_settings.optimizerswitches) and
++          assigned(procdef.owner) and
++          (procdef.owner.symtabletype=staticsymtable) and
++          (procdef.parast.symtablelevel=normal_function_level) and
++          not(df_generic in procdef.defoptions) and
++          not(df_specialization in procdef.defoptions) and
++          not has_byref_paras(procdef);
++          {$else}false;{$endif}
++        if autoinline_local then
++          autoinline_limit:=60
++        else
++          autoinline_limit:=25;
++        if ((cs_opt_autoinline in current_settings.optimizerswitches) or autoinline_local) and
+            not(po_noinline in procdef.procoptions) and
+            { no inlining yet? }
+            not(procdef.has_inlininginfo) and not(has_nestedprocs) and
+@@ -2011,7 +2045,7 @@ implementation
+                                            potype_destructor,potype_class_constructor,potype_class_destructor]) and
+             ((procdef.procoptions*[po_exports,po_external,po_interrupt,po_virtualmethod,po_iocheck])=[]) and
+             (not(procdef.proccalloption in [pocall_safecall])) and
+-            heuristics_favors_autoinlining(code) then
++            heuristics_favors_autoinlining(code,autoinline_limit) then
+           begin
+             { Can we inline this procedure? }
+             if checknodeinlining(procdef) then

@@ -1,0 +1,150 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 15:42:29 +0000
+Subject: [PATCH 109/113] x86 peephole MovapXChainCommute: compute a chain in
+ its target register through a commutative operation
+
+TryMovapXChainRename renamed "movapd reg1,reg2; <ops on reg2>; movapd
+reg2,reg3" to work on reg3 only when the chain does not use reg3. When it
+reads reg3 once, as the source of a commutative addsd/mulsd/addss/mulss on
+reg2, the operation's operands are swapped so that reg3 is the destination,
+the rest of the chain works on reg3 and the last move goes. mandelbrot:
+Zi := 2.0*Zr*Zi + Ci without the copy; tests/test/opt/tsseconmute1.pp.
+---
+ compiler/x86/aoptx86.pas       | 35 ++++++++++++++++-
+ tests/test/opt/tsseconmute1.pp | 70 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 103 insertions(+), 2 deletions(-)
+ create mode 100644 tests/test/opt/tsseconmute1.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 4db7bace..8d550c2f 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -2562,7 +2562,7 @@ unit aoptx86;
+         MaxChain = 16;
+       var
+         chain: array[0..MaxChain] of tai;
+-        count, i, j: longint;
++        count, i, j, k: longint;
+         hp: tai;
+         a, t, b: tregister;
+         found: boolean;
+@@ -2621,10 +2621,41 @@ unit aoptx86;
+           end;
+         if not found or (b=t) or (getregtype(b)<>R_MMREGISTER) then
+           exit;
+-        { reg3 must not be used between the first and the last move }
++        { reg3 must not be used between the first and the last move ... }
++        k:=-1;
+         for i:=0 to count-2 do
+           if RegInInstruction(b,chain[i]) then
++            begin
++              if k>=0 then
++                exit;
++              k:=i;
++            end;
++        if k>=0 then
++          begin
++            { ... except once as the source of a commutative operation on reg2:
++                movapd  reg1,reg2           movapd  reg1,reg2
++                ...                         ...
++                mulsd   reg3,reg2    ->     mulsd   reg2,reg3
++                addsd   x,reg2              addsd   x,reg3
++                movapd  reg2,reg3
++              (reg2 not used after) }
++            if not MatchInstruction(chain[k],[A_ADDSD,A_MULSD,A_ADDSS,A_MULSS],[S_NO]) or
++               (taicpu(chain[k]).ops<>2) or
++               not MatchOpType(taicpu(chain[k]),top_reg,top_reg) or
++               (taicpu(chain[k]).oper[0]^.reg<>b) or
++               (taicpu(chain[k]).oper[1]^.reg<>t) then
++              exit;
++            taicpu(chain[k]).loadreg(0,t);
++            taicpu(chain[k]).loadreg(1,b);
++            for i:=k+1 to count-2 do
++              for j:=0 to taicpu(chain[i]).ops-1 do
++                if (taicpu(chain[i]).oper[j]^.typ=top_reg) and (taicpu(chain[i]).oper[j]^.reg=t) then
++                  taicpu(chain[i]).loadreg(j,b);
++            DebugMsg(SPeepholeOptimization + 'MovapXChainCommute done',chain[k]);
++            RemoveInstruction(chain[count-1]);
++            result:=true;
+             exit;
++          end;
+         { rename reg2 to reg3 from the first move up to the last one }
+         for i:=0 to taicpu(p).ops-1 do
+           if (taicpu(p).oper[i]^.typ=top_reg) and (taicpu(p).oper[i]^.reg=t) then
+diff --git a/tests/test/opt/tsseconmute1.pp b/tests/test/opt/tsseconmute1.pp
+new file mode 100644
+index 00000000..a17acf3d
+--- /dev/null
++++ b/tests/test/opt/tsseconmute1.pp
+@@ -0,0 +1,70 @@
++{ %OPT=-O3 }
++{ x86 peephole MovapXChainCommute: a value computed in a scratch register
++  and copied to a register that the chain reads once as the source of a
++  commutative operation is computed in that register directly }
++program tsseconmute1;
++
++{$mode objfpc}
++
++function iter(cr, ci: double; n: longint): longint;
++var
++  zr, zi, tr, ti: double;
++  i: longint;
++begin
++  zr := 0; zi := 0; tr := 0; ti := 0;
++  i := 0;
++  while (i < n) and (tr + ti <= 4.0) do
++    begin
++      zi := 2.0 * zr * zi + ci;
++      zr := tr - ti + cr;
++      tr := zr * zr;
++      ti := zi * zi;
++      inc(i);
++    end;
++  iter := i;
++end;
++
++function chain(a, b, c: double; n: longint): double;
++var
++  i: longint;
++begin
++  for i := 1 to n do
++    begin
++      b := (a + a) * b + c;
++      c := (b * 0.5 + a) * c - 0.25;
++      a := a * 0.999 + b * 0.001;
++    end;
++  chain := a + b * 3 + c * 7;
++end;
++
++function chains(a, b: single; n: longint): single;
++var
++  i: longint;
++begin
++  for i := 1 to n do
++    begin
++      b := (a * a) + b * 0.5;
++      a := (b + 1.0) * a * 0.5;
++    end;
++  chains := a + b;
++end;
++
++var
++  x, y, sum: longint;
++  d: double;
++  s: single;
++begin
++  sum := 0;
++  for y := 0 to 59 do
++    for x := 0 to 59 do
++      sum := sum * 7 + iter(2.0 * x / 60 - 1.5, 2.0 * y / 60 - 1.0, 50);
++  d := chain(0.5, 0.25, 0.125, 1000);
++  s := chains(0.5, 0.25, 50);
++  { values of a build without optimisation }
++  if (sum <> 209380954) or (abs(d + 2.185296846937150) > 1e-14) or (abs(s) > 1e-6) then
++    begin
++      writeln('failed: ', sum, ' ', d:0:15, ' ', s:0:7);
++      halt(1);
++    end;
++  writeln('ok');
++end.

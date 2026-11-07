@@ -1,0 +1,401 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 14:54:52 +0000
+Subject: [PATCH 104/113] Loop strength reduction of a[X+i], a[i+X] and a[X-i]
+ with X loop invariant
+
+OptimizeInductionVariables replaced a[i] by a pointer stepping through the
+array only for an index that is the counter itself and an element size that
+is not a power of 2 (where the scaled index addressing would need a
+multiplication). An index X+i, i+X or X-i with X built of constants and
+local variables or value parameters that the loop does not change costs
+sign extensions and an addition per access; it now becomes a pointer as
+well (stepping backwards for X-i), for any element size, for static arrays
+without range checks. fannkuch: perm[k-i] in the flip loop (instructions
+-6.1%); tests/test/opt/tivlinear1.pp.
+---
+ compiler/optloop.pas         | 166 ++++++++++++++++++++++++++++++++++-
+ tests/test/opt/tivlinear1.pp | 163 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 328 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test/opt/tivlinear1.pp
+
+diff --git a/compiler/optloop.pas b/compiler/optloop.pas
+index 8da1f8a4..8a0c9084 100644
+--- a/compiler/optloop.pas
++++ b/compiler/optloop.pas
+@@ -331,12 +331,18 @@ unit optloop;
+         containsnestedforloop,
+         docalcatend : boolean;
+         function findpreviousstrengthreduction(var n: tnode): boolean;
++        function is_counter(n: tnode): boolean;
++        function is_simple_invariant(n: tnode): boolean;
++        function is_linear_index_access(n: tnode; out sign: longint): boolean;
+         procedure addinduction(temp : ttempcreatenode; expr : tnode);
+         function dostrengthreductiontest(var n: tnode): foreachnoderesult;
+         procedure optimizeinductionvariablessingleforloop(var n: tnode);
+       end;
+ 
+ 
++    function replace_counter_by_start(var n: tnode; arg: pointer): foreachnoderesult; forward;
++
++
+     function toptimizeinductionvariablescontext.findpreviousstrengthreduction(var n: tnode): boolean;
+       var
+         i : longint;
+@@ -364,6 +370,89 @@ unit optloop;
+       end;
+ 
+ 
++    { a plain read of the counter, possibly extended }
++    function toptimizeinductionvariablescontext.is_counter(n: tnode): boolean;
++      begin
++        if (n.nodetype=typeconvn) and
++           (ttypeconvnode(n).convtype in [tc_int_2_int,tc_equal]) then
++          n:=ttypeconvnode(n).left;
++        result:=n.isequal(currforloop.left) and
++          ((n.flags*[nf_write,nf_modify])=[]);
++      end;
++
++
++    { constants and reads of local variables and value parameters that the
++      loop does not change, through integer conversions, additions and
++      subtractions (no call in the loop can change such a variable) }
++    function toptimizeinductionvariablescontext.is_simple_invariant(n: tnode): boolean;
++      begin
++        result:=false;
++        case n.nodetype of
++          ordconstn:
++            result:=true;
++          loadn:
++            result:=(tloadnode(n).symtableentry.typ in [localvarsym,paravarsym]) and
++              not assigned(tloadnode(n).left) and
++              ((tloadnode(n).symtableentry.typ=localvarsym) or
++               (tparavarsym(tloadnode(n).symtableentry).varspez in [vs_value,vs_const])) and
++              (tabstractvarsym(tloadnode(n).symtableentry).vardef.typ in [orddef,enumdef]) and
++              not(vo_volatile in tabstractvarsym(tloadnode(n).symtableentry).varoptions) and
++              (tabstractvarsym(tloadnode(n).symtableentry).varsymaccess*[vsa_addr_taken,vsa_different_scope]=[]) and
++              is_loop_invariant(currforloop,n);
++          typeconvn:
++            result:=(ttypeconvnode(n).convtype in [tc_int_2_int,tc_equal]) and
++              is_simple_invariant(ttypeconvnode(n).left);
++          addn,subn:
++            result:=is_simple_invariant(taddnode(n).left) and
++              is_simple_invariant(taddnode(n).right);
++          else
++            ;
++        end;
++      end;
++
++
++    { a[X+i], a[i+X] (sign 1) or a[X-i] (sign -1) with X loop invariant
++      and a a static array variable, without range checks }
++    function toptimizeinductionvariablescontext.is_linear_index_access(n: tnode; out sign: longint): boolean;
++      var
++        idx: tnode;
++      begin
++        result:=false;
++        sign:=0;
++        if (cs_check_range in n.localswitches) or
++           (tvecnode(n).left.nodetype<>loadn) or
++           assigned(tloadnode(tvecnode(n).left).left) or
++           (tvecnode(n).left.resultdef.typ<>arraydef) or
++           is_special_array(tvecnode(n).left.resultdef) or
++           is_packed_array(tvecnode(n).left.resultdef) or
++           not(tloadnode(tvecnode(n).left).symtableentry.typ in [localvarsym,paravarsym,staticvarsym]) or
++           ((tvecnode(n).left.flags*[nf_modify])<>[]) then
++          exit;
++        idx:=tvecnode(n).right;
++        if (idx.nodetype=typeconvn) and
++           (ttypeconvnode(idx).convtype in [tc_int_2_int,tc_equal]) then
++          idx:=ttypeconvnode(idx).left;
++        if not(idx.nodetype in [addn,subn]) or
++           (nf_internal in idx.flags) then
++          exit;
++        if is_counter(taddnode(idx).right) and
++           is_simple_invariant(taddnode(idx).left) then
++          begin
++            if idx.nodetype=addn then
++              sign:=1
++            else
++              sign:=-1;
++          end
++        else if (idx.nodetype=addn) and
++           is_counter(taddnode(idx).left) and
++           is_simple_invariant(taddnode(idx).right) then
++          sign:=1
++        else
++          exit;
++        result:=true;
++      end;
++
++
+     procedure toptimizeinductionvariablescontext.addinduction(temp : ttempcreatenode; expr : tnode);
+       begin
+         if not assigned(initcode) then
+@@ -386,7 +475,7 @@ unit optloop;
+     function toptimizeinductionvariablescontext.dostrengthreductiontest(var n: tnode): foreachnoderesult;
+       var
+         tempnode,startvaltemp : ttempcreatenode;
+-        dummy : longint;
++        dummy,sign : longint;
+         nn : tnode;
+         nt : tnodetype;
+         nflags : tnodeflags;
+@@ -468,6 +557,63 @@ unit optloop;
+                 end;
+             end;
+           vecn:
++            if is_linear_index_access(n,sign) then
++              begin
++                { a[X+i], a[i+X], a[X-i] with X invariant: a pointer that
++                  steps through the array also for a power-of-2 element size,
++                  as it replaces the index arithmetic }
++                changedforloop:=true;
++                if not(findpreviousstrengthreduction(n)) then
++                  begin
++                    tempnode:=ctempcreatenode.create(voidpointertype,voidpointertype.size,tt_persistent,true);
++                    addinduction(tempnode,n);
++                    if lnf_backward in currforloop.loopflags then
++                      sign:=-sign;
++                    if sign<0 then
++                      addstatement(calccodestatements,
++                        cinlinenode.createintern(in_dec_x,false,
++                        ccallparanode.create(ctemprefnode.create(tempnode),ccallparanode.create(
++                        cordconstnode.create(tcgvecnode(n).get_mul_size,sizeuinttype,false),nil))))
++                    else
++                      addstatement(calccodestatements,
++                        cinlinenode.createintern(in_inc_x,false,
++                        ccallparanode.create(ctemprefnode.create(tempnode),ccallparanode.create(
++                        cordconstnode.create(tcgvecnode(n).get_mul_size,sizeuinttype,false),nil))));
++                    addstatement(initcodestatements,tempnode);
++                    { the start value is evaluated once }
++                    startvaltemp:=maybereplacewithtemp(currforloop.right,initcode,initcodestatements,currforloop.right.resultdef.size,true);
++                    { the address of the element of the first iteration: the
++                      index expression with the start value for the counter }
++                    nn:=tvecnode(n).right.getcopy;
++                    foreachnodestatic(nn,@replace_counter_by_start,@self);
++                    node_reset_flags(nn,[],[tnf_pass1_done]);
++                    nn:=caddrnode.create(cvecnode.create(tvecnode(n).left.getcopy,nn));
++                    if not docalcatend then
++                      begin
++                        if sign<0 then
++                          nt:=addn
++                        else
++                          nt:=subn;
++                        nn:=caddnode.create_internal(nt,
++                           ctypeconvnode.create_internal(nn,voidpointertype),
++                           cordconstnode.create(tcgvecnode(n).get_mul_size,sizeuinttype,false));
++                      end;
++                    addstatement(initcodestatements,cassignmentnode.create(ctemprefnode.create(tempnode),nn));
++                    n:=ctypeconvnode.create_internal(cderefnode.create(ctemprefnode.create(tempnode)),n.resultdef);
++                    if startvaltemp<>nil then
++                      addstatement(deletecodestatements,ctempdeletenode.create(startvaltemp));
++                    addstatement(deletecodestatements,ctempdeletenode.create(tempnode));
++                  end;
++                if nflags*[nf_write,nf_modify]<>[] then
++                  begin
++                    if (n.nodetype<>typeconvn) or (ttypeconvnode(n).left.nodetype<>derefn) then
++                      internalerror(2026110701);
++                    ttypeconvnode(n).left.flags:=ttypeconvnode(n).left.flags+nflags*[nf_write,nf_modify];
++                  end;
++                do_firstpass(n);
++                result:=fen_norecurse_false;
++              end
++            else
+             begin
+               { is the index the counter variable? }
+               if not(is_special_array(tvecnode(n).left.resultdef)) and
+@@ -563,6 +709,24 @@ unit optloop;
+       end;
+ 
+ 
++    function replace_counter_by_start(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        ctx : ^toptimizeinductionvariablescontext absolute arg;
++        hp : tnode;
++      begin
++        result:=fen_false;
++        if n.isequal(ctx^.currforloop.left) then
++          begin
++            hp:=ctypeconvnode.create_internal(ctx^.currforloop.right.getcopy,n.resultdef);
++            hp.fileinfo:=n.fileinfo;
++            typecheckpass(hp);
++            n.free;
++            n:=hp;
++            result:=fen_norecurse_false;
++          end;
++      end;
++
++
+     function dostrengthreductiontest_callback(var n: tnode; arg: pointer): foreachnoderesult;
+       begin
+         result:=toptimizeinductionvariablescontext(arg^).dostrengthreductiontest(n);
+diff --git a/tests/test/opt/tivlinear1.pp b/tests/test/opt/tivlinear1.pp
+new file mode 100644
+index 00000000..be74c31f
+--- /dev/null
++++ b/tests/test/opt/tivlinear1.pp
+@@ -0,0 +1,163 @@
++{ %OPT=-O3 }
++{ for loop strength reduction of a[X+i], a[i+X] and a[X-i] (X invariant):
++  every routine is compared with the same computation in a while loop }
++program tivlinear1;
++
++{$mode objfpc}
++
++type
++  tarr = array[0..63] of longint;
++  tarr8 = array[-5..40] of int64;
++
++var
++  errors: longint = 0;
++
++procedure check(got, expected: int64; const what: string);
++begin
++  if got <> expected then
++    begin
++      writeln(what, ': got ', got, ', expected ', expected);
++      inc(errors);
++    end;
++end;
++
++procedure init(var a: tarr);
++var
++  i: longint;
++begin
++  for i := low(a) to high(a) do
++    a[i] := i * 7 + 3;
++end;
++
++function sum(const a: tarr): int64;
++var
++  i: longint;
++begin
++  result := 0;
++  for i := low(a) to high(a) do
++    result := result * 31 + a[i];
++end;
++
++{ the fannkuch flip }
++procedure flip(var a: tarr; k: longint);
++var
++  i, t: longint;
++begin
++  for i := 0 to (k + 1) shr 1 - 1 do
++    begin
++      t := a[i]; a[i] := a[k - i]; a[k - i] := t;
++    end;
++end;
++
++procedure flipw(var a: tarr; k: longint);
++var
++  i, t: longint;
++begin
++  i := 0;
++  while i <= (k + 1) shr 1 - 1 do
++    begin
++      t := a[i]; a[i] := a[k - i]; a[k - i] := t;
++      inc(i);
++    end;
++end;
++
++{ X+i and i+X, a start value that is not constant, downto, continue }
++procedure mix(var a: tarr; lo, hi, x: longint);
++var
++  i: longint;
++begin
++  for i := lo to hi do
++    begin
++      if i = lo + 2 then
++        continue;
++      a[x + i] := a[x + i] + a[i + x + 1] * 2 - a[x - i + 40];
++    end;
++  for i := hi downto lo do
++    a[i + x] := a[x - i + 40] - i;
++end;
++
++procedure mixw(var a: tarr; lo, hi, x: longint);
++var
++  i: longint;
++begin
++  i := lo;
++  while i <= hi do
++    begin
++      if i <> lo + 2 then
++        a[x + i] := a[x + i] + a[i + x + 1] * 2 - a[x - i + 40];
++      inc(i);
++    end;
++  i := hi;
++  while i >= lo do
++    begin
++      a[i + x] := a[x - i + 40] - i;
++      dec(i);
++    end;
++end;
++
++{ break, an array with a lower bound <> 0 and 8 byte elements }
++function brk(var b: tarr8; n, x: longint): int64;
++var
++  i: longint;
++begin
++  result := 0;
++  for i := 1 to n do
++    begin
++      if b[x - i] < 0 then
++        break;
++      result := result + b[x - i] * i;
++      b[x - i + 1] := result;
++    end;
++end;
++
++function brkw(var b: tarr8; n, x: longint): int64;
++var
++  i: longint;
++begin
++  result := 0;
++  i := 1;
++  while i <= n do
++    begin
++      if b[x - i] < 0 then
++        break;
++      result := result + b[x - i] * i;
++      b[x - i + 1] := result;
++      inc(i);
++    end;
++end;
++
++var
++  a1, a2: tarr;
++  b1, b2: tarr8;
++  k, i: longint;
++begin
++  for k := 0 to 40 do
++    begin
++      init(a1); init(a2);
++      flip(a1, k); flipw(a2, k);
++      check(sum(a1), sum(a2), 'flip');
++    end;
++  for k := -1 to 6 do
++    begin
++      init(a1); init(a2);
++      mix(a1, k, k + 9, 10); mixw(a2, k, k + 9, 10);
++      check(sum(a1), sum(a2), 'mix');
++      { no iterations }
++      mix(a1, k + 9, k, 10); mixw(a2, k + 9, k, 10);
++      check(sum(a1), sum(a2), 'mix empty');
++    end;
++  for k := 0 to 30 do
++    begin
++      for i := low(b1) to high(b1) do
++        begin
++          b1[i] := i * 3 - 20;
++          b2[i] := b1[i];
++        end;
++      check(brk(b1, k, 35), brkw(b2, k, 35), 'brk');
++      for i := low(b1) to high(b1) do
++        check(b1[i], b2[i], 'brk array');
++    end;
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

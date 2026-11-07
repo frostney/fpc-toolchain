@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 12:12:32 +0000
+Subject: [PATCH 096/113] Constant propagation does not assume an evaluation
+ order inside an assignment
+
+replaceBasicAssign propagated a known value into both sides of an assignment
+("the evaluation order is not defined") even when a side writes the
+variable, e.g. an inlined call doing inc(counter) in an index: in
+s[f] := succ(s[f]) with counter = 0 before, the inc in the right side became
+counter := 1 and the one in the left side, which the code generator
+evaluates after it, became counter := 1 as well (two calls, counter 1 too
+low). When either side writes the variable (other than as the assignment's
+own target, which happens after both are evaluated), propagate into neither
+and stop. Seen with explicit inline at -O3 (tests/units/system/tpredsucc2
+with f inline); tests/test/opt/tconstprop2.pp.
+---
+ compiler/optconstprop.pas     | 12 ++++++-
+ tests/test/opt/tconstprop2.pp | 60 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 71 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test/opt/tconstprop2.pp
+
+diff --git a/compiler/optconstprop.pas b/compiler/optconstprop.pas
+index 37e105e5..1915de64 100644
+--- a/compiler/optconstprop.pas
++++ b/compiler/optconstprop.pas
+@@ -108,7 +108,17 @@ unit optconstprop;
+           begin
+             tree_modified:=false;
+ 
+-            { we can propagate the constant in both branches because the evaluation order is not defined }
++            { The evaluation order of the two sides is not defined: if one of them
++              writes the variable (e.g. an inlined call doing inc(x) in an index,
++              s[f] := succ(s[f])), the other one may see the old or the new
++              value, so propagate into neither and stop. The assignment target
++              itself is written only after both sides are evaluated. }
++            if foreachnodestatic(pm_postprocess,tassignmentnode(n).right,@check_written,tassignmentnode(arg).left) or
++               (not(tassignmentnode(n).left.isequal(tassignmentnode(arg).left)) and
++                foreachnodestatic(pm_postprocess,tassignmentnode(n).left,@check_written,tassignmentnode(arg).left)) then
++              exit(false);
++
++            { otherwise we can propagate the constant in both branches }
+             result:=replaceBasicAssign(tassignmentnode(n).right, arg, tree_modified);
+             { do not use the intuitive way result:=result and replace... because this would prevent
+               replaceBasicAssign being called if the result is already false }
+diff --git a/tests/test/opt/tconstprop2.pp b/tests/test/opt/tconstprop2.pp
+new file mode 100644
+index 00000000..4095be91
+--- /dev/null
++++ b/tests/test/opt/tconstprop2.pp
+@@ -0,0 +1,60 @@
++{ %OPT=-O3 }
++{ constant propagation into an assignment whose sides write the variable
++  (here through an inlined call): the evaluation order of the two sides is
++  not defined, so neither may assume the value from before the statement }
++program tconstprop2;
++
++{$mode objfpc}
++
++var
++  counter: longint;
++  errors: longint = 0;
++
++function f: longint; inline;
++begin
++  inc(counter);
++  f := 1;
++end;
++
++function g: longint; inline;
++begin
++  counter := counter + 10;
++  g := 2;
++end;
++
++procedure check(ok: boolean; const what: string);
++begin
++  if not ok then
++    begin
++      writeln('failed: ', what, ' (counter = ', counter, ')');
++      inc(errors);
++    end;
++end;
++
++var
++  s: array[0..10] of longint;
++  x: longint;
++begin
++  s[1] := 1234;
++  s[2] := 5;
++  counter := 0;
++  s[f] := succ(s[f]);
++  s[f] := pred(s[f]);
++  check((s[1] = 1234) and (counter = 4), 'succ/pred');
++
++  counter := 0;
++  s[g] := s[2] + 1;
++  check((s[2] = 6) and (counter = 10), 'left only');
++
++  counter := 0;
++  x := counter + g;
++  check((x = 2) or (x = 12), 'right reads and writes');
++  check(counter = 10, 'right writes');
++
++  counter := 5;
++  counter := counter + 1;
++  check(counter = 6, 'plain target');
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

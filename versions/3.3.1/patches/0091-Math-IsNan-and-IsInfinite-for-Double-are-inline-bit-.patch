@@ -1,0 +1,139 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 07:47:00 +0000
+Subject: [PATCH 091/113] Math: IsNan and IsInfinite for Double are inline bit
+ tests
+
+They were calls that took the parameter apart through a record cast. Code
+that calls them on a hot value (a VM normalising a number result) then kept
+that value in memory across the call, as x86_64 has no callee-saved xmm
+registers. Where the Double's 64 bits read as a QWord are its IEEE layout
+(all targets except FPC_DOUBLE_HILO_SWAPPED) they are now inline tests on
+PQWord(@d)^, which optbitcast reads from the register: exponent all ones
+with a non-zero (NaN) or zero (infinity) fraction. Exact on every bit
+pattern and raising no floating point exception, as before.
+tests/test/units/math/tisnaninf1.pp.
+---
+ rtl/objpas/math.pp                  | 19 ++++++++++--
+ tests/test/units/math/tisnaninf1.pp | 47 +++++++++++++++++++++++++++++
+ 2 files changed, 64 insertions(+), 2 deletions(-)
+ create mode 100644 tests/test/units/math/tisnaninf1.pp
+
+diff --git a/rtl/objpas/math.pp b/rtl/objpas/math.pp
+index a8d0b751..d7f1e6ec 100644
+--- a/rtl/objpas/math.pp
++++ b/rtl/objpas/math.pp
+@@ -314,7 +314,7 @@ function IsZero(const A: Extended): Boolean;inline; overload;
+ 
+ function IsNan(const d : Single): Boolean; overload;
+ {$ifdef FPC_HAS_TYPE_DOUBLE}
+-function IsNan(const d : Double): Boolean; overload;
++function IsNan(const d : Double): Boolean; overload;{$ifndef FPC_DOUBLE_HILO_SWAPPED} inline;{$endif}
+ {$endif FPC_HAS_TYPE_DOUBLE}
+ {$ifdef FPC_HAS_TYPE_EXTENDED}
+ function IsNan(const d : Extended): Boolean; overload;
+@@ -322,7 +322,7 @@ function IsNan(const d : Extended): Boolean; overload;
+ 
+ function IsInfinite(const d : Single): Boolean; overload;
+ {$ifdef FPC_HAS_TYPE_DOUBLE}
+-function IsInfinite(const d : Double): Boolean; overload;
++function IsInfinite(const d : Double): Boolean; overload;{$ifndef FPC_DOUBLE_HILO_SWAPPED} inline;{$endif}
+ {$endif FPC_HAS_TYPE_DOUBLE}
+ {$ifdef FPC_HAS_TYPE_EXTENDED}
+ function IsInfinite(const d : Extended): Boolean; overload;
+@@ -3680,6 +3680,13 @@ function IsNan(const d : Single): Boolean; overload;
+ 
+ {$ifdef FPC_HAS_TYPE_DOUBLE}
+ function IsNan(const d : Double): Boolean;
++{$ifndef FPC_DOUBLE_HILO_SWAPPED}
++  begin
++    { exponent all ones, fraction not zero: an exact bit test that raises no
++      floating point exception and inlines to a few integer instructions }
++    Result:=(PQWord(@d)^ and QWord($7FFFFFFFFFFFFFFF))>QWord($7FF0000000000000);
++  end;
++{$else FPC_DOUBLE_HILO_SWAPPED}
+   var
+     fraczero, expMaximal: boolean;
+   begin
+@@ -3694,6 +3701,7 @@ function IsNan(const d : Double): Boolean;
+ {$endif FPC_BIG_ENDIAN}
+     Result:=expMaximal and not(fraczero);
+   end;
++{$endif FPC_DOUBLE_HILO_SWAPPED}
+ {$endif FPC_HAS_TYPE_DOUBLE}
+ 
+ {$ifdef FPC_HAS_TYPE_EXTENDED}
+@@ -3719,6 +3727,12 @@ function IsInfinite(const d : Single): Boolean; overload;
+ 
+ {$ifdef FPC_HAS_TYPE_DOUBLE}
+ function IsInfinite(const d : Double): Boolean; overload;
++{$ifndef FPC_DOUBLE_HILO_SWAPPED}
++  begin
++    { exponent all ones, fraction zero }
++    Result:=(PQWord(@d)^ and QWord($7FFFFFFFFFFFFFFF))=QWord($7FF0000000000000);
++  end;
++{$else FPC_DOUBLE_HILO_SWAPPED}
+   var
+     fraczero, expMaximal: boolean;
+   begin
+@@ -3733,6 +3747,7 @@ function IsInfinite(const d : Double): Boolean; overload;
+ {$endif FPC_BIG_ENDIAN}
+     Result:=expMaximal and fraczero;
+   end;
++{$endif FPC_DOUBLE_HILO_SWAPPED}
+ {$endif FPC_HAS_TYPE_DOUBLE}
+ 
+ {$ifdef FPC_HAS_TYPE_EXTENDED}
+diff --git a/tests/test/units/math/tisnaninf1.pp b/tests/test/units/math/tisnaninf1.pp
+new file mode 100644
+index 00000000..fcaa557c
+--- /dev/null
++++ b/tests/test/units/math/tisnaninf1.pp
+@@ -0,0 +1,47 @@
++{ Math.IsNan and IsInfinite for Double, on bit patterns: signed zeros,
++  denormals, the largest finite value, infinities, quiet and signaling NaNs }
++program tisnaninf1;
++
++{$mode objfpc}
++
++uses
++  math;
++
++var
++  errors: longint = 0;
++
++function fromq(q: qword): double;
++begin
++  move(q, result, sizeof(result));
++end;
++
++procedure check(q: qword; nan, inf: boolean);
++var
++  d: double;
++begin
++  d := fromq(q);
++  if (IsNan(d) <> nan) or (IsInfinite(d) <> inf) then
++    begin
++      writeln('pattern ', hexstr(q, 16), ': IsNan ', IsNan(d), ' IsInfinite ', IsInfinite(d));
++      inc(errors);
++    end;
++end;
++
++begin
++  SetExceptionMask([exInvalidOp, exDenormalized, exZeroDivide, exOverflow, exUnderflow, exPrecision]);
++  check($0000000000000000, false, false);  { +0 }
++  check($8000000000000000, false, false);  { -0 }
++  check($3FF0000000000000, false, false);  { 1 }
++  check($BFF0000000000000, false, false);  { -1 }
++  check($7FEFFFFFFFFFFFFF, false, false);  { max finite }
++  check($0000000000000001, false, false);  { smallest denormal }
++  check($7FF0000000000000, false, true);   { +inf }
++  check($FFF0000000000000, false, true);   { -inf }
++  check($7FF8000000000000, true, false);   { quiet NaN }
++  check($FFF8000000000000, true, false);   { negative quiet NaN }
++  check($7FF0000000000001, true, false);   { signaling NaN }
++  check($7FFFFFFFFFFFFFFF, true, false);   { NaN, all fraction bits }
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

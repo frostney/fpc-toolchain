@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 01:25:59 +0000
+Subject: [PATCH 086/113] Loops: the DFA-filtered regvar synchronisation also
+ covers register globals
+
+A global variable of the main program is a register variable when no other
+routine uses it; its loads are DFA-tracked like those of locals. Leaving it
+out of get_used_live_regvars kept every such scalar live through the whole
+loop, so mandelbrot's program-level doubles were spilled at every use again
+(they had been register-allocated with the first version of the filter).
+---
+ compiler/ncgutil.pas | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/ncgutil.pas b/compiler/ncgutil.pas
+index 9eddc76b..8142f1d1 100644
+--- a/compiler/ncgutil.pas
++++ b/compiler/ncgutil.pas
+@@ -1185,9 +1185,14 @@ implementation
+         vs: tabstractnormalvarsym;
+       begin
+         result:=false;
+-        if not(sym.typ in [localvarsym,paravarsym]) then
++        if not(sym.typ in [localvarsym,paravarsym,staticvarsym]) then
+           exit;
+         vs:=tabstractnormalvarsym(sym);
++        { a global is a register variable only in the main program body when
++          no other routine uses it (and nothing takes its address) }
++        if (vs.typ=staticvarsym) and
++           not(vs.localloc.loc in [LOC_CREGISTER,LOC_CMMREGISTER,LOC_CFPUREGISTER]) then
++          exit;
+         if (vs.typ=paravarsym) and
+            paramanager.push_addr_param(vs.varspez,vs.vardef,current_procinfo.procdef.proccalloption) then
+           exit;

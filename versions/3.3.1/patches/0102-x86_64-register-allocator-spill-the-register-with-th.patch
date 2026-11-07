@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 14:38:46 +0000
+Subject: [PATCH 102/113] x86_64 register allocator: spill the register with
+ the least weight per interference
+
+select_spill (SPILLING_OLD) took the spill candidate with the most
+interferences and used the weight (uses times execution weight, see
+CalcExecutionWeights) only to break ties, so a value with a long live range
+that every loop iteration uses (self, a loop bound) went to memory before
+short-lived scratch values. On x86_64 it now takes Chaitin's metric, the
+least weight per interference; spill helpers are still left alone.
+vm2: self and Template now get registers (instructions -8.5%).
+---
+ compiler/rgobj.pas | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/compiler/rgobj.pas b/compiler/rgobj.pas
+index ca4d4cd5..3e6fd518 100644
+--- a/compiler/rgobj.pas
++++ b/compiler/rgobj.pas
+@@ -1576,6 +1576,9 @@ unit rgobj;
+       adj : psuperregisterworklist;
+       maxlength,minlength,p,i :word;
+       minweight: longint;
++{$ifdef x86_64}
++      cost,mincost: double;
++{$endif x86_64}
+       {$ifdef SPILLING_NEW}
+       dist: Double;
+       {$endif}
+@@ -1647,6 +1650,30 @@ unit rgobj;
+         begin
+           {Safe: This procedure is only called if length<>0}
+           { Search for a candidate to be spilled, ignoring nodes with the ri_spill_helper flag set. }
++{$ifdef x86_64}
++          { Chaitin's spill metric: the least spill cost (the use count weighted
++            by the execution weight of the code, see CalcExecutionWeights) per
++            interference. Spilling the register with the most interferences
++            regardless of its weight moves the most used values (self, a loop
++            counter) to memory as soon as their live range is long. }
++          mincost:=1e300;
++          for i:=0 to length-1 do
++            if not(ri_spill_helper in reginfo[buf[i]].flags) then
++              begin
++                adj:=reginfo[buf[i]].adjlist;
++                if assigned(adj) and (adj^.length>0) then
++                  begin
++                    cost:=reginfo[buf[i]].weight/adj^.length;
++                    if (cost<mincost) or
++                       ((cost=mincost) and (adj^.length>maxlength)) then
++                      begin
++                        p:=i;
++                        maxlength:=adj^.length;
++                        mincost:=cost;
++                      end;
++                  end;
++              end;
++{$else x86_64}
+           for i:=0 to length-1 do
+             if not(ri_spill_helper in reginfo[buf[i]].flags) then
+               begin
+@@ -1662,6 +1689,7 @@ unit rgobj;
+                     minweight:=reginfo[buf[i]].weight;
+                   end;
+               end;
++{$endif x86_64}
+ 
+           if p=high(p) then
+             begin

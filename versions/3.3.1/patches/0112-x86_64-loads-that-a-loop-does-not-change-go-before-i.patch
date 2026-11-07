@@ -1,0 +1,650 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 17:19:29 +0000
+Subject: [PATCH 112/113] x86_64: loads that a loop does not change go before
+ it (provenance)
+
+do_hoist_invariant_loads (with SLP, after the vectoriser): in a loop without
+calls, a scalar or vector load through a pointer the loop does not change,
+from memory that no store of the loop can be (same base and other offsets,
+or other fields of elements of the same array, see the provenance in
+optslp), goes into a temp before the loop, and so do the packs and
+broadcasts of such values. Before a while loop the copy is guarded by the
+loop condition; for and repeat loops run their body when they are reached
+(a converted for loop has its entry test outside).
+nbody: bi^.x/y, bi^.z, bi^.mass and its broadcast leave the inner loop;
+tests/test/opt/tslp2.pp.
+---
+ compiler/optslp.pas     | 448 ++++++++++++++++++++++++++++++++++++++++
+ compiler/psub.pas       |   5 +-
+ tests/test/opt/tslp2.pp | 141 +++++++++++++
+ 3 files changed, 593 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test/opt/tslp2.pp
+
+diff --git a/compiler/optslp.pas b/compiler/optslp.pas
+index 9418cc97..295b0eed 100644
+--- a/compiler/optslp.pas
++++ b/compiler/optslp.pas
+@@ -56,6 +56,10 @@ uses
+ 
+ function do_slp_vectorize(var code: tnode): boolean;
+ 
++{ loads through a pointer that a loop does not change, from memory that no
++  store of the loop can be (provenance, see above), go before the loop }
++function do_hoist_invariant_loads(var code: tnode): boolean;
++
+ implementation
+ 
+ uses
+@@ -1120,4 +1124,448 @@ function do_slp_vectorize(var code: tnode): boolean;
+     result:=ctx.changed;
+   end;
+ 
++
++{*****************************************************************************
++                         Loop invariant loads
++*****************************************************************************}
++
++type
++  thoistinfo = record
++    ctx: pslpctx;
++    abort: boolean;
++    stores: TFPList;      { nodes written in the loop (assignment targets, inc/dec) }
++    written: TFPList;     { variables/temps written: loadn/temprefn nodes }
++    cands: TFPList;       { candidate load nodes (in the loop) }
++    copies: TFPList;      { a copy of each distinct candidate }
++    temps: TFPList;
++  end;
++  phoistinfo = ^thoistinfo;
++
++
++function hoist_scan(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    hi: phoistinfo absolute arg;
++    para: tnode;
++  begin
++    result:=fen_false;
++    case n.nodetype of
++      calln,asmn:
++        hi^.abort:=true;
++      assignn:
++        hi^.stores.Add(tassignmentnode(n).left);
++      inlinen:
++        if (tinlinenode(n).inlinenumber in [in_inc_x,in_dec_x]) and assigned(tinlinenode(n).left) then
++          begin
++            para:=tcallparanode(tinlinenode(n).left).left;
++            hi^.stores.Add(para);
++          end;
++      loadn,temprefn:
++        if (n.flags*[nf_write,nf_modify])<>[] then
++          hi^.written.Add(n);
++      addrn:
++        { an address taken in the loop: anything may be written through it }
++        if not (taddrnode(n).left.nodetype in [subscriptn,vecn,derefn]) then
++          hi^.abort:=true;
++      else
++        ;
++    end;
++    if hi^.abort then
++      result:=fen_norecurse_true;
++  end;
++
++
++function is_written(hi: phoistinfo; n: tnode): boolean;
++  var
++    i: longint;
++  begin
++    result:=false;
++    for i:=0 to hi^.written.Count-1 do
++      if tnode(hi^.written[i]).isequal(n) then
++        exit(true);
++  end;
++
++
++{ the access of a scalar or vector load }
++function load_access(n: tnode; out acc: taccess): boolean;
++  var
++    hp: tnode;
++  begin
++    result:=false;
++    if (n.nodetype=derefn) and (drnf_unaligned in tderefnode(n).derefnodeflags) then
++      begin
++        hp:=strip_conv(tderefnode(n).left);
++        if hp.nodetype<>addrn then
++          exit;
++        acc:=get_access(taddrnode(hp).left);
++        acc.size:=n.resultdef.size;
++      end
++    else if n.nodetype=subscriptn then
++      acc:=get_access(n)
++    else
++      exit;
++    result:=acc.valid and (acc.base.nodetype=derefn);
++  end;
++
++
++function store_conflicts(hi: phoistinfo; const acc: taccess): boolean;
++  var
++    i: longint;
++    st, hp: tnode;
++    sacc: taccess;
++    sym: tsym;
++  begin
++    result:=true;
++    for i:=0 to hi^.stores.Count-1 do
++      begin
++        st:=tnode(hi^.stores[i]);
++        if (st.nodetype=derefn) and (drnf_unaligned in tderefnode(st).derefnodeflags) then
++          begin
++            hp:=strip_conv(tderefnode(st).left);
++            if hp.nodetype<>addrn then
++              exit;
++            sacc:=get_access(taddrnode(hp).left);
++            sacc.size:=st.resultdef.size;
++            if not sacc.valid or may_alias(hi^.ctx,acc,sacc) then
++              exit;
++          end
++        else if st.nodetype=temprefn then
++          continue
++        else if (st.nodetype=loadn) and not assigned(tloadnode(st).left) then
++          begin
++            sym:=tloadnode(st).symtableentry;
++            if (sym.typ in [localvarsym,paravarsym]) and
++               ((tabstractvarsym(sym).varsymaccess*[vsa_addr_taken,vsa_different_scope])=[]) and
++               ((sym.typ=localvarsym) or (tparavarsym(sym).varspez in [vs_value,vs_const]) and
++                not paramanager_push_addr(tparavarsym(sym))) then
++              continue;
++            { a global: only no alias with an element of another array }
++            if (sym.typ=staticvarsym) and assigned(base_array(hi^.ctx,acc)) and
++               (base_array(hi^.ctx,acc)<>sym) then
++              continue;
++            exit;
++          end
++        else
++          begin
++            sacc:=get_access(st);
++            if not sacc.valid or may_alias(hi^.ctx,acc,sacc) then
++              exit;
++          end;
++      end;
++    result:=false;
++  end;
++
++
++function hoist_find(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    hi: phoistinfo absolute arg;
++    acc: taccess;
++    p: tnode;
++  begin
++    result:=fen_false;
++    if ((n.flags*[nf_write,nf_modify])<>[]) then
++      exit;
++    if not load_access(n,acc) then
++      exit;
++    { the pointer is not changed in the loop }
++    p:=strip_conv(tderefnode(acc.base).left);
++    if not (p.nodetype in [loadn,temprefn]) or is_written(hi,p) then
++      exit;
++    if (p.nodetype=loadn) and
++       (assigned(tloadnode(p).left) or
++        not (tloadnode(p).symtableentry.typ in [localvarsym,paravarsym]) or
++        ((tabstractvarsym(tloadnode(p).symtableentry).varsymaccess*[vsa_addr_taken,vsa_different_scope])<>[])) then
++      exit;
++    if store_conflicts(hi,acc) then
++      exit;
++    hi^.cands.Add(n);
++    result:=fen_norecurse_false;
++  end;
++
++
++{ invariant packs and broadcasts: operands not written in the loop }
++function invariant_value(hi: phoistinfo; n: tnode): boolean;
++  begin
++    case n.nodetype of
++      realconstn:
++        result:=true;
++      temprefn:
++        result:=not is_written(hi,n);
++      loadn:
++        result:=plain_value(n) and not is_written(hi,n);
++      else
++        result:=false;
++    end;
++  end;
++
++
++function hoist_find_pack(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    hi: phoistinfo absolute arg;
++  begin
++    result:=fen_false;
++    if (n.nodetype=inlinen) and
++       ((tinlinenode(n).inlinenumber=in_vec2d_dup) and
++        invariant_value(hi,tcallparanode(tinlinenode(n).left).left) or
++        (tinlinenode(n).inlinenumber=in_vec2d_pack) and
++        invariant_value(hi,tcallparanode(tinlinenode(n).left).left) and
++        invariant_value(hi,tcallparanode(tcallparanode(tinlinenode(n).left).right).left)) then
++      begin
++        hi^.cands.Add(n);
++        result:=fen_norecurse_false;
++      end;
++  end;
++
++
++function hoist_replace(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    hi: phoistinfo absolute arg;
++    i: longint;
++    hp: tnode;
++  begin
++    result:=fen_false;
++    if ((n.flags*[nf_write,nf_modify])<>[]) then
++      exit;
++    for i:=0 to hi^.copies.Count-1 do
++      if tnode(hi^.copies[i]).isequal(n) then
++        begin
++          hp:=ctemprefnode.create(ttempcreatenode(hi^.temps[i]));
++          hp.fileinfo:=n.fileinfo;
++          n.free;
++          n:=hp;
++          typecheckpass(n);
++          exit(fen_norecurse_true);
++        end;
++  end;
++
++
++{ the condition can be evaluated once more before the loop }
++function pure_cond(var n: tnode; arg: pointer): foreachnoderesult;
++  begin
++    result:=fen_false;
++    if not (n.nodetype in [ltn,lten,gtn,gten,equaln,unequaln,andn,orn,notn,
++                           loadn,temprefn,ordconstn,realconstn,typeconvn,addn,subn,muln]) then
++      begin
++        pboolean(arg)^:=false;
++        result:=fen_norecurse_true;
++      end;
++  end;
++
++
++{ the body of the loop n and a guard: true when the loop body runs at
++  least once (a new node) }
++function loop_parts(n: tnode; out body: pnode; out guard: tnode): boolean;
++  var
++    ok: boolean;
++  begin
++    result:=false;
++    body:=nil;
++    guard:=nil;
++    case n.nodetype of
++      whilerepeatn:
++        begin
++          if not assigned(twhilerepeatnode(n).left) or
++             not assigned(twhilerepeatnode(n).right) then
++            exit;
++          body:=@twhilerepeatnode(n).right;
++          { repeat..until: when the loop is reached, the body runs }
++          if not (lnf_testatbegin in twhilerepeatnode(n).loopflags) then
++            exit(true);
++          ok:=true;
++          foreachnodestatic(twhilerepeatnode(n).left,@pure_cond,@ok);
++          if not ok then
++            exit;
++          guard:=twhilerepeatnode(n).left.getcopy;
++        end;
++      forn:
++        begin
++          if not assigned(tfornode(n).t2) then
++            exit;
++          ok:=true;
++          foreachnodestatic(tfornode(n).right,@pure_cond,@ok);
++          foreachnodestatic(tfornode(n).t1,@pure_cond,@ok);
++          if not ok then
++            exit;
++          body:=@tfornode(n).t2;
++          if lnf_backward in tfornode(n).loopflags then
++            guard:=caddnode.create(gten,tfornode(n).right.getcopy,tfornode(n).t1.getcopy)
++          else
++            guard:=caddnode.create(lten,tfornode(n).right.getcopy,tfornode(n).t1.getcopy);
++        end;
++      else
++        exit;
++    end;
++    if assigned(guard) then
++      node_reset_flags(guard,[],[tnf_pass1_done]);
++    result:=true;
++  end;
++
++
++function hoist_loop(hi: phoistinfo; var n: tnode; packs: boolean): boolean;
++  var
++    i, j: longint;
++    newblock: tblocknode;
++    newstat: tstatementnode;
++    temp: ttempcreatenode;
++    hp, cond, guard: tnode;
++    body: pnode;
++    found: boolean;
++  begin
++    result:=false;
++    hi^.cands.Clear;
++    if not loop_parts(n,body,guard) then
++      exit;
++    if packs then
++      foreachnodestatic(pm_postprocess,body^,@hoist_find_pack,hi)
++    else
++      foreachnodestatic(pm_postprocess,body^,@hoist_find,hi);
++    if hi^.cands.Count=0 then
++      begin
++        guard.free;
++        exit;
++      end;
++    if hi^.cands.Count=0 then
++      exit;
++    { distinct candidates }
++    for i:=0 to hi^.cands.Count-1 do
++      begin
++        found:=false;
++        for j:=0 to hi^.copies.Count-1 do
++          if tnode(hi^.copies[j]).isequal(tnode(hi^.cands[i])) then
++            found:=true;
++        if not found then
++          begin
++            hp:=tnode(hi^.cands[i]).getcopy;
++            hi^.copies.Add(hp);
++            hi^.temps.Add(ctempcreatenode.create(hp.resultdef,hp.resultdef.size,tt_persistent,true));
++          end;
++      end;
++    foreachnodestatic(pm_postprocess,body^,@hoist_replace,hi);
++    newblock:=internalstatements(newstat);
++    for i:=0 to hi^.copies.Count-1 do
++      begin
++        temp:=ttempcreatenode(hi^.temps[i]);
++        addstatement(newstat,temp);
++        hp:=cassignmentnode.create_internal(ctemprefnode.create(temp),tnode(hi^.copies[i]));
++        if assigned(guard) then
++          begin
++            cond:=guard.getcopy;
++            hp:=cifnode.create(cond,hp,nil);
++          end;
++        addstatement(newstat,hp);
++      end;
++    guard.free;
++    addstatement(newstat,n);
++    newblock.fileinfo:=n.fileinfo;
++    hi^.copies.Clear;
++    hi^.temps.Clear;
++    n:=newblock;
++    typecheckpass(n);
++    do_firstpass(n);
++    result:=true;
++  end;
++
++
++function hoist_loops(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    ctx: pslpctx absolute arg;
++    hi: thoistinfo;
++  begin
++    result:=fen_false;
++    if not (n.nodetype in [whilerepeatn,forn]) or
++       ([cs_check_overflow,cs_check_range]*current_settings.localswitches<>[]) then
++      exit;
++    hi.ctx:=ctx;
++    hi.abort:=false;
++    hi.stores:=TFPList.Create;
++    hi.written:=TFPList.Create;
++    hi.cands:=TFPList.Create;
++    hi.copies:=TFPList.Create;
++    hi.temps:=TFPList.Create;
++    try
++      foreachnodestatic(pm_postprocess,n,@hoist_scan,@hi);
++      if n.nodetype=forn then
++        hi.written.Add(tfornode(n).left);
++      if hi.abort then
++        exit;
++      if hoist_loop(@hi,n,false) then
++        begin
++          ctx^.changed:=true;
++          { n is now the block; the loop is its last statement but one: the
++            packs of the hoisted values follow in the next round }
++          result:=fen_norecurse_false;
++        end;
++    finally
++      hi.stores.Free;
++      hi.written.Free;
++      hi.cands.Free;
++      hi.copies.Free;
++      hi.temps.Free;
++    end;
++  end;
++
++
++function hoist_loops_packs(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    ctx: pslpctx absolute arg;
++    hi: thoistinfo;
++  begin
++    result:=fen_false;
++    if not (n.nodetype in [whilerepeatn,forn]) or
++       ([cs_check_overflow,cs_check_range]*current_settings.localswitches<>[]) then
++      exit;
++    hi.ctx:=ctx;
++    hi.abort:=false;
++    hi.stores:=TFPList.Create;
++    hi.written:=TFPList.Create;
++    hi.cands:=TFPList.Create;
++    hi.copies:=TFPList.Create;
++    hi.temps:=TFPList.Create;
++    try
++      foreachnodestatic(pm_postprocess,n,@hoist_scan,@hi);
++      if n.nodetype=forn then
++        hi.written.Add(tfornode(n).left);
++      if hoist_loop(@hi,n,true) then
++        begin
++          ctx^.changed:=true;
++          result:=fen_norecurse_false;
++        end;
++    finally
++      hi.stores.Free;
++      hi.written.Free;
++      hi.cands.Free;
++      hi.copies.Free;
++      hi.temps.Free;
++    end;
++  end;
++
++
++function do_hoist_invariant_loads(var code: tnode): boolean;
++  var
++    ctx: tslpctx;
++    i: longint;
++  begin
++    result:=false;
++{$ifndef x86_64}
++    exit;
++{$endif x86_64}
++    ctx.provs:=TFPList.Create;
++    ctx.changed:=false;
++    ctx.vec2def:=carraydef.getreusable_vector(s64floattype,2);
++    ctx.pvec2def:=cpointerdef.getreusable(ctx.vec2def);
++    try
++      foreachnodestatic(pm_postprocess,code,@prov_collect,@ctx);
++      { innermost loops first }
++      foreachnodestatic(pm_preprocess,code,@hoist_loops,@ctx);
++      foreachnodestatic(pm_preprocess,code,@hoist_loops_packs,@ctx);
++    finally
++      for i:=0 to ctx.provs.Count-1 do
++        begin
++          pprovinfo(ctx.provs[i])^.copies.Free;
++          dispose(pprovinfo(ctx.provs[i]));
++        end;
++      ctx.provs.Free;
++    end;
++    result:=ctx.changed;
++  end;
++
+ end.
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index e7638bdb..56afb1bf 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -1324,7 +1324,10 @@ implementation
+              end;
+ 
+            if cs_opt_slp in current_settings.optimizerswitches then
+-             do_slp_vectorize(code);
++             begin
++               do_slp_vectorize(code);
++               do_hoist_invariant_loads(code);
++             end;
+          end
+        else
+          begin
+diff --git a/tests/test/opt/tslp2.pp b/tests/test/opt/tslp2.pp
+new file mode 100644
+index 00000000..81b9f59e
+--- /dev/null
++++ b/tests/test/opt/tslp2.pp
+@@ -0,0 +1,141 @@
++{ %CPU=x86_64 }
++{ %OPT=-O4 -OoNOFASTMATH }
++{ loads through a pointer that a loop does not change go before the loop
++  (optslp, do_hoist_invariant_loads) only when no store of the loop can
++  change them, and only when the loop body runs }
++program tslp2;
++
++{$mode objfpc}
++
++type
++  TRec = record
++    x, y, z, w: double;
++  end;
++  PRec = ^TRec;
++
++var
++  errors: longint = 0;
++  a: array[0..9] of TRec;
++  gsum: double;
++
++procedure check(got, expected: double; const what: string);
++begin
++  if got <> expected then
++    begin
++      writeln(what, ': got ', got, ', expected ', expected);
++      inc(errors);
++    end;
++end;
++
++procedure init;
++var
++  i: longint;
++begin
++  for i := 0 to 9 do
++    begin
++      a[i].x := i; a[i].y := i * 2; a[i].z := i * 3; a[i].w := 1;
++    end;
++end;
++
++{ p^.x is invariant: q^.w stores cannot change it }
++function sum1(p: PRec; n: longint): double;
++var
++  q: PRec;
++  i: longint;
++begin
++  result := 0;
++  q := p;
++  for i := 1 to n do
++    begin
++      inc(q);
++      q^.w := q^.w + p^.x;
++      result := result + p^.x * q^.y;
++    end;
++end;
++
++{ the loop writes p^.x through q (q = p in the first iteration) }
++function sum2(p: PRec; n: longint): double;
++var
++  q: PRec;
++  i: longint;
++begin
++  result := 0;
++  q := p;
++  for i := 1 to n do
++    begin
++      q^.x := q^.x + 1;
++      result := result + p^.x;
++      inc(q);
++    end;
++end;
++
++{ written through the same pointer }
++function sum3(p: PRec; n: longint): double;
++var
++  i: longint;
++begin
++  result := 0;
++  for i := 1 to n do
++    begin
++      result := result + p^.y;
++      p^.y := p^.y * 2;
++    end;
++end;
++
++{ no iteration: p is nil and must not be dereferenced }
++function sum4(p: PRec; n: longint): double;
++var
++  i: longint;
++begin
++  result := 0;
++  for i := 1 to n do
++    result := result + p^.z;
++end;
++
++{ a while loop, the guard }
++function sum5(p: PRec; n: longint): double;
++var
++  i: longint;
++begin
++  result := 0;
++  i := 0;
++  while i < n do
++    begin
++      result := result + p^.z * i;
++      inc(i);
++    end;
++end;
++
++{ a global written in the loop }
++function sum6(p: PRec; n: longint): double;
++var
++  i: longint;
++begin
++  result := 0;
++  for i := 1 to n do
++    begin
++      gsum := gsum + p^.y;
++      result := result + p^.y;
++    end;
++end;
++
++begin
++  init;
++  check(sum1(@a[0], 5), 0, 'sum1 a');
++  check(sum1(@a[2], 5), 2 * (6 + 8 + 10 + 12 + 14), 'sum1 b');
++  check(a[3].w, 1 + 2, 'sum1 w');
++  init;
++  check(sum2(@a[1], 3), 6, 'sum2');
++  init;
++  check(sum3(@a[3], 4), 6 + 12 + 24 + 48, 'sum3');
++  check(sum4(nil, 0), 0, 'sum4');
++  check(sum4(@a[2], 2), 12, 'sum4 b');
++  check(sum5(nil, 0), 0, 'sum5');
++  check(sum5(@a[1], 4), 3 * 6, 'sum5 b');
++  gsum := 0;
++  check(sum6(@a[2], 3), 12, 'sum6');
++  check(gsum, 12, 'sum6 g');
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

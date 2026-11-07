@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 00:24:51 +0100
-Subject: [PATCH 24/79] Keep the write flags when a captured variable becomes a
- closure field access (#41828)
+Subject: [PATCH 024/113] Keep the write flags when a captured variable becomes
+ a closure field access (#41828)
 
 convert_captured_sym replaces a captured variable by Self.field but drops
 nf_write/nf_modify/nf_address_taken. Common subexpression elimination only

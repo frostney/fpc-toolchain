@@ -1,0 +1,221 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 00:30:59 +0000
+Subject: [PATCH 082/113] Loops keep a regvar live across the back edge only
+ when the DFA says it is live at the loop head
+
+tcgwhilerepeatnode.sync_regvars synchronised every register variable used in
+the loop at the loop start and end, so each one stayed live through the whole
+loop. A variable that every iteration writes before it reads (the loop's
+scratch values) then interfered with every call in the loop, and as x86_64
+has no callee-saved xmm registers, a floating-point scratch variable in a loop
+with a call was spilled at every use. With node DFA information (-O3 and up),
+get_used_live_regvars leaves out the loads of variables the DFA proves dead at
+the loop node; loads the DFA has not seen (nodes created later) still count.
+Only for by-value scalars: the DFA tracks values, so a parameter passed by
+reference (whose register holds the address, used by @p[i]) and partial writes
+of arrays and records keep the old synchronisation (tests/test/opt/tloopsync1.pp).
+---
+ compiler/ncgflw.pas          |  2 +-
+ compiler/ncgutil.pas         | 69 ++++++++++++++++++++++++++++-
+ tests/test/opt/tloopsync1.pp | 84 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 153 insertions(+), 2 deletions(-)
+ create mode 100644 tests/test/opt/tloopsync1.pp
+
+diff --git a/compiler/ncgflw.pas b/compiler/ncgflw.pas
+index a04d067f..586cf5d9 100644
+--- a/compiler/ncgflw.pas
++++ b/compiler/ncgflw.pas
+@@ -142,7 +142,7 @@ implementation
+ 
+                  { we have to synchronise both the regvars used in the loop }
+                  { and the ones in the while/until condition                }
+-                 get_used_regvars(self,usedregvars);
++                 get_used_live_regvars(self,usedregvars);
+                  gen_sync_regvars(current_asmdata.CurrAsmList,usedregvars);
+                end
+              else
+diff --git a/compiler/ncgutil.pas b/compiler/ncgutil.pas
+index 53898a08..9eddc76b 100644
+--- a/compiler/ncgutil.pas
++++ b/compiler/ncgutil.pas
+@@ -77,6 +77,11 @@ interface
+     procedure gen_save_used_regs(list:TAsmList);
+     procedure gen_restore_used_regs(list:TAsmList);
+ 
++    { like get_used_regvars for the loop node n, but leaves out the variables that the
++      node dfa proves dead at the loop head: they are written before they are read in
++      every iteration and not read after the loop, so their registers need not stay
++      live across the back edge }
++    procedure get_used_live_regvars(n: tnode; var rv: tusedregvars);
+     procedure get_used_regvars(n: tnode; var rv: tusedregvars);
+     { adds the regvars used in n and its children to rv.allregvars,
+       those which were already in rv.allregvars to rv.commonregvars and
+@@ -108,7 +113,7 @@ implementation
+     procinfo,paramgr,
+     dbgbase,
+     nadd,nbas,ncon,nld,nmem,nutils,
+-    tgobj,cgobj,hlcgobj,hlcgcpu
++    tgobj,cgobj,hlcgobj,hlcgcpu,optbase,cdynset
+ {$ifdef powerpc}
+     , cpupi
+ {$endif}
+@@ -1161,6 +1166,68 @@ implementation
+         foreachnodestatic(n,@do_get_used_regvars,@rv);
+       end;
+ 
++
++    type
++      tusedliveregvarsinfo = record
++        rv : pusedregvars;
++        loop : tnode;
++      end;
++      pusedliveregvarsinfo = ^tusedliveregvarsinfo;
++
++    { the dfa tracks the value of a variable: for a by-value scalar, every write
++      replaces the whole register and every use of the register is a read the
++      dfa sees. Not so for a parameter passed by reference (the register holds
++      the address, which @p[i] uses without reading the value) or for an array
++      or record (a write of one element or field is a dfa definition, but
++      changes only part of the register) }
++    function dfa_life_is_register_life(sym: tsym): boolean;
++      var
++        vs: tabstractnormalvarsym;
++      begin
++        result:=false;
++        if not(sym.typ in [localvarsym,paravarsym]) then
++          exit;
++        vs:=tabstractnormalvarsym(sym);
++        if (vs.typ=paravarsym) and
++           paramanager.push_addr_param(vs.varspez,vs.vardef,current_procinfo.procdef.proccalloption) then
++          exit;
++        result:=(vs.vardef.typ in [orddef,floatdef,pointerdef,enumdef,classrefdef]) or
++          is_implicit_pointer_object_type(vs.vardef);
++      end;
++
++
++    function do_get_used_live_regvars(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        info: pusedliveregvarsinfo absolute arg;
++      begin
++        { a load the dfa has seen (n.optinfo is not copied with the node) of a
++          variable that is not live at the loop head }
++        if (n.nodetype=loadn) and
++           assigned(n.optinfo) and
++           dfa_life_is_register_life(tloadnode(n).symtableentry) and
++           not(DynSetIn(info^.loop.optinfo^.life,n.optinfo^.index)) then
++          result:=fen_true
++        else
++          result:=do_get_used_regvars(n,info^.rv);
++      end;
++
++
++    procedure get_used_live_regvars(n: tnode; var rv: tusedregvars);
++      var
++        info: tusedliveregvarsinfo;
++      begin
++        if (pi_dfaavailable in current_procinfo.flags) and
++           assigned(n.optinfo) and
++           assigned(n.optinfo^.life) then
++          begin
++            info.rv:=@rv;
++            info.loop:=n;
++            foreachnodestatic(n,@do_get_used_live_regvars,@info);
++          end
++        else
++          get_used_regvars(n,rv);
++      end;
++
+ (*
+     See comments at declaration of pusedregvarscommon
+ 
+diff --git a/tests/test/opt/tloopsync1.pp b/tests/test/opt/tloopsync1.pp
+new file mode 100644
+index 00000000..11b55e79
+--- /dev/null
++++ b/tests/test/opt/tloopsync1.pp
+@@ -0,0 +1,84 @@
++{ %OPT=-O3 }
++{ loops keep a register variable live across the back edge when the node dfa
++  says it is live at the loop head; a parameter passed by reference (its
++  register holds the address) and partial writes of small arrays and records
++  must stay live although the dfa does not see a use of the value }
++program tloopsync1;
++
++{$mode objfpc}
++
++type
++  tarr = array[0..15] of longint;
++  tptrarr = array[0..15] of plongint;
++  tsmall = array[0..3] of byte;
++  tone = record
++    v: longint;
++  end;
++
++var
++  errors: longint = 0;
++
++procedure initptrarr(const arr: tarr; var ptrarr: tptrarr; n: longint);
++var
++  i: longint;
++begin
++  for i := 0 to n - 1 do
++    ptrarr[i] := @arr[i];
++end;
++
++function smallarr(n: longint): longint;
++var
++  a: tsmall;
++  i: longint;
++begin
++  a[0] := 1; a[1] := 2; a[2] := 3; a[3] := 4;
++  result := 0;
++  for i := 1 to n do
++    begin
++      a[i and 1] := byte(i);
++      result := result + a[2] + a[3] * 10 + a[0];
++    end;
++end;
++
++function onefield(n: longint): longint;
++var
++  r: tone;
++  i: longint;
++begin
++  r.v := 7;
++  result := 0;
++  for i := 1 to n do
++    begin
++      result := result + r.v;
++      r.v := i;
++    end;
++end;
++
++var
++  arr: tarr;
++  ptrarr: tptrarr;
++  i: longint;
++begin
++  for i := 0 to 15 do
++    arr[i] := i * 3;
++  initptrarr(arr, ptrarr, 16);
++  for i := 0 to 15 do
++    if ptrarr[i] <> @arr[i] then
++      begin
++        writeln('initptrarr: element ', i);
++        inc(errors);
++      end;
++  if smallarr(10) <> 481 then
++    begin
++      writeln('smallarr: got ', smallarr(10));
++      inc(errors);
++    end;
++  if onefield(5) <> 7 + 1 + 2 + 3 + 4 then
++    begin
++      writeln('onefield: got ', onefield(5));
++      inc(errors);
++    end;
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

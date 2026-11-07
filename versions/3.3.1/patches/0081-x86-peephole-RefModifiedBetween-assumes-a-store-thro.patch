@@ -1,0 +1,166 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 01:08:52 +0000
+Subject: [PATCH 081/113] x86 peephole: RefModifiedBetween assumes a store
+ through another register may alias
+
+RefModifiedBetween only counted a store as a modification of Ref when its
+reference differed from Ref in nothing but the offset (RefsAlmostEqual), so a
+store through another base register was assumed not to alias, and calls and
+string stores, whose memory writes are implicit, were not seen at all.
+MovOp2Op then folded "mov (%r12,%r13,8),%r14; lea (%r12,%r13,8),%rdx;
+mov %rax,(%rdx); mov %r14,%rcx" into a load after the store: TArrayHelper's
+HeapSort passed the new element instead of the old one (rtl-generics
+tqsort_killer). Only references that differ in the offset alone (with the
+ranges checked) or that are distinct symbols without registers are disjoint
+now; calls, string stores and stack operations modify memory.
+tests/test/opt/tpeepalias1.pp.
+---
+ compiler/x86/aoptx86.pas      | 65 ++++++++++++++++++++++++++---------
+ tests/test/opt/tpeepalias1.pp | 50 +++++++++++++++++++++++++++
+ 2 files changed, 98 insertions(+), 17 deletions(-)
+ create mode 100644 tests/test/opt/tpeepalias1.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 7c1df475..7c9c2c56 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -1366,6 +1366,39 @@ unit aoptx86;
+            [Ch_RWOP2,Ch_WOP2,Ch_MOP2],
+            [Ch_RWOP3,Ch_WOP3,Ch_MOP3],
+            [Ch_RWOP4,Ch_WOP4,Ch_MOP4]);
++
++      { can a write of WriteSize bytes at w change any of the RefSize bytes at
++        Ref? A size of 0 means unknown. Only references that differ in nothing
++        but the offset, or that are distinct symbols without base and index
++        registers, are known to be disjoint: a store through another register
++        can hit any address (e.g. "lea (%r12,%r13,8),%rdx; mov %rax,(%rdx)"
++        writes (%r12,%r13,8)) }
++      function MayOverlap(const w: treference; WriteSize: ASizeInt): Boolean;
++        begin
++          if (w.volatility<>[]) or (Ref.volatility<>[]) then
++            exit(True);
++          if (w.base=Ref.base) and (w.index=Ref.index) and
++             ((w.index=NR_NO) or (w.scalefactor=Ref.scalefactor)) and
++             (w.symbol=Ref.symbol) and (w.relsymbol=Ref.relsymbol) and
++             (w.segment=Ref.segment) and (w.refaddr=Ref.refaddr) then
++            begin
++              if (RefSize=0) or (WriteSize=0) then
++                exit(True);
++              { [w.offset, w.offset+WriteSize) and [Ref.offset, Ref.offset+RefSize) }
++              exit((w.offset < Ref.offset + RefSize) and (Ref.offset < w.offset + WriteSize));
++            end;
++          if (w.base=NR_NO) and (w.index=NR_NO) and (Ref.base=NR_NO) and (Ref.index=NR_NO) and
++             assigned(w.symbol) and assigned(Ref.symbol) and (w.symbol<>Ref.symbol) and
++             (w.relsymbol=Ref.relsymbol) and (w.segment=Ref.segment) then
++            exit(False);
++{$ifdef x86_64}
++          if (w.base=NR_RIP) and (Ref.base=NR_RIP) and (w.index=NR_NO) and (Ref.index=NR_NO) and
++             assigned(w.symbol) and assigned(Ref.symbol) and (w.symbol<>Ref.symbol) then
++            exit(False);
++{$endif x86_64}
++          Result:=True;
++        end;
++
+       var
+         X: Integer;
+         CurrentP1Size: asizeint;
+@@ -1391,27 +1424,25 @@ unit aoptx86;
+                 begin
+                   CurrentP1Size := topsize2memsize[taicpu(p1).opsize] shr 3; { Convert to bytes }
+                   with insprop[taicpu(p1).opcode] do
+-                    for X := 0 to taicpu(p1).ops - 1 do
+-                      if (taicpu(p1).oper[X]^.typ = top_ref) and
+-                        RefsAlmostEqual(Ref, taicpu(p1).oper[X]^.ref^) and
+-                        { Catch any potential overlaps }
+-                        (
+-                          (RefSize = 0) or
+-                          ((taicpu(p1).oper[X]^.ref^.offset - Ref.offset) < RefSize)
+-                        ) and
+-                        (
+-                          (CurrentP1Size = 0) or
+-                          ((Ref.offset - taicpu(p1).oper[X]^.ref^.offset) < CurrentP1Size)
+-                        ) and
+-                        { Reference is used, but does the instruction write to it? }
+-                        (
+-                          (Ch_All in Ch) or
+-                          ((WriteOps[X] * Ch) <> [])
+-                        ) then
++                    begin
++                      { calls and the like, string stores, push/pop/enter/leave
++                        (stack writes): assume the memory changed }
++                      if ([Ch_All,Ch_WMemEDI,Ch_RWESP,Ch_WESP,Ch_MESP]*Ch)<>[] then
+                         begin
+                           Result := True;
+                           Break;
+                         end;
++                      for X := 0 to taicpu(p1).ops - 1 do
++                        if (taicpu(p1).oper[X]^.typ = top_ref) and
++                          ((WriteOps[X] * Ch) <> []) and
++                          MayOverlap(taicpu(p1).oper[X]^.ref^, CurrentP1Size) then
++                          begin
++                            Result := True;
++                            Break;
++                          end;
++                      if Result then
++                        Break;
++                    end;
+                 end;
+           end;
+       end;
+diff --git a/tests/test/opt/tpeepalias1.pp b/tests/test/opt/tpeepalias1.pp
+new file mode 100644
+index 00000000..30e04f58
+--- /dev/null
++++ b/tests/test/opt/tpeepalias1.pp
+@@ -0,0 +1,50 @@
++{ %OPT=-O3 }
++{ x86 peephole optimizer (MovOp2Op via RefModifiedBetween): the load of
++  (p+i)^ into temp must not be folded into the later use when a store
++  through another register, here to the same address, comes in between }
++program tpeepalias1;
++
++{$mode objfpc}
++
++var
++  seen: array[0..15] of int64;
++
++procedure consume(p: pint64; n, id: sizeint; const item: int64; ctx: pointer); noinline;
++begin
++  if ctx <> nil then
++    seen[n] := item;
++end;
++
++procedure rotate(p: pint64; n: sizeint; ctx: pointer);
++var
++  temp: int64;
++  i: sizeint;
++begin
++  for i := sizeint(n - 2) div 2 downto 0 do
++    begin
++      temp := (p + i)^;
++      consume(p, n, i, temp, ctx);
++    end;
++  for i := n - 1 downto 1 do
++    begin
++      temp := (p + i)^;
++      (p + i)^ := p^;
++      consume(p, i, 0, temp, ctx);
++    end;
++end;
++
++var
++  a: array[0..15] of int64;
++  i: longint;
++begin
++  for i := 0 to 15 do
++    a[i] := 100 + i;
++  rotate(@a[0], 16, @a);
++  for i := 1 to 15 do
++    if seen[i] <> 100 + i then
++      begin
++        writeln('element ', i, ': got ', seen[i], ', expected ', 100 + i);
++        halt(1);
++      end;
++  writeln('ok');
++end.

@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 01:27:37 +0000
+Subject: [PATCH 087/113] x86_64: dense case statements with more than 4 labels
+ use a jump table
+
+tx8664casenode.optimizevalues raised max_linear_list by 9, so a case with up
+to 11 labels became a chain of up to 11 sub/je pairs, which a bytecode
+dispatch loop runs for every instruction. Raise it by 2 (linear up to 4
+labels, 6 when the range check can be omitted), close to what C compilers
+do.
+---
+ compiler/x86_64/nx64set.pas | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/x86_64/nx64set.pas b/compiler/x86_64/nx64set.pas
+index 65f469d8..69e850bf 100644
+--- a/compiler/x86_64/nx64set.pas
++++ b/compiler/x86_64/nx64set.pas
+@@ -55,7 +55,11 @@ implementation
+ 
+     procedure tx8664casenode.optimizevalues(var max_linear_list:int64;var max_dist:qword);
+       begin
+-        inc(max_linear_list,9);
++        { a linear list of up to 4 (6 without range check) labels; above that a
++          dense case is a jump table, as with C compilers: the list costs one
++          compare and branch per label before the matching one, which adds up in
++          a dispatch loop (11 labels were allowed before) }
++        inc(max_linear_list,2);
+       end;
+ 
+ 

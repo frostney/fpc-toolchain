@@ -1,0 +1,650 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 15:40:36 +0000
+Subject: [PATCH 108/113] Signed div/mod by powers of 2 of a non-negative
+ dividend become shr/and
+
+A signed x div 2^k needs a correction for negative x before the shift (and
+x mod 2^k one before the mask). optrange computes the range of the dividend
+from constants, the storage range of types, for loop counters (in the body
+of "for c := s to e", c lies between the smallest s and the largest e) and
+temps (the union of what is assigned to them, each in the context of its
+loops), through additions, subtractions and multiplications that cannot
+overflow; with a non-negative dividend the division is a shr, the modulo an
+and. Runs before the for loops become while loops.
+spectralnorm: (i+j)*(i+j+1) div 2 in eval_A (inner loop 19 -> 16
+instructions); tests/test/opt/tnonnegdiv1.pp.
+---
+ compiler/optrange.pas         | 487 ++++++++++++++++++++++++++++++++++
+ compiler/psub.pas             |   7 +-
+ tests/test/opt/tnonnegdiv1.pp |  95 +++++++
+ 3 files changed, 588 insertions(+), 1 deletion(-)
+ create mode 100644 compiler/optrange.pas
+ create mode 100644 tests/test/opt/tnonnegdiv1.pp
+
+diff --git a/compiler/optrange.pas b/compiler/optrange.pas
+new file mode 100644
+index 00000000..31050371
+--- /dev/null
++++ b/compiler/optrange.pas
+@@ -0,0 +1,487 @@
++{
++    Copyright (c) 2026 by the fpc-toolchain contributors
++
++    Value ranges of integer expressions for signed division by powers of 2
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program; if not, write to the Free Software
++    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++
++ ****************************************************************************
++}
++unit optrange;
++
++{ A signed "x div 2^k" needs a correction for negative x before the shift,
++  "x mod 2^k" one before the mask. When x is known to be non-negative, they
++  are "x shr k" and "x and (2^k-1)".
++
++  The range of an integer expression is computed from constants, the storage
++  range of a variable's type, and the counters of for loops: inside the body
++  of "for c := s to e", c lies between the smallest s and the largest e (the
++  body cannot change c). Temps (inline parameters, common subexpressions)
++  get the union of the ranges of the values assigned to them, each in the
++  context of the loops around its assignment. Additions, subtractions and
++  multiplications are followed as long as they cannot overflow.
++
++  Runs before the for loops become while loops (ConvertForLoops). }
++
++{$i fpcdefs.inc}
++
++interface
++
++uses
++  node;
++
++function optimize_nonneg_divmod(var code: tnode): boolean;
++
++implementation
++
++uses
++  cclasses,
++  globtype,constexp,
++  symconst,symdef,symsym,symtype,
++  defutil,defcmp,
++  nutils,nbas,nld,ncon,nflw,nmat,nadd,ncnv,nmem,
++  pass_1;
++
++type
++  trange = record
++    lo, hi: int64;
++    known: boolean;
++  end;
++
++  ptempwrite = ^ttempwrite;
++  ttempwrite = record
++    rhs: tnode;
++    loops: TFPList;   { the for loops around the assignment (owned) }
++  end;
++
++  ptempinfo2 = ^ttempinfo2;
++  ttempinfo2 = record
++    tempinfo: ptempinfo;
++    writes: TFPList;  { ptempwrite }
++    other: boolean;   { written in another way: range unknown }
++    busy: boolean;    { recursion guard }
++  end;
++
++  trangectx = record
++    temps: TFPList;   { ptempinfo2 }
++    loops: TFPList;   { current loop stack while walking }
++    changed: boolean;
++  end;
++  prangectx = ^trangectx;
++
++
++function unknown: trange;
++  begin
++    result.known:=false;
++    result.lo:=0;
++    result.hi:=0;
++  end;
++
++
++function mkrange(lo, hi: int64): trange;
++  begin
++    result.known:=true;
++    result.lo:=lo;
++    result.hi:=hi;
++  end;
++
++
++{ the values a variable or expression of def can hold in its storage }
++function storagerange(def: tdef): trange;
++  begin
++    result:=unknown;
++    if not assigned(def) or not is_integer(def) then
++      exit;
++    case def.size of
++      1:
++        if is_signed(def) then result:=mkrange(-128,127) else result:=mkrange(0,255);
++      2:
++        if is_signed(def) then result:=mkrange(-32768,32767) else result:=mkrange(0,65535);
++      4:
++        if is_signed(def) then result:=mkrange(-2147483648,2147483647) else result:=mkrange(0,4294967295);
++      8:
++        if is_signed(def) then result:=mkrange(low(int64),high(int64));
++    end;
++  end;
++
++
++function within(const r, outer: trange): boolean;
++  begin
++    result:=r.known and outer.known and (r.lo>=outer.lo) and (r.hi<=outer.hi);
++  end;
++
++
++function union(const a, b: trange): trange;
++  begin
++    if not a.known or not b.known then
++      exit(unknown);
++    result:=mkrange(a.lo,a.hi);
++    if b.lo<result.lo then result.lo:=b.lo;
++    if b.hi>result.hi then result.hi:=b.hi;
++  end;
++
++
++{ a+b, a-b, a*b without overflow of int64 }
++function add_ok(a, b: int64; out r: int64): boolean;
++  begin
++    result:=not(((b>0) and (a>high(int64)-b)) or ((b<0) and (a<low(int64)-b)));
++    if result then
++      r:=a+b;
++  end;
++
++
++function mul_ok(a, b: int64; out r: int64): boolean;
++  begin
++    result:=false;
++    r:=0;
++    if (a=0) or (b=0) then
++      exit(true);
++    { stay well inside int64 }
++    if (abs(a)>3037000499) or (abs(b)>3037000499) then
++      exit;
++    r:=a*b;
++    result:=true;
++  end;
++
++
++function tempidx(ctx: prangectx; ti: ptempinfo; create: boolean): ptempinfo2;
++  var
++    i: longint;
++  begin
++    for i:=0 to ctx^.temps.Count-1 do
++      if ptempinfo2(ctx^.temps[i])^.tempinfo=ti then
++        exit(ptempinfo2(ctx^.temps[i]));
++    result:=nil;
++    if not create then
++      exit;
++    new(result);
++    result^.tempinfo:=ti;
++    result^.writes:=TFPList.Create;
++    result^.other:=false;
++    result^.busy:=false;
++    ctx^.temps.Add(result);
++  end;
++
++
++function range_of(ctx: prangectx; n: tnode; loops: TFPList): trange; forward;
++
++
++{ the range of the counter of loop number idx of loops, in the body }
++function counter_range(ctx: prangectx; loops: TFPList; idx: longint): trange;
++  var
++    outer: TFPList;
++    i: longint;
++    loop: tfornode;
++    s, e: trange;
++  begin
++    loop:=tfornode(loops[idx]);
++    outer:=TFPList.Create;
++    try
++      for i:=0 to idx-1 do
++        outer.Add(loops[i]);
++      s:=range_of(ctx,loop.right,outer);
++      e:=range_of(ctx,loop.t1,outer);
++    finally
++      outer.Free;
++    end;
++    if not s.known or not e.known then
++      exit(storagerange(loop.left.resultdef));
++    if lnf_backward in loop.loopflags then
++      result:=mkrange(e.lo,s.hi)
++    else
++      result:=mkrange(s.lo,e.hi);
++  end;
++
++
++function range_of(ctx: prangectx; n: tnode; loops: TFPList): trange;
++  var
++    a, b, st: trange;
++    i: longint;
++    t: ptempinfo2;
++    w: ptempwrite;
++    c: array[0..3] of int64;
++  begin
++    result:=unknown;
++    if not assigned(n) or not assigned(n.resultdef) or not is_integer(n.resultdef) then
++      exit;
++    st:=storagerange(n.resultdef);
++    case n.nodetype of
++      ordconstn:
++        if tordconstnode(n).value.signed or (tordconstnode(n).value.uvalue<=qword(high(int64))) then
++          exit(mkrange(tordconstnode(n).value.svalue,tordconstnode(n).value.svalue));
++      loadn,temprefn:
++        begin
++          { a for counter in the body of its loop }
++          for i:=loops.Count-1 downto 0 do
++            if n.isequal(tfornode(loops[i]).left) then
++              begin
++                result:=counter_range(ctx,loops,i);
++                if not within(result,storagerange(tfornode(loops[i]).left.resultdef)) then
++                  result:=storagerange(tfornode(loops[i]).left.resultdef);
++                exit;
++              end;
++          if n.nodetype=temprefn then
++            begin
++              t:=tempidx(ctx,ttemprefnode(n).tempinfo,false);
++              if assigned(t) and not t^.other and not t^.busy and (t^.writes.Count>0) then
++                begin
++                  t^.busy:=true;
++                  result:=mkrange(high(int64),low(int64));
++                  for i:=0 to t^.writes.Count-1 do
++                    begin
++                      w:=ptempwrite(t^.writes[i]);
++                      a:=range_of(ctx,w^.rhs,w^.loops);
++                      if not within(a,st) then
++                        a:=st;
++                      if not a.known then
++                        begin
++                          result:=unknown;
++                          break;
++                        end;
++                      if a.lo<result.lo then result.lo:=a.lo;
++                      if a.hi>result.hi then result.hi:=a.hi;
++                    end;
++                  t^.busy:=false;
++                  if result.known then
++                    exit;
++                end;
++            end;
++          exit(st);
++        end;
++      typeconvn:
++        if ttypeconvnode(n).convtype in [tc_int_2_int,tc_equal] then
++          begin
++            a:=range_of(ctx,ttypeconvnode(n).left,loops);
++            if within(a,st) then
++              exit(a);
++          end;
++      addn,subn,muln:
++        begin
++          a:=range_of(ctx,taddnode(n).left,loops);
++          b:=range_of(ctx,taddnode(n).right,loops);
++          if a.known and b.known then
++            begin
++              case n.nodetype of
++                addn:
++                  if add_ok(a.lo,b.lo,c[0]) and add_ok(a.hi,b.hi,c[1]) then
++                    result:=mkrange(c[0],c[1]);
++                subn:
++                  if add_ok(a.lo,-b.hi,c[0]) and add_ok(a.hi,-b.lo,c[1]) and
++                     (b.hi<>low(int64)) and (b.lo<>low(int64)) then
++                    result:=mkrange(c[0],c[1]);
++                muln:
++                  if mul_ok(a.lo,b.lo,c[0]) and mul_ok(a.lo,b.hi,c[1]) and
++                     mul_ok(a.hi,b.lo,c[2]) and mul_ok(a.hi,b.hi,c[3]) then
++                    begin
++                      result:=mkrange(c[0],c[0]);
++                      for i:=1 to 3 do
++                        begin
++                          if c[i]<result.lo then result.lo:=c[i];
++                          if c[i]>result.hi then result.hi:=c[i];
++                        end;
++                    end;
++                else
++                  ;
++              end;
++              { the operation is done in the size of the result }
++              if result.known and not within(result,st) then
++                result:=unknown;
++              if result.known then
++                exit;
++            end;
++        end;
++      else
++        ;
++    end;
++    result:=st;
++  end;
++
++
++function copy_loops(l: TFPList): TFPList;
++  var
++    i: longint;
++  begin
++    result:=TFPList.Create;
++    for i:=0 to l.Count-1 do
++      result.Add(l[i]);
++  end;
++
++
++procedure collect(ctx: prangectx; n: tnode); forward;
++
++
++function collect_cb(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    ctx: prangectx absolute arg;
++    t: ptempinfo2;
++    w: ptempwrite;
++  begin
++    result:=fen_false;
++    case n.nodetype of
++      forn:
++        begin
++          collect(ctx,tfornode(n).left);
++          collect(ctx,tfornode(n).right);
++          collect(ctx,tfornode(n).t1);
++          ctx^.loops.Add(n);
++          collect(ctx,tfornode(n).t2);
++          ctx^.loops.Delete(ctx^.loops.Count-1);
++          result:=fen_norecurse_false;
++        end;
++      assignn:
++        if tassignmentnode(n).left.nodetype=temprefn then
++          begin
++            t:=tempidx(ctx,ttemprefnode(tassignmentnode(n).left).tempinfo,true);
++            new(w);
++            w^.rhs:=tassignmentnode(n).right;
++            w^.loops:=copy_loops(ctx^.loops);
++            t^.writes.Add(w);
++            collect(ctx,tassignmentnode(n).right);
++            result:=fen_norecurse_false;
++          end;
++      tempcreaten:
++        if assigned(ttempcreatenode(n).tempinfo^.tempinitcode) then
++          tempidx(ctx,ttempcreatenode(n).tempinfo,true)^.other:=true;
++      temprefn:
++        { any other write (var parameter, inc/dec, address) }
++        if ((n.flags*[nf_write,nf_modify])<>[]) then
++          tempidx(ctx,ttemprefnode(n).tempinfo,true)^.other:=true;
++      addrn:
++        if taddrnode(n).left.nodetype=temprefn then
++          tempidx(ctx,ttemprefnode(taddrnode(n).left).tempinfo,true)^.other:=true;
++      else
++        ;
++    end;
++  end;
++
++
++procedure collect(ctx: prangectx; n: tnode);
++  begin
++    if assigned(n) then
++      foreachnodestatic(pm_postprocess,n,@collect_cb,ctx);
++  end;
++
++
++procedure transform(ctx: prangectx; var n: tnode); forward;
++
++
++{ k with c=2^k, c>1 }
++function power2const(n: tnode; out k: longint): boolean;
++  var
++    v: int64;
++  begin
++    result:=false;
++    k:=0;
++    if (n.nodetype<>ordconstn) or not tordconstnode(n).value.signed and (tordconstnode(n).value.uvalue>qword(high(int64))) then
++      exit;
++    v:=tordconstnode(n).value.svalue;
++    if v<2 then
++      exit;
++    while (v and 1)=0 do
++      begin
++        v:=v shr 1;
++        inc(k);
++      end;
++    result:=(v=1) and (k<63);
++  end;
++
++
++function transform_cb(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    ctx: prangectx absolute arg;
++    k: longint;
++    r: trange;
++    hp: tnode;
++  begin
++    result:=fen_false;
++    case n.nodetype of
++      forn:
++        begin
++          transform(ctx,tfornode(n).right);
++          transform(ctx,tfornode(n).t1);
++          ctx^.loops.Add(n);
++          transform(ctx,tfornode(n).t2);
++          ctx^.loops.Delete(ctx^.loops.Count-1);
++          result:=fen_norecurse_false;
++        end;
++      divn,modn:
++        if assigned(n.resultdef) and is_integer(n.resultdef) and is_signed(n.resultdef) and
++           power2const(tbinarynode(n).right,k) then
++          begin
++            { the operands first }
++            transform(ctx,tbinarynode(n).left);
++            r:=range_of(ctx,tbinarynode(n).left,ctx^.loops);
++            if r.known and (r.lo>=0) then
++              begin
++                if n.nodetype=divn then
++                  hp:=cshlshrnode.create(shrn,tbinarynode(n).left,cordconstnode.create(k,s32inttype,false))
++                else
++                  hp:=caddnode.create(andn,tbinarynode(n).left,
++                    cordconstnode.create((int64(1) shl k)-1,n.resultdef,false));
++                hp:=ctypeconvnode.create_internal(hp,n.resultdef);
++                hp.fileinfo:=n.fileinfo;
++                tbinarynode(n).left:=nil;
++                n.free;
++                n:=hp;
++                do_firstpass(n);
++                ctx^.changed:=true;
++              end;
++            result:=fen_norecurse_false;
++          end;
++      else
++        ;
++    end;
++  end;
++
++
++procedure transform(ctx: prangectx; var n: tnode);
++  begin
++    if assigned(n) then
++      foreachnodestatic(pm_postprocess,n,@transform_cb,ctx);
++  end;
++
++
++function optimize_nonneg_divmod(var code: tnode): boolean;
++  var
++    ctx: trangectx;
++    i, j: longint;
++    t: ptempinfo2;
++  begin
++    ctx.temps:=TFPList.Create;
++    ctx.loops:=TFPList.Create;
++    ctx.changed:=false;
++    try
++      collect(@ctx,code);
++      ctx.loops.Clear;
++      transform(@ctx,code);
++    finally
++      for i:=0 to ctx.temps.Count-1 do
++        begin
++          t:=ptempinfo2(ctx.temps[i]);
++          for j:=0 to t^.writes.Count-1 do
++            begin
++              ptempwrite(t^.writes[j])^.loops.Free;
++              dispose(ptempwrite(t^.writes[j]));
++            end;
++          t^.writes.Free;
++          dispose(t);
++        end;
++      ctx.temps.Free;
++      ctx.loops.Free;
++    end;
++    result:=ctx.changed;
++  end;
++
++end.
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index 15841569..215264bc 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -144,7 +144,7 @@ implementation
+        fmodule,
+        { pass 1 }
+        ngenutil,nld,ncal,ncon,nflw,nadd,ncnv,nmem,
+-       optexcregvar,optbitcast,
++       optexcregvar,optbitcast,optrange,
+        pass_1,
+     {$ifdef state_tracking}
+        nstate,
+@@ -1266,6 +1266,9 @@ implementation
+            if cs_opt_forloop in current_settings.optimizerswitches then
+              RedoDFA:=OptimizeForLoop(code);
+ 
++           if cs_opt_level2 in current_settings.optimizerswitches then
++             RedoDFA:=optimize_nonneg_divmod(code) or RedoDFA;
++
+            RedoDFA:=ConvertForLoops(code) or RedoDFA;
+ 
+            if cs_opt_forloop in current_settings.optimizerswitches then
+@@ -1322,6 +1325,8 @@ implementation
+          end
+        else
+          begin
++           if cs_opt_level2 in current_settings.optimizerswitches then
++             optimize_nonneg_divmod(code);
+            ConvertForLoops(code);
+            if cs_opt_forloop in current_settings.optimizerswitches then
+              optimize_record_writes(code);
+diff --git a/tests/test/opt/tnonnegdiv1.pp b/tests/test/opt/tnonnegdiv1.pp
+new file mode 100644
+index 00000000..84f10675
+--- /dev/null
++++ b/tests/test/opt/tnonnegdiv1.pp
+@@ -0,0 +1,95 @@
++{ %OPT=-O3 }
++{ signed div/mod by powers of 2 become shr/and when the dividend is known to
++  be non-negative (for loop counters, constants, type ranges, temps); every
++  result is compared with the same operation on an opaque value }
++program tnonnegdiv1;
++
++{$mode objfpc}
++
++var
++  errors: longint = 0;
++
++procedure check(got, expected: int64; const what: string);
++begin
++  if got <> expected then
++    begin
++      writeln(what, ': got ', got, ', expected ', expected);
++      inc(errors);
++    end;
++end;
++
++function opaque(x: int64): int64; noinline;
++begin
++  opaque := x;
++end;
++
++function a(i, j: smallint): int64; inline;
++begin
++  a := (i + j) * (i + j + 1) div 2 + i + 1;
++end;
++
++procedure counters(lo, hi: smallint);
++var
++  i, j: smallint;
++  x: int64;
++begin
++  for i := lo to hi do
++    for j := 0 to 5 do
++      begin
++        x := a(i, j);
++        check(x, (opaque(i + j) * opaque(i + j + 1)) div 2 + i + 1, 'a');
++        check((i + j) div 4, opaque(i + j) div 4, 'div4');
++        check((i + j) mod 8, opaque(i + j) mod 8, 'mod8');
++        check((i * j) div 2, opaque(i * j) div 2, 'mul div2');
++      end;
++end;
++
++procedure downto_(hi: longint);
++var
++  i: longint;
++begin
++  for i := hi downto 0 do
++    check((i - 3) div 2, opaque(i - 3) div 2, 'downto');
++  for i := hi downto -5 do
++    check(i div 2, opaque(i) div 2, 'downto neg');
++end;
++
++procedure types_(b: byte; w: word; s: shortint);
++var
++  i: longint;
++begin
++  check(b div 4, opaque(b) div 4, 'byte');
++  check((w * w) div 8, opaque(w * w) div 8, 'word sq');
++  check(s div 2, opaque(s) div 2, 'shortint');
++  check((b - 200) div 2, opaque(b - 200) div 2, 'byte sub');
++  for i := 0 to 3 do
++    check(longint(i * 1000000000 * 3) div 2, opaque(longint(i * 1000000000 * 3)) div 2, 'narrowed');
++end;
++
++procedure big;
++var
++  i: longint;
++  x: int64;
++begin
++  for i := 2147483600 to 2147483647 do
++    begin
++      x := int64(i) * i;
++      check(x div 2, opaque(x) div 2, 'big');
++      check((int64(i) * i * 4) div 2, opaque(int64(i) * i * 4) div 2, 'overflow');
++    end;
++end;
++
++var
++  b: byte;
++begin
++  counters(0, 30);
++  counters(-20, 5);
++  counters(32760, 32767);
++  downto_(10);
++  for b := 0 to 255 do
++    types_(b, b * 257, shortint(b));
++  big;
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.
