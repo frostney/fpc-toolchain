@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 02:14:02 +0100
-Subject: [PATCH 032/115] x86 MovxOp2Op: do not let a narrowed AND write the
+Subject: [PATCH 032/116] x86 MovxOp2Op: do not let a narrowed AND write the
  movx source; keep the sign of the result and flags
 
 ---

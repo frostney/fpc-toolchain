@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 15:05:51 +0000
-Subject: [PATCH 105/115] x86: allocate the flags for floating-point compares
+Subject: [PATCH 105/116] x86: allocate the flags for floating-point compares
 
 second_cmpfloatvector ((v)comiss/(v)comisd) and the x87 compare
 (fcomip, fnstsw/sahf) did not allocate NR_DEFAULTFLAGS, so the peephole

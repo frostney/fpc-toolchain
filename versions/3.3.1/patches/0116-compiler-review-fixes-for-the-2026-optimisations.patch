@@ -1,0 +1,1017 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 18:33:44 +0000
+Subject: [PATCH 116/116] compiler: review fixes for the 2026 optimisations
+
+Restrict SLP pointer provenance to locals whose pointee is provably the
+same object, hoist only unconditionally evaluated loads, keep the negated
+loop guard, drop the exception-safe regvar pass on SEH and psabieh
+targets, and gate the new node and peephole optimisations to x86_64,
+the only target they were validated on.
+---
+ compiler/ncal.pas         |   8 +-
+ compiler/ncgflw.pas       |  16 +--
+ compiler/ncgutil.pas      |   3 +
+ compiler/optbitcast.pas   |   3 +
+ compiler/optexcregvar.pas |  25 ++--
+ compiler/optloop.pas      |   3 +
+ compiler/optrange.pas     |  26 ++--
+ compiler/optslp.pas       | 281 ++++++++++++++++++++++----------------
+ compiler/psub.pas         |   7 +
+ compiler/x86/aoptx86.pas  |  15 ++
+ compiler/x86/nx86add.pas  |   3 +
+ compiler/x86/nx86mat.pas  |   4 +
+ tests/test/opt/tslp1.pp   |  53 +++++++
+ tests/test/opt/tslp2.pp   |  56 ++++++++
+ 14 files changed, 347 insertions(+), 156 deletions(-)
+
+diff --git a/compiler/ncal.pas b/compiler/ncal.pas
+index ae0f828b..88a2192d 100644
+--- a/compiler/ncal.pas
++++ b/compiler/ncal.pas
+@@ -5371,11 +5371,17 @@ implementation
+       A routine with an exception frame keeps them in memory. }
+     function tcallnode.inline_temp_may_be_in_reg(sym: tabstractvarsym; refpara: boolean): boolean;
+       begin
+-        if (procdefinition.typ=procdef) and
++        { validated only with the setjmp based exception handling of x86_64,
++          see optexcregvar }
++{$ifdef x86_64}
++        if (target_info.system<>system_x86_64_win64) and
++           not(tf_use_psabieh in target_info.flags) and
++           (procdefinition.typ=procdef) and
+            tprocdef(procdefinition).has_inlininginfo and
+            not(pi_uses_exceptions in tprocdef(procdefinition).inlininginfo^.flags) then
+           result:=sym.is_regvar_for_inline(refpara)
+         else
++{$endif x86_64}
+           result:=sym.is_regvar(refpara);
+       end;
+ 
+diff --git a/compiler/ncgflw.pas b/compiler/ncgflw.pas
+index 05ebe4d7..1d72e3aa 100644
+--- a/compiler/ncgflw.pas
++++ b/compiler/ncgflw.pas
+@@ -258,21 +258,7 @@ implementation
+ {$else x86_64}
+         exit;
+ {$endif x86_64}
+-        last:=n;
+-        repeat
+-          case last.nodetype of
+-            blockn:
+-              last:=tblocknode(last).left;
+-            statementn:
+-              begin
+-                while assigned(tstatementnode(last).right) do
+-                  last:=tstatementnode(last).right;
+-                last:=tstatementnode(last).left;
+-              end;
+-            else
+-              break;
+-          end;
+-        until not assigned(last);
++        last:=GetLastStatement(n);
+         if not assigned(last) or
+            (last.nodetype<>calln) or
+            not(cnf_call_never_returns in tcallnode(last).callnodeflags) then
+diff --git a/compiler/ncgutil.pas b/compiler/ncgutil.pas
+index cd518ee7..2ce6e8d5 100644
+--- a/compiler/ncgutil.pas
++++ b/compiler/ncgutil.pas
+@@ -1235,6 +1235,8 @@ implementation
+       var
+         info: tusedliveregvarsinfo;
+       begin
++        { validated on x86_64 only }
++{$ifdef x86_64}
+         if ((pi_dfaavailable in current_procinfo.flags) or
+             current_procinfo.excdfaavailable) and
+            assigned(n.optinfo) and
+@@ -1245,6 +1247,7 @@ implementation
+             foreachnodestatic(n,@do_get_used_live_regvars,@info);
+           end
+         else
++{$endif x86_64}
+           get_used_regvars(n,rv);
+       end;
+ 
+diff --git a/compiler/optbitcast.pas b/compiler/optbitcast.pas
+index ff15f49a..1c382d1f 100644
+--- a/compiler/optbitcast.pas
++++ b/compiler/optbitcast.pas
+@@ -102,6 +102,8 @@ function mark_bitcast_pending(addr: tnode): boolean;
+     vs: tabstractvarsym;
+   begin
+     result:=false;
++{$ifdef x86_64}
++    { validated on x86_64 only }
+     if not(cs_opt_regvar in current_settings.optimizerswitches) or
+        not assigned(current_procinfo) or
+        (addr.nodetype<>addrn) or
+@@ -119,6 +121,7 @@ function mark_bitcast_pending(addr: tnode): boolean;
+       exit;
+     include(taddrnode(addr).addrnodeflags,anf_bitcast_pending);
+     result:=true;
++{$endif x86_64}
+   end;
+ 
+ 
+diff --git a/compiler/optexcregvar.pas b/compiler/optexcregvar.pas
+index 79f3e20b..9abb661c 100644
+--- a/compiler/optexcregvar.pas
++++ b/compiler/optexcregvar.pas
+@@ -65,7 +65,7 @@ implementation
+ 
+ uses
+   cclasses,cutils,cdynset,
+-  globtype,globals,
++  globtype,globals,systems,
+   symconst,symbase,symtype,symsym,symtable,
+   defutil,paramgr,procinfo,optbase,
+   nutils,nbas,nld,nflw,ncal;
+@@ -241,12 +241,9 @@ procedure walk(info: pexcregvarinfo; n: tnode);
+       calln:
+         begin
+           check_reads_in(info,n);
+-          { raise is lowered to a call of fpc_raiseexception in the first pass;
+-            neither it nor a noreturn routine (halt) returns here }
+-          if (tcallnode(n).procdefinition.typ=procdef) and
+-             ((po_noreturn in tprocdef(tcallnode(n).procdefinition).procoptions) or
+-              (assigned(tprocdef(tcallnode(n).procdefinition).procsym) and
+-               (upper(tprocdef(tcallnode(n).procdefinition).procsym.name)='FPC_RAISEEXCEPTION'))) then
++          { raise (fpc_raiseexception, fpc_reraise) and noreturn routines
++            (halt) do not return here }
++          if cnf_call_never_returns in tcallnode(n).callnodeflags then
+             for i:=0 to high(info^.assigned_) do
+               info^.assigned_[i]:=true;
+         end;
+@@ -345,6 +342,9 @@ function handler_life(t: tnode; out life: tdfaset): boolean;
+   end;
+ 
+ 
++const
++  supported_target = {$ifdef x86_64}true{$else}false{$endif};
++
+ procedure mark_exceptsafe_regvars(code: tnode; pd: tprocdef);
+   var
+     hlife: tdfaset;
+@@ -381,7 +381,16 @@ procedure mark_exceptsafe_regvars(code: tnode; pd: tprocdef);
+                 end;
+             end;
+         end;
+-      if (info.cands.Count=0) or
++      { only where this was validated: x86_64 with the setjmp based exception
++        handling. With SEH (win64) the finally blocks are separate routines
++        that use the parent's variables, and with DWARF based handling the
++        registers after an exception are not those of a setjmp }
++      if {$ifdef x86_64}
++         (target_info.system=system_x86_64_win64) or
++         (tf_use_psabieh in target_info.flags) or
++         {$endif x86_64}
++         not supported_target or
++         (info.cands.Count=0) or
+          not(pi_uses_exceptions in current_procinfo.flags) or
+          not(cs_opt_regvar in current_settings.optimizerswitches) or
+          ((current_procinfo.flags*[pi_has_label,pi_has_interproclabel,pi_has_assembler_block])<>[]) then
+diff --git a/compiler/optloop.pas b/compiler/optloop.pas
+index 8a0c9084..eacfe268 100644
+--- a/compiler/optloop.pas
++++ b/compiler/optloop.pas
+@@ -557,6 +557,8 @@ unit optloop;
+                 end;
+             end;
+           vecn:
++            { a[X+i], a[X-i]: validated on x86_64 only }
++{$ifdef x86_64}
+             if is_linear_index_access(n,sign) then
+               begin
+                 { a[X+i], a[i+X], a[X-i] with X invariant: a pointer that
+@@ -614,6 +616,7 @@ unit optloop;
+                 result:=fen_norecurse_false;
+               end
+             else
++{$endif x86_64}
+             begin
+               { is the index the counter variable? }
+               if not(is_special_array(tvecnode(n).left.resultdef)) and
+diff --git a/compiler/optrange.pas b/compiler/optrange.pas
+index 31050371..4e05d838 100644
+--- a/compiler/optrange.pas
++++ b/compiler/optrange.pas
+@@ -50,7 +50,7 @@ uses
+   cclasses,
+   globtype,constexp,
+   symconst,symdef,symsym,symtype,
+-  defutil,defcmp,
++  cutils,defutil,defcmp,
+   nutils,nbas,nld,ncon,nflw,nmat,nadd,ncnv,nmem,
+   pass_1;
+ 
+@@ -62,7 +62,9 @@ type
+ 
+   ptempwrite = ^ttempwrite;
+   ttempwrite = record
+-    rhs: tnode;
++    { the assignment, not its right side: transform replaces nodes of the
++      right side, including the right side itself }
++    assign: tassignmentnode;
+     loops: TFPList;   { the for loops around the assignment (owned) }
+   end;
+ 
+@@ -242,7 +244,7 @@ function range_of(ctx: prangectx; n: tnode; loops: TFPList): trange;
+                   for i:=0 to t^.writes.Count-1 do
+                     begin
+                       w:=ptempwrite(t^.writes[i]);
+-                      a:=range_of(ctx,w^.rhs,w^.loops);
++                      a:=range_of(ctx,w^.assign.right,w^.loops);
+                       if not within(a,st) then
+                         a:=st;
+                       if not a.known then
+@@ -345,7 +347,7 @@ function collect_cb(var n: tnode; arg: pointer): foreachnoderesult;
+           begin
+             t:=tempidx(ctx,ttemprefnode(tassignmentnode(n).left).tempinfo,true);
+             new(w);
+-            w^.rhs:=tassignmentnode(n).right;
++            w^.assign:=tassignmentnode(n);
+             w^.loops:=copy_loops(ctx^.loops);
+             t^.writes.Add(w);
+             collect(ctx,tassignmentnode(n).right);
+@@ -379,22 +381,10 @@ procedure transform(ctx: prangectx; var n: tnode); forward;
+ 
+ { k with c=2^k, c>1 }
+ function power2const(n: tnode; out k: longint): boolean;
+-  var
+-    v: int64;
+   begin
+-    result:=false;
+     k:=0;
+-    if (n.nodetype<>ordconstn) or not tordconstnode(n).value.signed and (tordconstnode(n).value.uvalue>qword(high(int64))) then
+-      exit;
+-    v:=tordconstnode(n).value.svalue;
+-    if v<2 then
+-      exit;
+-    while (v and 1)=0 do
+-      begin
+-        v:=v shr 1;
+-        inc(k);
+-      end;
+-    result:=(v=1) and (k<63);
++    result:=(n.nodetype=ordconstn) and
++      ispowerof2(tordconstnode(n).value,k) and (k>=1) and (k<63);
+   end;
+ 
+ 
+diff --git a/compiler/optslp.pas b/compiler/optslp.pas
+index dc6fcfd9..ab17ddd5 100644
+--- a/compiler/optslp.pas
++++ b/compiler/optslp.pas
+@@ -67,7 +67,7 @@ uses
+   globtype,globals,verbose,
+   symconst,symtype,symdef,symsym,symtable,
+   defutil,defcmp,compinnr,
+-  nutils,nbas,nld,ncon,nflw,nmem,nadd,ncnv,ninl,ncal,
++  nutils,nbas,nld,ncon,nflw,nmem,nadd,ncnv,ninl,ncal,nset,nmat,
+   pass_1,procinfo,paramgr;
+ 
+ 
+@@ -144,10 +144,11 @@ function findprov(ctx: pslpctx; n: tnode; create: boolean): pprovinfo;
+     result^.bad:=false;
+     if assigned(sym) then
+       begin
++        { a parameter arrives with a value of unknown provenance }
+         if not(sym.vardef.typ=pointerdef) or
++           (sym.typ=paravarsym) or
+            (vo_volatile in sym.varoptions) or
+-           ((sym.varsymaccess*[vsa_addr_taken,vsa_different_scope])<>[]) or
+-           ((sym.typ=paravarsym) and not(tparavarsym(sym).varspez in [vs_value,vs_const])) then
++           ((sym.varsymaccess*[vsa_addr_taken,vsa_different_scope])<>[]) then
+           result^.bad:=true;
+       end
+     else if not assigned(temp^.typedef) or (temp^.typedef.typ<>pointerdef) then
+@@ -165,6 +166,25 @@ function strip_conv(n: tnode): tnode;
+   end;
+ 
+ 
++{ rhs assigned to the pointer p }
++function prov_pointee(p: pprovinfo): tdef;
++  begin
++    if assigned(p^.sym) then
++      result:=tpointerdef(p^.sym.vardef).pointeddef
++    else
++      result:=tpointerdef(p^.temp^.typedef).pointeddef;
++  end;
++
++
++{ n is a pointer to the same type as the pointer p tracks: pointer arithmetic
++  and copies keep whole elements only then (PRec(PChar(q)-8) does not) }
++function same_pointee(p: pprovinfo; n: tnode): boolean;
++  begin
++    result:=assigned(n.resultdef) and (n.resultdef.typ=pointerdef) and
++      equal_defs(tpointerdef(n.resultdef).pointeddef,prov_pointee(p));
++  end;
++
++
+ { rhs assigned to the pointer p }
+ procedure prov_assign(ctx: pslpctx; p: pprovinfo; rhs: tnode);
+   var
+@@ -173,11 +193,18 @@ procedure prov_assign(ctx: pslpctx; p: pprovinfo; rhs: tnode);
+     arrsym: tabstractvarsym;
+   begin
+     n:=strip_conv(rhs);
+-    { p + c, p - c, pointer arithmetic in elements }
++    { p + c, p - c: pointer arithmetic in elements of p's own type }
+     if (n.nodetype in [addn,subn]) and
+        (taddnode(n).left.resultdef.typ=pointerdef) and
+        is_integer(taddnode(n).right.resultdef) then
+-      n:=strip_conv(taddnode(n).left);
++      begin
++        if not same_pointee(p,n) or not same_pointee(p,taddnode(n).left) then
++          begin
++            p^.bad:=true;
++            exit;
++          end;
++        n:=strip_conv(taddnode(n).left);
++      end;
+     case n.nodetype of
+       addrn:
+         begin
+@@ -190,7 +217,7 @@ procedure prov_assign(ctx: pslpctx; p: pprovinfo; rhs: tnode);
+              (tloadnode(tvecnode(n).left).symtableentry.typ in [localvarsym,staticvarsym,paravarsym]) and
+              (tvecnode(n).left.resultdef.typ=arraydef) and
+              not is_packed_array(tvecnode(n).left.resultdef) and
+-             equal_defs(tarraydef(tvecnode(n).left.resultdef).elementdef,tpointerdef(p^.sym.vardef).pointeddef) then
++             equal_defs(tarraydef(tvecnode(n).left.resultdef).elementdef,prov_pointee(p)) then
+             begin
+               arrsym:=tabstractvarsym(tloadnode(tvecnode(n).left).symtableentry);
+               if (p^.kind=pk_array) and (p^.arr<>arrsym) then
+@@ -204,7 +231,7 @@ procedure prov_assign(ctx: pslpctx; p: pprovinfo; rhs: tnode);
+       loadn,temprefn:
+         begin
+           q:=findprov(ctx,n,true);
+-          if assigned(q) then
++          if assigned(q) and same_pointee(p,n) then
+             p^.copies.Add(q)
+           else
+             p^.bad:=true;
+@@ -235,26 +262,9 @@ function prov_collect(var n: tnode; arg: pointer): foreachnoderesult;
+         if tassignmentnode(n).left.nodetype in [loadn,temprefn] then
+           begin
+             p:=findprov(ctx,tassignmentnode(n).left,true);
+-            if assigned(p) and assigned(p^.sym) or assigned(p) and assigned(p^.temp) then
+-              begin
+-                if (p^.sym=nil) or (p^.sym.vardef.typ=pointerdef) then
+-                  begin
+-                    if assigned(p^.temp) then
+-                      begin
+-                        { a temp gets the provenance of what it holds }
+-                        if tassignmentnode(n).right.nodetype in [loadn,temprefn] then
+-                          begin
+-                            p^.copies.Add(findprov(ctx,tassignmentnode(n).right,true));
+-                            if not assigned(p^.copies.Last) then
+-                              p^.bad:=true;
+-                          end
+-                        else
+-                          p^.bad:=true;
+-                      end
+-                    else
+-                      prov_assign(ctx,p,tassignmentnode(n).right);
+-                  end;
+-              end;
++            { only pointers are tracked (findprov marks the others bad) }
++            if assigned(p) and not p^.bad then
++              prov_assign(ctx,p,tassignmentnode(n).right);
+             foreachnodestatic(tassignmentnode(n).right,@prov_collect_rec,arg);
+             result:=fen_norecurse_false;
+           end;
+@@ -382,8 +392,7 @@ function get_access(n: tnode): taccess;
+     while n.nodetype=subscriptn do
+       begin
+         if not(tsubscriptnode(n).left.resultdef.typ=recorddef) or
+-           (tabstractrecordsymtable(trecorddef(tsubscriptnode(n).left.resultdef).symtable).usefieldalignment=bit_alignment) or
+-           trecorddef(tsubscriptnode(n).left.resultdef).isunion and false then
++           (tabstractrecordsymtable(trecorddef(tsubscriptnode(n).left.resultdef).symtable).usefieldalignment=bit_alignment) then
+           exit;
+         inc(off,tsubscriptnode(n).vs.fieldoffset);
+         result.recdef:=tsubscriptnode(n).left.resultdef;
+@@ -689,17 +698,28 @@ procedure cache_add(lc: plistctx; a, b: tnode; temp: ttempcreatenode);
+   end;
+ 
+ 
+-procedure cache_clear(lc: plistctx);
+-  var
+-    i: longint;
++procedure cache_free_entry(e: pcacheentry);
+   begin
+-    for i:=0 to lc^.cache.Count-1 do
++    e^.lane0.free;
++    e^.lane1.free;
++    dispose(e);
++  end;
++
++
++{ drop the entries from index n on (those of a failed attempt) }
++procedure cache_truncate(lc: plistctx; n: longint);
++  begin
++    while lc^.cache.Count>n do
+       begin
+-        pcacheentry(lc^.cache[i])^.lane0.free;
+-        pcacheentry(lc^.cache[i])^.lane1.free;
+-        dispose(pcacheentry(lc^.cache[i]));
++        cache_free_entry(pcacheentry(lc^.cache.Last));
++        lc^.cache.Delete(lc^.cache.Count-1);
+       end;
+-    lc^.cache.Clear;
++  end;
++
++
++procedure cache_clear(lc: plistctx);
++  begin
++    cache_truncate(lc,0);
+   end;
+ 
+ 
+@@ -858,9 +878,7 @@ procedure invalidate(lc: plistctx; st: tnode);
+         foreachnodestatic(st,@writes_lane,@wc);
+         if wc.hit then
+           begin
+-            pcacheentry(lc^.cache[i])^.lane0.free;
+-            pcacheentry(lc^.cache[i])^.lane1.free;
+-            dispose(pcacheentry(lc^.cache[i]));
++            cache_free_entry(pcacheentry(lc^.cache[i]));
+             lc^.cache.Delete(i);
+           end;
+       end;
+@@ -909,13 +927,7 @@ function try_pair(lc: plistctx; s1, s2: tstatementnode): boolean;
+     if not assigned(v) then
+       begin
+         drop_pre(lc);
+-        while lc^.cache.Count>ncache do
+-          begin
+-            pcacheentry(lc^.cache.Last)^.lane0.free;
+-            pcacheentry(lc^.cache.Last)^.lane1.free;
+-            dispose(pcacheentry(lc^.cache.Last));
+-            lc^.cache.Delete(lc^.cache.Count-1);
+-          end;
++        cache_truncate(lc,ncache);
+         exit;
+       end;
+     { scalar: the operations and loads of both, two stores; vector: the
+@@ -925,13 +937,7 @@ function try_pair(lc: plistctx; s1, s2: tstatementnode): boolean;
+       begin
+         v.free;
+         drop_pre(lc);
+-        while lc^.cache.Count>ncache do
+-          begin
+-            pcacheentry(lc^.cache.Last)^.lane0.free;
+-            pcacheentry(lc^.cache.Last)^.lane1.free;
+-            dispose(pcacheentry(lc^.cache.Last));
+-            lc^.cache.Delete(lc^.cache.Count-1);
+-          end;
++        cache_truncate(lc,ncache);
+         exit;
+       end;
+     st:=cassignmentnode.create_internal(vecload(lc^.ctx,a1.left),v);
+@@ -1034,23 +1040,13 @@ function try_local_pair(lc: plistctx; s1, s2: tstatementnode): boolean;
+       begin
+         v.free;
+         drop_pre(lc);
+-        while lc^.cache.Count>ncache do
+-          begin
+-            pcacheentry(lc^.cache.Last)^.lane0.free;
+-            pcacheentry(lc^.cache.Last)^.lane1.free;
+-            dispose(pcacheentry(lc^.cache.Last));
+-            lc^.cache.Delete(lc^.cache.Count-1);
+-          end;
++        cache_truncate(lc,ncache);
+         exit;
+       end;
+     { x and y belong to the statements that are replaced below }
+     x:=x.getcopy;
+     y:=y.getcopy;
+-    t:=ctempcreatenode.create(lc^.ctx^.vec2def,16,tt_persistent,true);
+-    if not assigned(lc^.preblock) then
+-      lc^.preblock:=internalstatements(lc^.pre);
+-    addstatement(lc^.pre,t);
+-    addstatement(lc^.pre,cassignmentnode.create_internal(ctemprefnode.create(t),v));
++    t:=new_vectemp(lc,v);
+     st:=cassignmentnode.create(getcopy_dfa(a1.left),mkintrinsic(in_vec2d_lo,ctemprefnode.create(t),nil));
+     st.fileinfo:=a1.fileinfo;
+     st:=wrap_pre(lc,st);
+@@ -1175,6 +1171,7 @@ type
+     stores: TFPList;      { nodes written in the loop (assignment targets, inc/dec) }
+     written: TFPList;     { variables/temps written: loadn/temprefn nodes }
+     cands: TFPList;       { candidate load nodes (in the loop) }
++    packs: boolean;       { looking for packs and broadcasts instead of loads }
+     copies: TFPList;      { a copy of each distinct candidate }
+     temps: TFPList;
+   end;
+@@ -1305,14 +1302,9 @@ function hoist_find(var n: tnode; arg: pointer): foreachnoderesult;
+       exit;
+     if not load_access(n,acc) then
+       exit;
+-    { the pointer is not changed in the loop }
++    { the pointer is a plain variable or temp that the loop does not change }
+     p:=strip_conv(tderefnode(acc.base).left);
+-    if not (p.nodetype in [loadn,temprefn]) or is_written(hi,p) then
+-      exit;
+-    if (p.nodetype=loadn) and
+-       (assigned(tloadnode(p).left) or
+-        not (tloadnode(p).symtableentry.typ in [localvarsym,paravarsym]) or
+-        ((tabstractvarsym(tloadnode(p).symtableentry).varsymaccess*[vsa_addr_taken,vsa_different_scope])<>[])) then
++    if not plain_value(p) or (p.nodetype=realconstn) or is_written(hi,p) then
+       exit;
+     if store_conflicts(hi,acc) then
+       exit;
+@@ -1390,6 +1382,92 @@ function pure_cond(var n: tnode; arg: pointer): foreachnoderesult;
+   end;
+ 
+ 
++
++{ the parts of a loop body that run in every iteration that reaches them:
++  not the branches of if and case statements, the bodies of inner loops that
++  test first, the right operand of a short-circuit and/or, or anything after
++  a statement that can leave the iteration }
++function hoist_uncond_expr(var n: tnode; arg: pointer): foreachnoderesult; forward;
++
++function hoist_uncond_expr_rec(var n: tnode; arg: pointer): foreachnoderesult;
++  begin
++    result:=hoist_uncond_expr(n,arg);
++  end;
++
++
++function hoist_uncond_expr(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    hi: phoistinfo absolute arg;
++  begin
++    result:=fen_false;
++    if (n.nodetype in [andn,orn]) and is_boolean(n.resultdef) then
++      begin
++        foreachnodestatic(pm_postprocess,taddnode(n).left,@hoist_uncond_expr_rec,arg);
++        exit(fen_norecurse_false);
++      end;
++    if hi^.packs then
++      result:=hoist_find_pack(n,arg)
++    else
++      result:=hoist_find(n,arg);
++  end;
++
++
++function leaves_iteration(var n: tnode; arg: pointer): foreachnoderesult;
++  begin
++    result:=fen_false;
++    if (n.nodetype in [breakn,continuen,exitn,goton,labeln,tryexceptn,tryfinallyn,raisen]) or
++       ((n.nodetype=calln) and (cnf_call_never_returns in tcallnode(n).callnodeflags)) then
++      result:=fen_norecurse_true;
++  end;
++
++
++procedure hoist_uncond(hi: phoistinfo; n: tnode);
++  var
++    s: tnode;
++  begin
++    if not assigned(n) then
++      exit;
++    case n.nodetype of
++      blockn:
++        hoist_uncond(hi,tblocknode(n).left);
++      statementn:
++        begin
++          s:=n;
++          while assigned(s) and (s.nodetype=statementn) do
++            begin
++              hoist_uncond(hi,tstatementnode(s).left);
++              if assigned(tstatementnode(s).left) and
++                 foreachnodestatic(tstatementnode(s).left,@leaves_iteration,nil) then
++                break;
++              s:=tstatementnode(s).right;
++            end;
++        end;
++      ifn:
++        foreachnodestatic(pm_postprocess,tifnode(n).left,@hoist_uncond_expr,hi);
++      casen:
++        foreachnodestatic(pm_postprocess,tcasenode(n).left,@hoist_uncond_expr,hi);
++      whilerepeatn:
++        if lnf_testatbegin in twhilerepeatnode(n).loopflags then
++          foreachnodestatic(pm_postprocess,twhilerepeatnode(n).left,@hoist_uncond_expr,hi)
++        else
++          begin
++            hoist_uncond(hi,twhilerepeatnode(n).right);
++            if not foreachnodestatic(twhilerepeatnode(n).right,@leaves_iteration,nil) then
++              foreachnodestatic(pm_postprocess,twhilerepeatnode(n).left,@hoist_uncond_expr,hi);
++          end;
++      forn:
++        begin
++          foreachnodestatic(pm_postprocess,tfornode(n).right,@hoist_uncond_expr,hi);
++          foreachnodestatic(pm_postprocess,tfornode(n).t1,@hoist_uncond_expr,hi);
++        end;
++      tryexceptn,tryfinallyn,labeln,goton,exitn,breakn,continuen,raisen,nothingn:
++        ;
++      else
++        foreachnodestatic(pm_postprocess,n,@hoist_uncond_expr,hi);
++    end;
++  end;
++
++
+ { the body of the loop n and a guard: true when the loop body runs at
+   least once (a new node) }
+ function loop_parts(n: tnode; out body: pnode; out guard: tnode): boolean;
+@@ -1414,6 +1492,9 @@ function loop_parts(n: tnode; out body: pnode; out guard: tnode): boolean;
+           if not ok then
+             exit;
+           guard:=twhilerepeatnode(n).left.getcopy;
++          { the type check turned "while not c" into c and this flag }
++          if lnf_checknegate in twhilerepeatnode(n).loopflags then
++            guard:=cnotnode.create(guard);
+         end;
+       forn:
+         begin
+@@ -1453,17 +1534,13 @@ function hoist_loop(hi: phoistinfo; var n: tnode; packs: boolean): boolean;
+     hi^.cands.Clear;
+     if not loop_parts(n,body,guard) then
+       exit;
+-    if packs then
+-      foreachnodestatic(pm_postprocess,body^,@hoist_find_pack,hi)
+-    else
+-      foreachnodestatic(pm_postprocess,body^,@hoist_find,hi);
++    hi^.packs:=packs;
++    hoist_uncond(hi,body^);
+     if hi^.cands.Count=0 then
+       begin
+         guard.free;
+         exit;
+       end;
+-    if hi^.cands.Count=0 then
+-      exit;
+     { distinct candidates }
+     for i:=0 to hi^.cands.Count-1 do
+       begin
+@@ -1504,9 +1581,8 @@ function hoist_loop(hi: phoistinfo; var n: tnode; packs: boolean): boolean;
+   end;
+ 
+ 
+-function hoist_loops(var n: tnode; arg: pointer): foreachnoderesult;
++function hoist_loops_impl(var n: tnode; ctx: pslpctx; packs: boolean): foreachnoderesult;
+   var
+-    ctx: pslpctx absolute arg;
+     hi: thoistinfo;
+   begin
+     result:=fen_false;
+@@ -1515,6 +1591,7 @@ function hoist_loops(var n: tnode; arg: pointer): foreachnoderesult;
+       exit;
+     hi.ctx:=ctx;
+     hi.abort:=false;
++    hi.packs:=packs;
+     hi.stores:=TFPList.Create;
+     hi.written:=TFPList.Create;
+     hi.cands:=TFPList.Create;
+@@ -1526,11 +1603,9 @@ function hoist_loops(var n: tnode; arg: pointer): foreachnoderesult;
+         hi.written.Add(tfornode(n).left);
+       if hi.abort then
+         exit;
+-      if hoist_loop(@hi,n,false) then
++      if hoist_loop(@hi,n,packs) then
+         begin
+           ctx^.changed:=true;
+-          { n is now the block; the loop is its last statement but one: the
+-            packs of the hoisted values follow in the next round }
+           result:=fen_norecurse_false;
+         end;
+     finally
+@@ -1543,38 +1618,16 @@ function hoist_loops(var n: tnode; arg: pointer): foreachnoderesult;
+   end;
+ 
+ 
++function hoist_loops(var n: tnode; arg: pointer): foreachnoderesult;
++  begin
++    result:=hoist_loops_impl(n,pslpctx(arg),false);
++  end;
++
++
++{ the packs of the hoisted values, in a second round }
+ function hoist_loops_packs(var n: tnode; arg: pointer): foreachnoderesult;
+-  var
+-    ctx: pslpctx absolute arg;
+-    hi: thoistinfo;
+   begin
+-    result:=fen_false;
+-    if not (n.nodetype in [whilerepeatn,forn]) or
+-       ([cs_check_overflow,cs_check_range]*current_settings.localswitches<>[]) then
+-      exit;
+-    hi.ctx:=ctx;
+-    hi.abort:=false;
+-    hi.stores:=TFPList.Create;
+-    hi.written:=TFPList.Create;
+-    hi.cands:=TFPList.Create;
+-    hi.copies:=TFPList.Create;
+-    hi.temps:=TFPList.Create;
+-    try
+-      foreachnodestatic(pm_postprocess,n,@hoist_scan,@hi);
+-      if n.nodetype=forn then
+-        hi.written.Add(tfornode(n).left);
+-      if hoist_loop(@hi,n,true) then
+-        begin
+-          ctx^.changed:=true;
+-          result:=fen_norecurse_false;
+-        end;
+-    finally
+-      hi.stores.Free;
+-      hi.written.Free;
+-      hi.cands.Free;
+-      hi.copies.Free;
+-      hi.temps.Free;
+-    end;
++    result:=hoist_loops_impl(n,pslpctx(arg),true);
+   end;
+ 
+ 
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index 144e81bf..da7df8e3 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -1269,8 +1269,11 @@ implementation
+            if cs_opt_forloop in current_settings.optimizerswitches then
+              RedoDFA:=OptimizeForLoop(code);
+ 
++{$ifdef x86_64}
++           { the node optimisations of the 2026 benchmark loop are validated on x86_64 only }
+            if cs_opt_level2 in current_settings.optimizerswitches then
+              RedoDFA:=optimize_nonneg_divmod(code) or RedoDFA;
++{$endif x86_64}
+ 
+            RedoDFA:=ConvertForLoops(code) or RedoDFA;
+ 
+@@ -1279,9 +1282,11 @@ implementation
+ 
+            if cs_opt_loopstrength in current_settings.optimizerswitches then
+              begin
++{$ifdef x86_64}
+                RedoDFA:=optimize_loop_stores(code) or RedoDFA;
+                RedoDFA:=optimize_loop_invariants(code) or RedoDFA;
+                RedoDFA:=optimize_stmt_cse(code) or RedoDFA;
++{$endif x86_64}
+              end;
+ 
+            if RedoDFA then
+@@ -1334,8 +1339,10 @@ implementation
+          end
+        else
+          begin
++{$ifdef x86_64}
+            if cs_opt_level2 in current_settings.optimizerswitches then
+              optimize_nonneg_divmod(code);
++{$endif x86_64}
+            ConvertForLoops(code);
+            if cs_opt_forloop in current_settings.optimizerswitches then
+              optimize_record_writes(code);
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index bcc67320..89addf1a 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -2691,11 +2691,14 @@ unit aoptx86;
+                 exit;
+               end;
+ 
++{$ifdef x86_64}
++            { validated on x86_64 only }
+             if TryMovapXChainRename(p) then
+               begin
+                 result:=true;
+                 exit;
+               end;
++{$endif x86_64}
+ 
+             if GetNextInstructionUsingReg(p,hp1,taicpu(p).oper[1]^.reg) and
+               (hp1.typ = ait_instruction) and
+@@ -3649,6 +3652,8 @@ unit aoptx86;
+         p_TargetReg := NR_NO;
+         hp1 := nil;
+ 
++{$ifdef x86_64}
++        { validated on x86_64 only }
+         { mov %reg,ref; cvtsi2sX ref,%xmm  ->  mov %reg,ref; cvtsi2sX %reg,%xmm
+           (a variable stored and converted at once, e.g. "seed := ...; r := seed / m":
+           the conversion no longer waits for the store to be forwarded) }
+@@ -3667,6 +3672,7 @@ unit aoptx86;
+             Result:=true;
+             exit;
+           end;
++{$endif x86_64}
+ 
+         if taicpu(p).oper[1]^.typ = top_reg then
+           begin
+@@ -10099,8 +10105,11 @@ unit aoptx86;
+        ThisReg: TRegister;
+      begin
+        Result := False;
++{$ifdef x86_64}
++       { validated on x86_64 only }
+        if TryRemoveRedundantJP(p) then
+          Exit(True);
++{$endif x86_64}
+        if not GetNextInstruction(p,hp1) then
+          Exit;
+ 
+@@ -15284,15 +15293,21 @@ unit aoptx86;
+         TempBool: Boolean;
+ 
+       begin
++{$ifdef x86_64}
++        { before and after the jump optimisations, which can form the
++          pattern; validated on x86_64 only }
+         if TryRemoveRedundantJP(p) then
+           Exit(True);
++{$endif x86_64}
+ 
+         if (aoc_DoPass2JccOpts in OptsToCheck) and
+           DoJumpOptimizations(p, TempBool) then
+           Exit(True);
+ 
++{$ifdef x86_64}
+         if TryRemoveRedundantJP(p) then
+           Exit(True);
++{$endif x86_64}
+ 
+         result:=false;
+         if GetNextInstruction(p,hp1) then
+diff --git a/compiler/x86/nx86add.pas b/compiler/x86/nx86add.pas
+index 123241bc..dda7669e 100644
+--- a/compiler/x86/nx86add.pas
++++ b/compiler/x86/nx86add.pas
+@@ -1635,6 +1635,8 @@ unit nx86add;
+           and "below or equal" need one (a second jump or setcc). Compare
+           in the order that gives an "above" condition, also when that
+           needs the other operand in a register }
++{$ifdef x86_64}
++        { validated on x86_64 only }
+         if (nodetype in [ltn,lten,gtn,gten]) then
+           begin
+             toggleflag(nf_swapped);
+@@ -1649,6 +1651,7 @@ unit nx86add;
+               hlcg.location_force_mmregscalar(current_asmdata.CurrAsmList,left.location,left.resultdef,true);
+           end
+         else
++{$endif x86_64}
+           rightdst:=right.location.loc in [LOC_MMREGISTER,LOC_CMMREGISTER];
+         if rightdst and
+            not(left.location.loc in [LOC_REFERENCE,LOC_CREFERENCE,LOC_MMREGISTER,LOC_CMMREGISTER]) then
+diff --git a/compiler/x86/nx86mat.pas b/compiler/x86/nx86mat.pas
+index 8c08689a..d6080065 100644
+--- a/compiler/x86/nx86mat.pas
++++ b/compiler/x86/nx86mat.pas
+@@ -935,6 +935,10 @@ interface
+             location.register:=hreg1;
+           end
+         else if (nodetype=modn) and (right.nodetype=ordconstn) and is_signed(left.resultdef) and
++          {$ifndef x86_64}
++          { validated on x86_64 only }
++          (left.resultdef.size=0) and
++          {$endif x86_64}
+           (left.resultdef.size in [4,8]) and not(cs_opt_size in current_settings.optimizerswitches) then
+           begin
+             { signed modulus by a constant that is not a power of 2: the quotient
+diff --git a/tests/test/opt/tslp1.pp b/tests/test/opt/tslp1.pp
+index a2bb77eb..0b4cd2ca 100644
+--- a/tests/test/opt/tslp1.pp
++++ b/tests/test/opt/tslp1.pp
+@@ -218,6 +218,51 @@ begin
+   p^.vy := p^.vy + dy * 2.0;
+ end;
+ 
++
++type
++  TPair = record
++    x, y: double;
++  end;
++  PPair = ^TPair;
++
++var
++  pa: array[0..3] of TPair;
++
++{ q^.y is p^.x: a byte offset, not whole elements of pa }
++procedure bytes(i: longint); noinline;
++var
++  p, q: PPair;
++begin
++  p := @pa[i];
++  q := PPair(PChar(p) - 8);
++  p^.x := q^.x + 1.0;
++  p^.y := q^.y + 1.0;
++end;
++
++{ a pointer parameter arrives with an unknown value, whatever the body
++  assigns to it later }
++procedure incoming(q: PPair; i: longint); noinline;
++var
++  p: PPair;
++begin
++  p := @pa[i];
++  p^.x := q^.x + 1.0;
++  p^.y := q^.y + 1.0;
++  q := @pa[0];
++  q^.x := 0.5;
++end;
++
++procedure initpa;
++var
++  k: longint;
++begin
++  for k := 0 to 3 do
++    begin
++      pa[k].x := 10 * k;
++      pa[k].y := 10 * k + 5;
++    end;
++end;
++
+ var
+   i: longint;
+ begin
+@@ -239,6 +284,14 @@ begin
+   overlap(@b[2], PBody(PByte(@b[2].vx) - PtrUInt(@PBody(nil)^.mass)), false);
+   overlap_ref(@r[2], PBody(PByte(@r[2].vx) - PtrUInt(@PBody(nil)^.mass)), true);
+   compare('overlap');
++  initpa;
++  bytes(1);
++  check(pa[1].x, 6.0, 'bytes x');
++  check(pa[1].y, 7.0, 'bytes y');
++  initpa;
++  incoming(PPair(PChar(@pa[1]) - 8), 1);
++  check(pa[1].x, 6.0, 'incoming x');
++  check(pa[1].y, 7.0, 'incoming y');
+   if errors <> 0 then
+     halt(1);
+   writeln('ok');
+diff --git a/tests/test/opt/tslp2.pp b/tests/test/opt/tslp2.pp
+index 81b9f59e..3d234adb 100644
+--- a/tests/test/opt/tslp2.pp
++++ b/tests/test/opt/tslp2.pp
+@@ -119,6 +119,56 @@ begin
+     end;
+ end;
+ 
++
++{ the load runs only when p is not nil: it must not go before the loop }
++function sum7(p: PRec; n: longint): double; noinline;
++var
++  i: longint;
++  s: double;
++begin
++  s := 0;
++  i := 0;
++  while i < n do
++    begin
++      if p <> nil then
++        s := s + p^.x;
++      s := s + 1;
++      inc(i);
++    end;
++  result := s;
++end;
++
++{ the same behind a short-circuit and }
++function sum8(p: PRec; n: longint): double; noinline;
++var
++  i: longint;
++  s: double;
++begin
++  s := 0;
++  for i := 1 to n do
++    if (p <> nil) and (p^.x > 0) then
++      s := s + 1
++    else
++      s := s + 2;
++  result := s;
++end;
++
++{ a negated while condition }
++function sum9(p: PRec; n: longint): double; noinline;
++var
++  i: longint;
++  s: double;
++begin
++  s := 0;
++  i := 0;
++  while not (i >= n) do
++    begin
++      s := s + p^.x;
++      inc(i);
++    end;
++  result := s;
++end;
++
+ begin
+   init;
+   check(sum1(@a[0], 5), 0, 'sum1 a');
+@@ -135,6 +185,12 @@ begin
+   gsum := 0;
+   check(sum6(@a[2], 3), 12, 'sum6');
+   check(gsum, 12, 'sum6 g');
++  check(sum7(nil, 3), 3, 'sum7');
++  check(sum7(@a[2], 3), 9, 'sum7 b');
++  check(sum8(nil, 3), 6, 'sum8');
++  check(sum8(@a[2], 3), 3, 'sum8 b');
++  check(sum9(nil, 0), 0, 'sum9');
++  check(sum9(@a[2], 3), 6, 'sum9 b');
+   if errors <> 0 then
+     halt(1);
+   writeln('ok');

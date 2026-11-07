@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 17:19:29 +0000
-Subject: [PATCH 112/115] x86_64: loads that a loop does not change go before
+Subject: [PATCH 112/116] x86_64: loads that a loop does not change go before
  it (provenance)
 
 do_hoist_invariant_loads (with SLP, after the vectoriser): in a loop without

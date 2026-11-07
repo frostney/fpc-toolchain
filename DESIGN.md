@@ -16,7 +16,7 @@ the action are shared; every script takes the version (`fetch-source.sh 3.3.1 DI
 | | 3.2.4 | 3.3.1 |
 |---|---|---|
 | base | `release_3_2_4-branch` at `82947b0d`: tag `release_3_2_4_rc2` plus 8 commits, the commit the final will be cut from | `main` at `fa51767875` |
-| patches | 2 fcl-process fixes from `fixes_3_2` | the bug-hunt series, the wasm32 work and the TLS model of libraries |
+| patches | 2 fcl-process fixes from `fixes_3_2` | the bug-hunt series, the wasm32 work, the TLS model of libraries, x86_64 code generation work and anonymous function fixes |
 | compiler defines | none | `tls_threadvars` |
 
 `scripts/update-series.sh <version> <url>#<ref>` replaces `patches/` with the commits of a branch on top of the base and

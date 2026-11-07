@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 00:26:22 +0000
-Subject: [PATCH 080/115] The default (FPC) mode inlines like {$mode fpc}
+Subject: [PATCH 080/116] The default (FPC) mode inlines like {$mode fpc}
 
 fpcmodeswitches include m_default_inline, and {$mode fpc} turns cs_do_inline
 on through HandleModeSwitch, but the default settings did not, so a program

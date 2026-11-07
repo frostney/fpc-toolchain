@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 17:08:52 +0000
-Subject: [PATCH 111/115] x86_64: SLP vectoriser for pairs of double
+Subject: [PATCH 111/116] x86_64: SLP vectoriser for pairs of double
  assignments (SSE2)
 
 optslp (optimizer switch SLP, on at -O4) turns two consecutive assignments
