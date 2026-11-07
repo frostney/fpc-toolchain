@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 14:54:52 +0000
-Subject: [PATCH 104/116] Loop strength reduction of a[X+i], a[i+X] and a[X-i]
+Subject: [PATCH 104/117] Loop strength reduction of a[X+i], a[i+X] and a[X-i]
  with X loop invariant
 
 OptimizeInductionVariables replaced a[i] by a pointer stepping through the

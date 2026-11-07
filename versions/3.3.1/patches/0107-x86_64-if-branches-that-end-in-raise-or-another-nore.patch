@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 15:37:25 +0000
-Subject: [PATCH 107/116] x86_64: if branches that end in raise or another
+Subject: [PATCH 107/117] x86_64: if branches that end in raise or another
  noreturn call are placed out of line
 
 FPC's register allocator gives a value one live range from its first to its

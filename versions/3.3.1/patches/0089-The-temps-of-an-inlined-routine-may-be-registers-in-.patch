@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 01:35:57 +0000
-Subject: [PATCH 089/116] The temps of an inlined routine may be registers in a
+Subject: [PATCH 089/117] The temps of an inlined routine may be registers in a
  caller with exception frames
 
 createlocaltemps and the parameter temps asked is_regvar, which refuses all

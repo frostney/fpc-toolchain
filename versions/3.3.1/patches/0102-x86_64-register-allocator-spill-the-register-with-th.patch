@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 14:38:46 +0000
-Subject: [PATCH 102/116] x86_64 register allocator: spill the register with
+Subject: [PATCH 102/117] x86_64 register allocator: spill the register with
  the least weight per interference
 
 select_spill (SPILLING_OLD) took the spill candidate with the most
