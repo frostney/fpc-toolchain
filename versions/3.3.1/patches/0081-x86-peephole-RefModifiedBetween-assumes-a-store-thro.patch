@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 01:08:52 +0000
-Subject: [PATCH 081/117] x86 peephole: RefModifiedBetween assumes a store
+Subject: [PATCH 081/118] x86 peephole: RefModifiedBetween assumes a store
  through another register may alias
 
 RefModifiedBetween only counted a store as a modification of Ref when its

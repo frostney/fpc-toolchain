@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 17:08:37 +0000
-Subject: [PATCH 110/117] DFA life information: tell loads the dfa indexed from
+Subject: [PATCH 110/118] DFA life information: tell loads the dfa indexed from
  nodes that only got optinfo later
 
 get_used_live_regvars (the loop register sync) and optexcregvar take a load

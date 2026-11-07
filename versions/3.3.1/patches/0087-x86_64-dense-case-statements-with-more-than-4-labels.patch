@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 01:27:37 +0000
-Subject: [PATCH 087/117] x86_64: dense case statements with more than 4 labels
+Subject: [PATCH 087/118] x86_64: dense case statements with more than 4 labels
  use a jump table
 
 tx8664casenode.optimizevalues raised max_linear_list by 9, so a case with up

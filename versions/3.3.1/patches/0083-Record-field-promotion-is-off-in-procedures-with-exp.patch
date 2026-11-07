@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 00:53:34 +0000
-Subject: [PATCH 083/117] Record field promotion is off in procedures with
+Subject: [PATCH 083/118] Record field promotion is off in procedures with
  explicit exception handling
 
 optloop._optimize_record_writes keeps the fields of a local record in

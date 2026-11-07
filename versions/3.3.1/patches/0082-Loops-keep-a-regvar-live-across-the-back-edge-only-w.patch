@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 00:30:59 +0000
-Subject: [PATCH 082/117] Loops keep a regvar live across the back edge only
+Subject: [PATCH 082/118] Loops keep a regvar live across the back edge only
  when the DFA says it is live at the loop head
 
 tcgwhilerepeatnode.sync_regvars synchronised every register variable used in
