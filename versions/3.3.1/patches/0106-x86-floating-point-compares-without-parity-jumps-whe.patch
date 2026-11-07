@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 15:06:39 +0000
-Subject: [PATCH 106/113] x86: floating-point compares without parity jumps
+Subject: [PATCH 106/115] x86: floating-point compares without parity jumps
  where the condition does not need them
 
 (u)comiss/(u)comisd set ZF, PF and CF for unordered operands, so "above" and

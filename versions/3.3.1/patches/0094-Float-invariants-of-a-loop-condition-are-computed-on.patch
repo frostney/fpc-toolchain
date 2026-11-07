@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 10:38:25 +0000
-Subject: [PATCH 094/113] Float invariants of a loop condition are computed
+Subject: [PATCH 094/115] Float invariants of a loop condition are computed
  once, under the same guard
 
 "while (i < iter) and (tr + ti <= limit * limit)" multiplied limit by

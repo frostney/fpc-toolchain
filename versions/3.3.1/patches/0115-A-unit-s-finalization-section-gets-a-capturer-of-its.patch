@@ -1,0 +1,168 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 17:43:50 +0000
+Subject: [PATCH 115/115] A unit's finalization section gets a capturer of its
+ own
+
+The capturers of the initialization and finalization sections of a unit
+are both static symbols of the unit and had the same name, so anonymous
+functions in both sections failed with "Duplicate identifier $Capturer".
+The finalization capturer is $Capturer_fini; the lookup of a nested
+routine's capturer by name checks the type. tests/test/tanonfunc76.pp.
+---
+ compiler/procdefutil.pas  | 29 +++++++++++++++++++++------
+ tests/test/tanonfunc76.pp | 17 ++++++++++++++++
+ tests/test/uanonfunc76.pp | 41 +++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 81 insertions(+), 6 deletions(-)
+ create mode 100644 tests/test/tanonfunc76.pp
+ create mode 100644 tests/test/uanonfunc76.pp
+
+diff --git a/compiler/procdefutil.pas b/compiler/procdefutil.pas
+index 584bdd47..0eb26c2c 100644
+--- a/compiler/procdefutil.pas
++++ b/compiler/procdefutil.pas
+@@ -128,6 +128,9 @@ implementation
+     capturer_var_name='Capturer';
+     keepalive_suffix='_keepalive';
+     outer_self_field_name='OuterSelf';
++    { the finalization section of a unit has a capturer of its own next to
++      the one of the initialization section, in the same static symtable }
++    fini_capturer_suffix='_fini';
+ 
+ 
+   procedure convert_to_funcref_intf(const n:tidstring;var def:tdef);
+@@ -365,11 +368,20 @@ implementation
+         acceptable_typ:=true;
+     end;
+ 
++  function capturer_name(pd:tprocdef):tsymstr;
++    begin
++      if pd.proctypeoption=potype_unitfinalize then
++        result:=capturer_var_name+fini_capturer_suffix
++      else
++        result:=capturer_var_name;
++    end;
++
++
+   function get_capturer(pd:tprocdef):tabstractvarsym;
+ 
+     function getsym(st:tsymtable;typ:tsymtyp):tabstractvarsym;
+       begin
+-        result:=tabstractvarsym(st.find(capturer_var_name));
++        result:=tabstractvarsym(st.find(capturer_name(pd)));
+         if not assigned(result) then
+           internalerror(2022010703);
+        if not acceptable_typ(result,typ) then
+@@ -404,7 +416,7 @@ implementation
+ 
+     function getsym(st:tsymtable;typ:tsymtyp):tabstractvarsym;
+       begin
+-        result:=tabstractvarsym(st.find(capturer_var_name+keepalive_suffix));
++        result:=tabstractvarsym(st.find(capturer_name(pd)+keepalive_suffix));
+         if not assigned(result) then
+           internalerror(2022051703);
+         if not acceptable_typ(result,typ) then
+@@ -486,17 +498,17 @@ implementation
+             end;}
+ 
+           if st.symtabletype=localsymtable then
+-            result:=clocalvarsym.create('$'+capturer_var_name,vs_value,def,[vo_is_internal])
++            result:=clocalvarsym.create('$'+capturer_name(pd),vs_value,def,[vo_is_internal])
+           else
+-            result:=cstaticvarsym.create('$'+capturer_var_name,vs_value,def,[vo_is_internal]);
++            result:=cstaticvarsym.create('$'+capturer_name(pd),vs_value,def,[vo_is_internal]);
+           result.fileinfo:=pd.fileinfo;
+           st.insertsym(result);
+           addsymref(result);
+ 
+           if st.symtabletype=localsymtable then
+-            keepalive:=clocalvarsym.create('$'+capturer_var_name+keepalive_suffix,vs_value,interface_iunknown,[vo_is_internal])
++            keepalive:=clocalvarsym.create('$'+capturer_name(pd)+keepalive_suffix,vs_value,interface_iunknown,[vo_is_internal])
+           else
+-            keepalive:=cstaticvarsym.create('$'+capturer_var_name+keepalive_suffix,vs_value,interface_iunknown,[vo_is_internal]);
++            keepalive:=cstaticvarsym.create('$'+capturer_name(pd)+keepalive_suffix,vs_value,interface_iunknown,[vo_is_internal]);
+           keepalive.fileinfo:=pd.fileinfo;
+           st.insertsym(keepalive);
+           addsymref(keepalive);
+@@ -1802,6 +1814,11 @@ implementation
+               if not (capturer.typesym.owner.symtabletype in [localsymtable,staticsymtable]) then
+                 internalerror(2022012702);
+               selfsym:=tsym(capturer.typesym.owner.find(capturer_var_name));
++              { the static symtable of a unit can also hold the capturer of
++                the finalization section }
++              if not assigned(selfsym) or
++                 (tabstractvarsym(selfsym).vardef<>capturer) then
++                selfsym:=tsym(capturer.typesym.owner.find(capturer_var_name+fini_capturer_suffix));
+               if not assigned(selfsym) then
+                 internalerror(2022012703);
+               mapping^.selfnode:=self_tree_for_sym(selfsym,mapping^.newsym);
+diff --git a/tests/test/tanonfunc76.pp b/tests/test/tanonfunc76.pp
+new file mode 100644
+index 00000000..5c362a77
+--- /dev/null
++++ b/tests/test/tanonfunc76.pp
+@@ -0,0 +1,17 @@
++{ anonymous functions nested in anonymous functions of a unit's
++  initialization and finalization sections (gitlab #40316) }
++program tanonfunc76;
++
++{$mode objfpc}{$H+}
++
++uses
++  uanonfunc76;
++
++begin
++  if initresult <> 43 then
++    begin
++      writeln('initialization: got ', initresult);
++      halt(1);
++    end;
++  writeln('ok');
++end.
+diff --git a/tests/test/uanonfunc76.pp b/tests/test/uanonfunc76.pp
+new file mode 100644
+index 00000000..63999d4b
+--- /dev/null
++++ b/tests/test/uanonfunc76.pp
+@@ -0,0 +1,41 @@
++unit uanonfunc76;
++
++{$mode objfpc}{$H+}
++{$modeswitch anonymousfunctions}
++{$modeswitch functionreferences}
++
++interface
++
++type
++  TIntFunc = reference to function(x: Integer): Integer;
++  TMaker = reference to function(n: Integer): TIntFunc;
++
++var
++  initresult: Integer;
++
++implementation
++
++var
++  mk: TMaker;
++
++initialization
++  mk := function(n: Integer): TIntFunc
++        begin
++          Result := function(x: Integer): Integer
++                    begin
++                      Result := x * 10 + n;
++                    end;
++        end;
++  initresult := mk(3)(4);
++finalization
++  { the same in the finalization section }
++  mk := function(n: Integer): TIntFunc
++        begin
++          Result := function(x: Integer): Integer
++                    begin
++                      Result := x * 10 + n;
++                    end;
++        end;
++  if mk(5)(6) <> 65 then
++    halt(2);
++end.

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 12:14:51 +0000
-Subject: [PATCH 097/113] A procedure variable made from an inline routine is
+Subject: [PATCH 097/115] A procedure variable made from an inline routine is
  not inline
 
 tprocdef.getcopyas(procvardef) copied the routine's procoptions, po_inline

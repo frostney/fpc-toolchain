@@ -8,7 +8,9 @@ variables with exception handling, loop and induction variable optimisations, in
 vectoriser at -O4 with its `SLP` optimizer switch, peephole rules), together with the wrong-code bugs it found
 in the base (constant propagation inside an assignment, inline routines with try, procvars from inline
 routines, record promotion with exceptions, x86 peephole aliasing, flags of float compares) and in its own work;
-every patch that fixes wrong code carries a test under `tests/test`. `toolchain.conf` pins the
+every patch that fixes wrong code carries a test under `tests/test`. 0114-0115 fix anonymous functions nested in
+anonymous functions of the main block or of initialization/finalization sections (gitlab #40316) and anonymous
+functions in both sections of a unit. `toolchain.conf` pins the
 resulting tree (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
 To take a new series from a branch built on the same base:

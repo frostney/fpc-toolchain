@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 17:25:40 +0000
-Subject: [PATCH 113/113] optslp: copied loads keep their node DFA index
+Subject: [PATCH 113/115] optslp: copied loads keep their node DFA index
 
 The loads that optslp copies (operands of packs and broadcasts, vector load
 addresses, the targets of the element extraction, hoisted loads) had no DFA
