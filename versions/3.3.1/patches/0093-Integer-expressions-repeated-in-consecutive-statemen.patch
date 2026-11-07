@@ -1,0 +1,403 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 08:06:04 +0000
+Subject: [PATCH 093/118] Integer expressions repeated in consecutive
+ statements are computed once
+
+The node CSE works inside one statement, so in the swap
+"t := p[i]; p[i] := p[k - i]; p[k - i] := t" the index k - i, with its
+sign extensions, was computed twice. optloop.optimize_stmt_cse (-O3) looks
+at lists of simple statements (assignments, inc/dec): an expression built
+like the loop invariant ones (constants, unaliased locals and by-value
+parameters, integer arithmetic and conversions), not a bare variable or
+extension, that occurs in at least two statements before one of them writes
+one of its variables is computed into a temp before the first of them. It
+cannot fault, and calls cannot change such variables; a compound statement
+or a label ends the window. tests/test/opt/tstmtcse1.pp.
+---
+ compiler/optloop.pas        | 253 ++++++++++++++++++++++++++++++++++++
+ compiler/psub.pas           |   1 +
+ tests/test/opt/tstmtcse1.pp |  91 +++++++++++++
+ 3 files changed, 345 insertions(+)
+ create mode 100644 tests/test/opt/tstmtcse1.pp
+
+diff --git a/compiler/optloop.pas b/compiler/optloop.pas
+index c599d900..9ce16ded 100644
+--- a/compiler/optloop.pas
++++ b/compiler/optloop.pas
+@@ -42,6 +42,9 @@ unit optloop;
+     { moves pure integer expressions of variables a loop does not write out of
+       the loop, see optimize_loop_invariants in the implementation }
+     function optimize_loop_invariants(var n: tnode): boolean;
++    { an integer expression repeated in consecutive statements is computed
++      once, see optimize_stmt_cse in the implementation }
++    function optimize_stmt_cse(var n: tnode): boolean;
+ 
+   implementation
+ 
+@@ -1718,6 +1721,256 @@ unit optloop;
+       end;
+ 
+ 
++{****************************************************************************
++                 Integer expressions repeated across statements
++****************************************************************************}
++
++    {
++      The node CSE (optcse) works inside one statement. In
++
++        temp := perm[i]; perm[i] := perm[k - i]; perm[k - i] := temp;
++
++      k - i (with its sign extensions) is computed twice. Within a list of
++      simple statements (assignments, inc/dec) an expression built like the
++      loop invariant ones (constants, unaliased locals and by-value
++      parameters, integer +, -, *, and, or, xor, shl, shr, conversions), that
++      is not a bare variable or extension and occurs in at least two
++      statements before one of them writes one of its variables, is computed
++      into a temp before the first of them. It cannot fault, and calls cannot
++      change such variables. A compound statement or a label ends the window.
++    }
++
++    type
++      tstmtcseinfo = record
++        leaves : TFPList;    { syms of the candidate's variables }
++        written : boolean;
++        cand : tnode;
++        count : longint;
++        temp : ttempcreatenode;
++      end;
++      pstmtcseinfo = ^tstmtcseinfo;
++
++
++    function stmtcse_pure(n: tnode): boolean;
++      var
++        sym: tabstractvarsym;
++      begin
++        result:=false;
++        case n.nodetype of
++          ordconstn:
++            result:=true;
++          loadn:
++            begin
++              sym:=local_store_base(n);
++              result:=assigned(sym) and
++                (sym.vardef.typ in [orddef,enumdef]);
++            end;
++          typeconvn:
++            result:=(ttypeconvnode(n).convtype in [tc_int_2_int,tc_equal]) and
++              (ttypeconvnode(n).left.resultdef.typ in [orddef,enumdef]) and
++              stmtcse_pure(ttypeconvnode(n).left);
++          addn,subn,muln,andn,orn,xorn,shln,shrn:
++            result:=is_integer(n.resultdef) and
++              stmtcse_pure(tbinarynode(n).left) and
++              stmtcse_pure(tbinarynode(n).right);
++          else
++            ;
++        end;
++      end;
++
++
++    function stmtcse_worth(n: tnode): boolean;
++      begin
++        result:=(n.nodetype in [addn,subn,muln,andn,orn,xorn,shln,shrn,typeconvn]) and
++          assigned(n.resultdef) and is_integer(n.resultdef) and
++          (n.resultdef.size<=sizeof(aint)) and
++          not((n.nodetype=typeconvn) and (ttypeconvnode(n).left.nodetype in [loadn,ordconstn])) and
++          stmtcse_pure(n);
++      end;
++
++
++    function stmtcse_simple(n: tnode): boolean;
++      begin
++        result:=assigned(n) and
++          ((n.nodetype=assignn) or
++           ((n.nodetype=inlinen) and (tinlinenode(n).inlinenumber in [in_inc_x,in_dec_x])));
++      end;
++
++
++    function stmtcse_collectleaves(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        info: pstmtcseinfo absolute arg;
++      begin
++        result:=fen_false;
++        if (n.nodetype=loadn) and (info^.leaves.IndexOf(tloadnode(n).symtableentry)<0) then
++          info^.leaves.Add(tloadnode(n).symtableentry);
++      end;
++
++
++    function stmtcse_writes(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        info: pstmtcseinfo absolute arg;
++      begin
++        result:=fen_false;
++        if (n.nodetype=loadn) and
++           ((n.flags*[nf_write,nf_modify])<>[]) and
++           (info^.leaves.IndexOf(tloadnode(n).symtableentry)>=0) then
++          info^.written:=true;
++      end;
++
++
++    function stmtcse_count(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        info: pstmtcseinfo absolute arg;
++      begin
++        result:=fen_false;
++        if n.isequal(info^.cand) then
++          begin
++            inc(info^.count);
++            result:=fen_norecurse_false;
++          end;
++      end;
++
++
++    function stmtcse_replace(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        info: pstmtcseinfo absolute arg;
++        hp: tnode;
++      begin
++        result:=fen_false;
++        if n.isequal(info^.cand) then
++          begin
++            hp:=ctemprefnode.create(info^.temp);
++            hp.fileinfo:=n.fileinfo;
++            typecheckpass(hp);
++            n.free;
++            n:=hp;
++            result:=fen_norecurse_true;
++          end;
++      end;
++
++
++    function stmtcse_findcand(var n: tnode; arg: pointer): foreachnoderesult;
++      begin
++        result:=fen_false;
++        if stmtcse_worth(n) then
++          begin
++            TFPList(arg).Add(n);
++            result:=fen_norecurse_false;
++          end;
++      end;
++
++
++    function _optimize_stmt_cse(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        stmts, cands: TFPList;
++        hp: tnode;
++        a, b, last, i, j, occurrences: longint;
++        info: tstmtcseinfo;
++        changed: boolean;
++        newstat: tstatementnode;
++        blk: tblocknode;
++      begin
++        result:=fen_false;
++        if n.nodetype<>blockn then
++          exit;
++        stmts:=TFPList.Create;
++        cands:=TFPList.Create;
++        info.leaves:=TFPList.Create;
++        try
++          hp:=tblocknode(n).left;
++          while assigned(hp) and (hp.nodetype=statementn) do
++            begin
++              stmts.Add(hp);
++              hp:=tstatementnode(hp).right;
++            end;
++          if stmts.Count<2 then
++            exit;
++          changed:=false;
++          a:=0;
++          while a<stmts.Count-1 do
++            begin
++              hp:=tstatementnode(stmts[a]).left;
++              if not stmtcse_simple(hp) then
++                begin
++                  inc(a);
++                  continue;
++                end;
++              cands.Clear;
++              foreachnodestatic(pm_postprocess,hp,@stmtcse_findcand,cands);
++              for i:=0 to cands.Count-1 do
++                begin
++                  info.cand:=tnode(cands[i]);
++                  info.leaves.Clear;
++                  foreachnodestatic(pm_postprocess,info.cand,@stmtcse_collectleaves,@info);
++                  { statement a itself writes a variable: no later use sees the
++                    same value }
++                  info.written:=false;
++                  foreachnodestatic(pm_postprocess,tstatementnode(stmts[a]).left,@stmtcse_writes,@info);
++                  if info.written then
++                    continue;
++                  occurrences:=1;
++                  last:=a;
++                  b:=a+1;
++                  while (b<stmts.Count) and stmtcse_simple(tstatementnode(stmts[b]).left) do
++                    begin
++                      info.count:=0;
++                      foreachnodestatic(pm_postprocess,tstatementnode(stmts[b]).left,@stmtcse_count,@info);
++                      if info.count>0 then
++                        begin
++                          inc(occurrences);
++                          last:=b;
++                        end;
++                      info.written:=false;
++                      foreachnodestatic(pm_postprocess,tstatementnode(stmts[b]).left,@stmtcse_writes,@info);
++                      if info.written then
++                        break;
++                      inc(b);
++                    end;
++                  if occurrences<2 then
++                    continue;
++                  { temp := e before statement a, uses in a..last replaced }
++                  info.cand:=info.cand.getcopy;
++                  info.temp:=ctempcreatenode.create(info.cand.resultdef,info.cand.resultdef.size,tt_persistent,true);
++                  for j:=a to last do
++                    foreachnodestatic(pm_postprocess,tstatementnode(stmts[j]).left,@stmtcse_replace,@info);
++                  { statement a: temp; temp := e; the statement }
++                  blk:=internalstatements(newstat);
++                  addstatement(newstat,info.temp);
++                  addstatement(newstat,cassignmentnode.create_internal(ctemprefnode.create(info.temp),info.cand));
++                  addstatement(newstat,tstatementnode(stmts[a]).left);
++                  do_firstpass(tnode(blk));
++                  tstatementnode(stmts[a]).left:=blk;
++                  { statement last: the statement; release the temp }
++                  blk:=internalstatements(newstat);
++                  addstatement(newstat,tstatementnode(stmts[last]).left);
++                  addstatement(newstat,ctempdeletenode.create(info.temp));
++                  do_firstpass(tnode(blk));
++                  tstatementnode(stmts[last]).left:=blk;
++                  changed:=true;
++                  break;
++                end;
++              inc(a);
++            end;
++          if changed then
++            result:=fen_true;
++        finally
++          stmts.Free;
++          cands.Free;
++          info.leaves.Free;
++        end;
++      end;
++
++
++    function optimize_stmt_cse(var n: tnode): boolean;
++      begin
++        result:=false;
++        if (current_procinfo.flags*[pi_uses_exceptions,pi_has_label,pi_has_interproclabel,pi_has_assembler_block])<>[] then
++          exit;
++        result:=foreachnodestatic(pm_postprocess,n,@_optimize_stmt_cse,nil);
++      end;
++
++
+     type
+       toptimizeforloopcontext = object
+         changedforloop : boolean;
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index 706dced2..642fd812 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -1272,6 +1272,7 @@ implementation
+              begin
+                RedoDFA:=optimize_loop_stores(code) or RedoDFA;
+                RedoDFA:=optimize_loop_invariants(code) or RedoDFA;
++               RedoDFA:=optimize_stmt_cse(code) or RedoDFA;
+              end;
+ 
+            if RedoDFA then
+diff --git a/tests/test/opt/tstmtcse1.pp b/tests/test/opt/tstmtcse1.pp
+new file mode 100644
+index 00000000..7240ae4d
+--- /dev/null
++++ b/tests/test/opt/tstmtcse1.pp
+@@ -0,0 +1,91 @@
++{ %OPT=-O3 }
++{ integer expressions repeated across statements (optloop.optimize_stmt_cse) }
++program tstmtcse1;
++
++{$mode objfpc}
++
++var
++  errors: longint = 0;
++
++procedure check(ok: boolean; const what: string);
++begin
++  if not ok then
++    begin
++      writeln('failed: ', what);
++      inc(errors);
++    end;
++end;
++
++{ the fannkuch swap: k - i used as index in consecutive statements }
++procedure flip(var p: array of longint; k: longint);
++var
++  i, t: longint;
++begin
++  for i := 0 to (k + 1) shr 1 - 1 do
++    begin
++      t := p[i];
++      p[i] := p[k - i];
++      p[k - i] := t;
++    end;
++end;
++
++{ a is written between the uses: the second a + b is a new value }
++function between(a, b: longint): longint;
++var
++  x, y: longint;
++begin
++  x := (a + b) * 3;
++  a := a + 1;
++  y := (a + b) * 3;
++  result := x * 1000 + y;
++end;
++
++{ the first statement writes a variable of the expression }
++function selfwrite(a, b: longint): longint;
++var
++  y: longint;
++begin
++  a := (a + b) * 2;
++  y := (a + b) * 2;
++  result := a * 1000 + y;
++end;
++
++{ inc writes the variable }
++function incwrite(a, b: longint): longint;
++var
++  x, y: longint;
++begin
++  x := a * b + 7;
++  inc(b);
++  y := a * b + 7;
++  result := x * 1000 + y;
++end;
++
++{ a compound statement in between ends the window }
++function compound(a, b, n: longint): longint;
++var
++  x, y, i: longint;
++begin
++  x := a * b + 1;
++  for i := 1 to n do
++    a := a + 1;
++  y := a * b + 1;
++  result := x * 1000 + y;
++end;
++
++var
++  p: array[0..5] of longint;
++  i: longint;
++begin
++  for i := 0 to 5 do
++    p[i] := i;
++  flip(p, 5);
++  check((p[0] = 5) and (p[1] = 4) and (p[2] = 3) and (p[3] = 2) and (p[4] = 1) and (p[5] = 0), 'flip');
++  check(between(2, 3) = 15 * 1000 + 18, 'between');
++  check(selfwrite(2, 3) = 10 * 1000 + 26, 'selfwrite');
++  check(incwrite(2, 3) = 13 * 1000 + 15, 'incwrite');
++  check(compound(2, 3, 4) = 7 * 1000 + 19, 'compound');
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

@@ -1,0 +1,231 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 15:06:39 +0000
+Subject: [PATCH 106/118] x86: floating-point compares without parity jumps
+ where the condition does not need them
+
+(u)comiss/(u)comisd set ZF, PF and CF for unordered operands, so "above" and
+"above or equal" are false then by themselves; "below (or equal)" needs a
+parity check. second_cmpfloatvector now orders the operands of <, <=, >, >=
+so that the condition is an "above" one (loading the other operand into a
+register when needed), and a new peephole step (TryRemoveRedundantJP, in
+pass 1, pass 2 around the jump optimisations and the post pass) removes a
+parity jump after a comis that skips just a jump on "above (or equal)" or
+that goes where a jump on "below (or equal)"/"equal" next to it goes: the
+code generator always emits one around an "above" jump (a_jmp_flags).
+mandelbrot loop condition, fasta's binary search: instructions -4.8%, -2.5%;
+covered by tests/test/tfpcmpnan1.pp.
+---
+ compiler/x86/aoptx86.pas    | 115 ++++++++++++++++++++++++++++++++++++
+ compiler/x86/nx86add.pas    |  27 ++++++++-
+ compiler/x86_64/aoptcpu.pas |   2 +
+ 3 files changed, 143 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 174cf181..4db7bace 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -212,6 +212,7 @@ unit aoptx86;
+         function OptPass1VPXor(var p: tai): boolean;
+         function OptPass1Imul(var p : tai) : boolean;
+         function OptPass1Jcc(var p : tai) : boolean;
++        function TryRemoveRedundantJP(var p : tai) : boolean;
+         function OptPass1SHXX(var p: tai): boolean;
+         function OptPass1VMOVDQ(var p: tai): Boolean;
+         function OptPass1_V_Cvtss2sd(var p: tai): boolean;
+@@ -9954,12 +9955,120 @@ unit aoptx86;
+      end;
+ 
+ 
++   { (u)comiss/(u)comisd set ZF, PF and CF to 1 for unordered operands, so
++     after them PF=1 implies CF=1 and ZF=1: a parity jump next to a jump on
++     "above (or equal)" that it skips, or next to a jump on "below (or
++     equal)" or "equal" to the same label, changes nothing. The code
++     generator always emits the parity jump around an "above" jump
++     (a_jmp_flags) and leaves its removal to this optimisation. }
++   function TX86AsmOptimizer.TryRemoveRedundantJP(var p : tai) : boolean;
++
++     function flags_from_comis(start: tai): boolean;
++       var
++         hp: tai;
++       begin
++         result:=false;
++         hp:=start;
++         while GetLastInstruction(hp,hp) do
++           begin
++             if (hp.typ<>ait_instruction) then
++               exit;
++             case taicpu(hp).opcode of
++               A_COMISS,A_COMISD,A_UCOMISS,A_UCOMISD,
++               A_VCOMISS,A_VCOMISD,A_VUCOMISS,A_VUCOMISD:
++                 exit(true);
++               else
++                 ;
++             end;
++             if RegModifiedByInstruction(NR_DEFAULTFLAGS,hp) or
++                (taicpu(hp).opcode=A_CALL) or
++                (taicpu(hp).opcode=A_JMP) or
++                (taicpu(hp).opcode=A_RET) or
++                taicpu(hp).is_jmp then
++               exit;
++           end;
++       end;
++
++     { sym is one of the labels right after hp (consecutive labels are the
++       same address) }
++     function next_is_label(hp: tai; sym: tasmsymbol): boolean;
++       begin
++         result:=false;
++         hp:=tai(hp.next);
++         while assigned(hp) and
++               ((hp.typ in SkipInstr+[ait_align]) or
++                (hp.typ=ait_label)) do
++           begin
++             if (hp.typ=ait_label) and (tai_label(hp).labsym=sym) then
++               exit(true);
++             hp:=tai(hp.next);
++           end;
++       end;
++
++     function jcc_target(hp: tai): tasmsymbol;
++       begin
++         result:=nil;
++         if (taicpu(hp).ops=1) and (taicpu(hp).oper[0]^.typ=top_ref) and
++            (taicpu(hp).oper[0]^.ref^.refaddr=addr_full) then
++           result:=taicpu(hp).oper[0]^.ref^.symbol;
++       end;
++
++     var
++       hp1: tai;
++       jpsym, sym1: tasmsymbol;
++     begin
++       Result:=false;
++       { the parity jump first }
++       if (taicpu(p).condition in [C_P,C_PE]) and
++          GetNextInstruction(p,hp1) and
++          (hp1.typ=ait_instruction) and
++          (taicpu(hp1).opcode=A_Jcc) then
++         begin
++           jpsym:=jcc_target(p);
++           sym1:=jcc_target(hp1);
++           if not assigned(jpsym) or not assigned(sym1) or
++              not flags_from_comis(p) then
++             exit;
++           if ((taicpu(hp1).condition in [C_A,C_NBE,C_AE,C_NB,C_NC]) and
++               next_is_label(hp1,jpsym)) or
++              ((taicpu(hp1).condition in [C_B,C_C,C_NAE,C_BE,C_NA,C_E,C_Z]) and
++               (sym1=jpsym)) then
++             begin
++               DebugMsg(SPeepholeOptimization + 'JpJcc2Jcc (unordered comis)',p);
++               tasmlabel(jpsym).decrefs;
++               RemoveCurrentP(p,hp1);
++               Result:=true;
++             end;
++         end
++       { a jump on "below (or equal)" or "equal", then the parity jump }
++       else if (taicpu(p).condition in [C_B,C_C,C_NAE,C_BE,C_NA,C_E,C_Z]) and
++          GetNextInstruction(p,hp1) and
++          (hp1.typ=ait_instruction) and
++          (taicpu(hp1).opcode=A_Jcc) and
++          (taicpu(hp1).condition in [C_P,C_PE]) then
++         begin
++           sym1:=jcc_target(p);
++           jpsym:=jcc_target(hp1);
++           if assigned(sym1) and (sym1=jpsym) and
++              flags_from_comis(p) then
++             begin
++               DebugMsg(SPeepholeOptimization + 'JccJp2Jcc (unordered comis)',hp1);
++               tasmlabel(jpsym).decrefs;
++               RemoveInstruction(hp1);
++               Result:=true;
++             end;
++         end;
++     end;
++
++
+    function TX86AsmOptimizer.OptPass1Jcc(var p : tai) : boolean;
+      var
+        hp1, hp2, hp3, hp4, hp5: tai;
+        ThisReg: TRegister;
+      begin
+        Result := False;
++       if TryRemoveRedundantJP(p) then
++         Exit(True);
+        if not GetNextInstruction(p,hp1) then
+          Exit;
+ 
+@@ -15143,10 +15252,16 @@ unit aoptx86;
+         TempBool: Boolean;
+ 
+       begin
++        if TryRemoveRedundantJP(p) then
++          Exit(True);
++
+         if (aoc_DoPass2JccOpts in OptsToCheck) and
+           DoJumpOptimizations(p, TempBool) then
+           Exit(True);
+ 
++        if TryRemoveRedundantJP(p) then
++          Exit(True);
++
+         result:=false;
+         if GetNextInstruction(p,hp1) then
+           begin
+diff --git a/compiler/x86/nx86add.pas b/compiler/x86/nx86add.pas
+index 4ba3b26c..123241bc 100644
+--- a/compiler/x86/nx86add.pas
++++ b/compiler/x86/nx86add.pas
+@@ -1603,6 +1603,7 @@ unit nx86add;
+     procedure tx86addnode.second_cmpfloatvector;
+       var
+         op : tasmop;
++        rightdst : boolean;
+       const
+         ops_single: array[boolean] of tasmop = (A_COMISS,A_VCOMISS);
+         ops_double: array[boolean] of tasmop = (A_COMISD,A_VCOMISD);
+@@ -1629,7 +1630,31 @@ unit nx86add;
+         if right.location.loc in [LOC_FPUREGISTER,LOC_CFPUREGISTER] then
+           hlcg.location_force_mem(current_asmdata.CurrAsmList,right.location,right.resultdef);
+ 
+-        if (right.location.loc in [LOC_MMREGISTER,LOC_CMMREGISTER]) then
++        { (u)comis sets ZF, PF and CF for unordered operands: "above" and
++          "above or equal" are false then without a parity check, "below"
++          and "below or equal" need one (a second jump or setcc). Compare
++          in the order that gives an "above" condition, also when that
++          needs the other operand in a register }
++        if (nodetype in [ltn,lten,gtn,gten]) then
++          begin
++            toggleflag(nf_swapped);
++            rightdst:=getfpuresflags in [F_FA,F_FAE];
++            toggleflag(nf_swapped);
++            if rightdst and
++               not(right.location.loc in [LOC_MMREGISTER,LOC_CMMREGISTER]) then
++              hlcg.location_force_mmregscalar(current_asmdata.CurrAsmList,right.location,right.resultdef,true)
++            else if not(rightdst) and
++               (right.location.loc in [LOC_MMREGISTER,LOC_CMMREGISTER]) and
++               not(left.location.loc in [LOC_MMREGISTER,LOC_CMMREGISTER]) then
++              hlcg.location_force_mmregscalar(current_asmdata.CurrAsmList,left.location,left.resultdef,true);
++          end
++        else
++          rightdst:=right.location.loc in [LOC_MMREGISTER,LOC_CMMREGISTER];
++        if rightdst and
++           not(left.location.loc in [LOC_REFERENCE,LOC_CREFERENCE,LOC_MMREGISTER,LOC_CMMREGISTER]) then
++          hlcg.location_force_mmregscalar(current_asmdata.CurrAsmList,left.location,left.resultdef,true);
++
++        if rightdst then
+           begin
+             { the flags are live from the compare to their use: without the
+               allocation, the peephole optimiser may put a flag-changing
+diff --git a/compiler/x86_64/aoptcpu.pas b/compiler/x86_64/aoptcpu.pas
+index 260bed3f..770aeb57 100644
+--- a/compiler/x86_64/aoptcpu.pas
++++ b/compiler/x86_64/aoptcpu.pas
+@@ -331,6 +331,8 @@ uses
+                   Result:=PostPeepholeOptSARXSHLXSHRX(p);
+                 A_RORX:
+                   Result:=PostPeepholeOptRORX(p);
++                A_Jcc:
++                  Result:=TryRemoveRedundantJP(p);
+                 else
+                   ;
+               end;

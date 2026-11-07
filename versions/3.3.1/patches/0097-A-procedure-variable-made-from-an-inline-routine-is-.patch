@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 12:14:51 +0000
+Subject: [PATCH 097/118] A procedure variable made from an inline routine is
+ not inline
+
+tprocdef.getcopyas(procvardef) copied the routine's procoptions, po_inline
+included, so a call through a function reference (or a procedure variable)
+made from an inline routine looked inlinable, and doinline found no inline
+code: internal error 200412021 at any optimisation level (and with
+-OoAUTOINLINE in tests/test/tfuncref3, 8, 33, 51, 54). The copy drops
+po_inline. tests/test/tfuncrefinline1.pp.
+---
+ compiler/symdef.pas           |  4 ++++
+ tests/test/tfuncrefinline1.pp | 30 ++++++++++++++++++++++++++++++
+ 2 files changed, 34 insertions(+)
+ create mode 100644 tests/test/tfuncrefinline1.pp
+
+diff --git a/compiler/symdef.pas b/compiler/symdef.pas
+index c50a1d1f..2e4fe9e3 100644
+--- a/compiler/symdef.pas
++++ b/compiler/symdef.pas
+@@ -7260,6 +7260,10 @@ implementation
+         result:=inherited;
+         if newtyp=procvardef then
+           begin
++            { a call through a procedure variable or function reference is
++              never inlined: the procvar has no inline code (calling one built
++              from an inline routine raised internal error 200412021) }
++            exclude(tprocvardef(result).procoptions,po_inline);
+             { create new paralist }
+             tprocvardef(result).calcparas;
+             exit;
+diff --git a/tests/test/tfuncrefinline1.pp b/tests/test/tfuncrefinline1.pp
+new file mode 100644
+index 00000000..64619758
+--- /dev/null
++++ b/tests/test/tfuncrefinline1.pp
+@@ -0,0 +1,30 @@
++{ an inline routine assigned to a function reference or a procedure
++  variable: the call through it is not inlined (internal error 200412021) }
++program tfuncrefinline1;
++
++{$mode objfpc}
++{$modeswitch functionreferences}
++
++var
++  testvar, testuse: longint;
++  proc1: reference to procedure;
++  proc2: procedure;
++
++procedure testproc; inline;
++begin
++  testvar := testuse;
++end;
++
++begin
++  proc1 := @testproc;
++  testuse := 42;
++  proc1();
++  if testvar <> 42 then
++    halt(1);
++  proc2 := @testproc;
++  testuse := 21;
++  proc2();
++  if testvar <> 21 then
++    halt(2);
++  writeln('ok');
++end.

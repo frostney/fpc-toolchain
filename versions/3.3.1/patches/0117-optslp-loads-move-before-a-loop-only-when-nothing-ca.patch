@@ -1,0 +1,503 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 19:13:25 +0000
+Subject: [PATCH 117/118] optslp: loads move before a loop only when nothing
+ can tell
+
+Invariant-load hoisting took the parameters of include, exclude and other
+inline routines that write them for reads, so the loop updated the hoisted
+copy and the store was lost. It also hoisted loads out of loops that a goto
+can enter, and before a statement of the first iteration that raises an
+exception (an integer division by zero then raised EAccessViolation
+instead). Loops with a label are now left alone, the parameters of inline
+routines other than those known to only read them count as stores, and a
+load moves only when the first iteration dereferences its pointer before
+anything that can raise or store where an exception handler sees it; later
+loads through that pointer read the same object. tests/test/opt/tslp3.pp;
+tslp2's negated condition now uses a boolean, which keeps lnf_checknegate.
+---
+ compiler/optslp.pas     | 188 +++++++++++++++++++++++++++++++++++++++-
+ tests/test/opt/tslp2.pp |   8 +-
+ tests/test/opt/tslp3.pp | 159 +++++++++++++++++++++++++++++++++
+ 3 files changed, 351 insertions(+), 4 deletions(-)
+ create mode 100644 tests/test/opt/tslp3.pp
+
+diff --git a/compiler/optslp.pas b/compiler/optslp.pas
+index ab17ddd5..a6338688 100644
+--- a/compiler/optslp.pas
++++ b/compiler/optslp.pas
+@@ -1174,10 +1174,64 @@ type
+     packs: boolean;       { looking for packs and broadcasts instead of loads }
+     copies: TFPList;      { a copy of each distinct candidate }
+     temps: TFPList;
++    { the first iteration may already have raised an exception or changed
++      memory that an exception handler sees: a load moved before the loop
++      could then raise first or instead }
++    blocked: boolean;
++    { pointers dereferenced before that point: the first iteration faults on
++      them before it does anything else, so loads through them can move }
++    safeptrs: TFPList;
+   end;
+   phoistinfo = ^thoistinfo;
+ 
+ 
++{ inline routines that only read their parameters }
++const
++  hoist_readonly_inlines = [in_lo_word,in_hi_word,in_lo_long,in_hi_long,in_lo_qword,in_hi_qword,
++    in_ord_x,in_chr_byte,in_assigned_x,in_sizeof_x,in_bitsizeof_x,in_low_x,in_high_x,
++    in_pred_x,in_succ_x,in_abs_long,in_ror_x,in_ror_x_y,in_rol_x,in_rol_x_y,in_sar_x,in_sar_x_y,
++    in_bsf_x,in_bsr_x,in_popcnt_x,
++    in_trunc_real,in_round_real,in_frac_real,in_int_real,in_exp_real,in_cos_real,in_pi_real,
++    in_abs_real,in_sqr_real,in_sqrt_real,in_arctan_real,in_ln_real,in_sin_real,
++    in_fma_single,in_fma_double,in_fma_extended,in_fma_float128,
++    in_max_single,in_max_double,in_min_single,in_min_double,in_min_dword,in_min_longint,
++    in_max_dword,in_max_longint,in_min_qword,in_min_int64,in_max_qword,in_max_int64,
++    in_vec2d_pack,in_vec2d_add,in_vec2d_sub,in_vec2d_mul,in_vec2d_div,in_vec2d_dup,
++    in_vec2d_lo,in_vec2d_hi];
++  { of those, the ones that cannot raise an exception }
++  hoist_nontrapping_inlines = [in_lo_word,in_hi_word,in_lo_long,in_hi_long,in_lo_qword,in_hi_qword,
++    in_ord_x,in_chr_byte,in_assigned_x,in_sizeof_x,in_bitsizeof_x,in_low_x,in_high_x,
++    in_pred_x,in_succ_x,in_abs_long,in_ror_x,in_ror_x_y,in_rol_x,in_rol_x_y,in_sar_x,in_sar_x_y,
++    in_bsf_x,in_bsr_x,in_popcnt_x,in_abs_real,in_vec2d_pack,in_vec2d_dup,in_vec2d_lo,in_vec2d_hi];
++
++
++{ every parameter of an inline routine that may write it is a store }
++procedure hoist_inline_stores(hi: phoistinfo; n: tinlinenode);
++  var
++    para, hp: tnode;
++  begin
++    para:=n.left;
++    while assigned(para) do
++      begin
++        if para.nodetype=callparan then
++          hp:=tcallparanode(para).left
++        else
++          hp:=para;
++        if assigned(hp) then
++          begin
++            hp:=strip_conv(hp);
++            if hp.nodetype in [loadn,temprefn] then
++              hi^.written.Add(hp);
++            hi^.stores.Add(hp);
++          end;
++        if para.nodetype=callparan then
++          para:=tcallparanode(para).right
++        else
++          para:=nil;
++      end;
++  end;
++
++
+ function hoist_scan(var n: tnode; arg: pointer): foreachnoderesult;
+   var
+     hi: phoistinfo absolute arg;
+@@ -1185,7 +1239,9 @@ function hoist_scan(var n: tnode; arg: pointer): foreachnoderesult;
+   begin
+     result:=fen_false;
+     case n.nodetype of
+-      calln,asmn:
++      { a label in the loop: a goto may enter the body without passing the
++        loads moved before the loop }
++      calln,asmn,labeln:
+         hi^.abort:=true;
+       assignn:
+         hi^.stores.Add(tassignmentnode(n).left);
+@@ -1194,7 +1250,9 @@ function hoist_scan(var n: tnode; arg: pointer): foreachnoderesult;
+           begin
+             para:=tcallparanode(tinlinenode(n).left).left;
+             hi^.stores.Add(para);
+-          end;
++          end
++        else if not (tinlinenode(n).inlinenumber in hoist_readonly_inlines) then
++          hoist_inline_stores(hi,tinlinenode(n));
+       loadn,temprefn:
+         if (n.flags*[nf_write,nf_modify])<>[] then
+           hi^.written.Add(n);
+@@ -1291,6 +1349,17 @@ function store_conflicts(hi: phoistinfo; const acc: taccess): boolean;
+   end;
+ 
+ 
++function is_safeptr(hi: phoistinfo; p: tnode): boolean;
++  var
++    i: longint;
++  begin
++    result:=false;
++    for i:=0 to hi^.safeptrs.Count-1 do
++      if tnode(hi^.safeptrs[i]).isequal(p) then
++        exit(true);
++  end;
++
++
+ function hoist_find(var n: tnode; arg: pointer): foreachnoderesult;
+   var
+     hi: phoistinfo absolute arg;
+@@ -1308,11 +1377,110 @@ function hoist_find(var n: tnode; arg: pointer): foreachnoderesult;
+       exit;
+     if store_conflicts(hi,acc) then
+       exit;
++    { the first iteration reaches the load before anything it could raise or
++      change: the pointer is valid when the loop runs, or the first iteration
++      faults on it first anyway; a later load through such a pointer reads
++      the same object }
++    p:=tderefnode(acc.base).left;
++    if not hi^.blocked then
++      begin
++        if not is_safeptr(hi,p) then
++          hi^.safeptrs.Add(p);
++      end
++    else if not is_safeptr(hi,p) then
++      exit;
+     hi^.cands.Add(n);
+     result:=fen_norecurse_false;
+   end;
+ 
+ 
++{ a store that an exception handler, or the code after an exception, may see }
++function visible_store(hi: phoistinfo; target: tnode): boolean;
++  var
++    sym: tsym;
++  begin
++    result:=true;
++    if (current_procinfo.flags*[pi_uses_exceptions,pi_needs_implicit_finally])<>[] then
++      exit;
++    target:=strip_conv(target);
++    if target.nodetype=temprefn then
++      exit(false);
++    if (target.nodetype=loadn) and not assigned(tloadnode(target).left) then
++      begin
++        sym:=tloadnode(target).symtableentry;
++        if (sym.typ in [localvarsym,paravarsym]) and
++           ((tabstractvarsym(sym).varsymaccess*[vsa_addr_taken,vsa_different_scope])=[]) and
++           ((sym.typ=localvarsym) or (tparavarsym(sym).varspez=vs_value) and
++            not paramanager_push_addr(tparavarsym(sym))) then
++          result:=false;
++      end;
++  end;
++
++
++function is_float(def: tdef): boolean;
++  begin
++    result:=(def.typ=floatdef) or is_vector(def);
++  end;
++
++
++{ n may raise an exception or change memory that may be seen after one }
++function blocks_hoisting(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    hi: phoistinfo absolute arg;
++    blocks: boolean;
++  begin
++    blocks:=false;
++    case n.nodetype of
++      derefn:
++        { a vector load of an address: its own operand is checked }
++        blocks:=not ((drnf_unaligned in tderefnode(n).derefnodeflags) and
++                     (strip_conv(tderefnode(n).left).nodetype=addrn)) and
++                not is_safeptr(hi,tderefnode(n).left);
++      vecn:
++        blocks:=(tvecnode(n).left.resultdef.typ<>arraydef) or
++          is_dynamic_array(tvecnode(n).left.resultdef) or
++          is_open_array(tvecnode(n).left.resultdef) or
++          is_array_of_const(tvecnode(n).left.resultdef);
++      divn,modn:
++        blocks:=(tbinarynode(n).right.nodetype<>ordconstn) or
++          (tordconstnode(tbinarynode(n).right).value.svalue=0) or
++          (tordconstnode(tbinarynode(n).right).value.svalue=-1);
++      addn,subn,muln,slashn,ltn,lten,gtn,gten,equaln,unequaln:
++        blocks:=is_float(tbinarynode(n).left.resultdef) or
++          assigned(tbinarynode(n).right) and is_float(tbinarynode(n).right.resultdef);
++      typeconvn:
++        blocks:=is_float(n.resultdef) and is_float(ttypeconvnode(n).left.resultdef) and
++          (n.resultdef.size<>ttypeconvnode(n).left.resultdef.size);
++      inlinen:
++        if tinlinenode(n).inlinenumber in [in_inc_x,in_dec_x] then
++          blocks:=assigned(tinlinenode(n).left) and
++            visible_store(hi,tcallparanode(tinlinenode(n).left).left)
++        else
++          blocks:=not (tinlinenode(n).inlinenumber in hoist_nontrapping_inlines);
++      assignn:
++        blocks:=visible_store(hi,tassignmentnode(n).left);
++      loadn,temprefn,ordconstn,realconstn,pointerconstn,niln,setconstn,stringconstn,
++      blockn,statementn,ifn,casen,whilerepeatn,forn,nothingn,addrn,subscriptn,
++      unaryminusn,unaryplusn,notn,andn,orn,xorn,shln,shrn,callparan,
++      tempcreaten,tempdeleten,loadvmtaddrn,loadparentfpn,typen,rttin:
++        ;
++      else
++        blocks:=true;
++    end;
++    if blocks then
++      result:=fen_norecurse_true
++    else
++      result:=fen_false;
++  end;
++
++
++procedure update_blocked(hi: phoistinfo; n: tnode);
++  begin
++    if not hi^.blocked and assigned(n) then
++      hi^.blocked:=foreachnodestatic(n,@blocks_hoisting,hi);
++  end;
++
++
+ { invariant packs and broadcasts: operands not written in the loop }
+ function invariant_value(hi: phoistinfo; n: tnode): boolean;
+   begin
+@@ -1395,6 +1563,8 @@ function hoist_uncond_expr_rec(var n: tnode; arg: pointer): foreachnoderesult;
+   end;
+ 
+ 
++procedure hoist_uncond(hi: phoistinfo; n: tnode); forward;
++
+ function hoist_uncond_expr(var n: tnode; arg: pointer): foreachnoderesult;
+   var
+     hi: phoistinfo absolute arg;
+@@ -1405,6 +1575,13 @@ function hoist_uncond_expr(var n: tnode; arg: pointer): foreachnoderesult;
+         foreachnodestatic(pm_postprocess,taddnode(n).left,@hoist_uncond_expr_rec,arg);
+         exit(fen_norecurse_false);
+       end;
++    { statements inside an expression (an inlined function): as in the body }
++    if n.nodetype in [blockn,statementn,ifn,casen,whilerepeatn,forn,
++                      tryexceptn,tryfinallyn,labeln,goton,exitn,breakn,continuen,raisen] then
++      begin
++        hoist_uncond(hi,n);
++        exit(fen_norecurse_false);
++      end;
+     if hi^.packs then
+       result:=hoist_find_pack(n,arg)
+     else
+@@ -1436,6 +1613,7 @@ procedure hoist_uncond(hi: phoistinfo; n: tnode);
+           while assigned(s) and (s.nodetype=statementn) do
+             begin
+               hoist_uncond(hi,tstatementnode(s).left);
++              update_blocked(hi,tstatementnode(s).left);
+               if assigned(tstatementnode(s).left) and
+                  foreachnodestatic(tstatementnode(s).left,@leaves_iteration,nil) then
+                 break;
+@@ -1452,6 +1630,7 @@ procedure hoist_uncond(hi: phoistinfo; n: tnode);
+         else
+           begin
+             hoist_uncond(hi,twhilerepeatnode(n).right);
++            update_blocked(hi,twhilerepeatnode(n).right);
+             if not foreachnodestatic(twhilerepeatnode(n).right,@leaves_iteration,nil) then
+               foreachnodestatic(pm_postprocess,twhilerepeatnode(n).left,@hoist_uncond_expr,hi);
+           end;
+@@ -1532,6 +1711,8 @@ function hoist_loop(hi: phoistinfo; var n: tnode; packs: boolean): boolean;
+   begin
+     result:=false;
+     hi^.cands.Clear;
++    hi^.safeptrs.Clear;
++    hi^.blocked:=false;
+     if not loop_parts(n,body,guard) then
+       exit;
+     hi^.packs:=packs;
+@@ -1597,6 +1778,8 @@ function hoist_loops_impl(var n: tnode; ctx: pslpctx; packs: boolean): foreachno
+     hi.cands:=TFPList.Create;
+     hi.copies:=TFPList.Create;
+     hi.temps:=TFPList.Create;
++    hi.safeptrs:=TFPList.Create;
++    hi.blocked:=false;
+     try
+       foreachnodestatic(pm_postprocess,n,@hoist_scan,@hi);
+       if n.nodetype=forn then
+@@ -1614,6 +1797,7 @@ function hoist_loops_impl(var n: tnode; ctx: pslpctx; packs: boolean): foreachno
+       hi.cands.Free;
+       hi.copies.Free;
+       hi.temps.Free;
++      hi.safeptrs.Free;
+     end;
+   end;
+ 
+diff --git a/tests/test/opt/tslp2.pp b/tests/test/opt/tslp2.pp
+index 3d234adb..07fceb7d 100644
+--- a/tests/test/opt/tslp2.pp
++++ b/tests/test/opt/tslp2.pp
+@@ -153,18 +153,22 @@ begin
+   result := s;
+ end;
+ 
+-{ a negated while condition }
++{ a negated while condition: the type check keeps "not done" as done and
++  lnf_checknegate (it folds "not (i >= n)" into i < n instead) }
+ function sum9(p: PRec; n: longint): double; noinline;
+ var
+   i: longint;
+   s: double;
++  done: boolean;
+ begin
+   s := 0;
+   i := 0;
+-  while not (i >= n) do
++  done := i >= n;
++  while not done do
+     begin
+       s := s + p^.x;
+       inc(i);
++      done := i >= n;
+     end;
+   result := s;
+ end;
+diff --git a/tests/test/opt/tslp3.pp b/tests/test/opt/tslp3.pp
+new file mode 100644
+index 00000000..bd3421de
+--- /dev/null
++++ b/tests/test/opt/tslp3.pp
+@@ -0,0 +1,159 @@
++{ %CPU=x86_64 }
++{ %OPT=-O4 -OoNOFASTMATH }
++{ loads through a pointer that a loop does not change go before the loop
++  (optslp, do_hoist_invariant_loads) only when nothing can tell: not when an
++  inline routine such as include writes them, not when a goto can enter the
++  loop body, and not when the first iteration can raise an exception before
++  it reaches the load }
++program tslp3;
++
++{$mode objfpc}{$goto on}
++
++uses
++  sysutils;
++
++type
++  PRec = ^TRec;
++  TRec = record
++    s: set of 0..31;
++    k: longint;
++    x: double;
++  end;
++
++var
++  errors: longint;
++
++procedure check(ok: boolean; const what: string);
++  begin
++    if not ok then
++      begin
++        writeln('wrong: ', what);
++        inc(errors);
++      end;
++  end;
++
++procedure mark(q: PRec; n: longint); noinline;
++var
++  i: longint;
++begin
++  i := 0;
++  while i < n do
++    begin
++      include(q^.s, i);
++      inc(i);
++    end;
++end;
++
++procedure unmark(q: PRec; n: longint); noinline;
++var
++  i: longint;
++begin
++  i := 0;
++  while i < n do
++    begin
++      exclude(q^.s, i);
++      inc(i);
++    end;
++end;
++
++procedure markfor(q: PRec; n: longint); noinline;
++var
++  i: longint;
++begin
++  for i := 0 to n - 1 do
++    include(q^.s, i);
++end;
++
++{ the goto skips the first load of p^.x }
++function sumgoto(p: PRec; n: longint; skip: boolean): double; noinline;
++label
++  L;
++var
++  i: longint;
++  s: double;
++begin
++  s := 0;
++  i := 0;
++  if skip then
++    goto L;
++  while i < n do
++    begin
++      s := s + p^.x;
++    L:
++      inc(i);
++    end;
++  result := s;
++end;
++
++{ the division raises before the first iteration loads p^.x }
++function sumdiv(p: PRec; n, d: longint): double; noinline;
++var
++  i, k: longint;
++  s: double;
++begin
++  s := 0;
++  i := 0;
++  k := 0;
++  while i < n do
++    begin
++      k := k + 100 div d;
++      s := s + p^.x;
++      inc(i);
++    end;
++  result := s + k;
++end;
++
++{ a guard: the store is done before the first iteration loads p^.x, and the
++  exception handler reads it }
++function sumstore(p: PRec; n: longint): longint; noinline;
++var
++  i, k: longint;
++  s: double;
++begin
++  k := 0;
++  s := 0;
++  try
++    i := 0;
++    while i < n do
++      begin
++        k := i + 1;
++        s := s + p^.x;
++        inc(i);
++      end;
++  except
++    exit(k);
++  end;
++  result := trunc(s);
++end;
++
++var
++  r: TRec;
++  what: string;
++begin
++  r.s := [];
++  mark(@r, 3);
++  check(r.s = [0, 1, 2], 'include');
++  r.s := [0..31];
++  unmark(@r, 3);
++  check(r.s = [3..31], 'exclude');
++  r.s := [];
++  markfor(@r, 3);
++  check(r.s = [0, 1, 2], 'include in a for loop');
++  r.x := 2;
++  check(sumgoto(@r, 3, true) = 4, 'goto');
++  check(sumgoto(@r, 3, false) = 6, 'goto b');
++  what := '';
++  try
++    sumdiv(nil, 3, 0);
++  except
++    on e: Exception do
++      what := e.ClassName;
++  end;
++  check(what = 'EDivByZero', 'div before the load: ' + what);
++  check(sumdiv(@r, 3, 50) = 12, 'div b');
++  check(sumstore(nil, 3) = 1, 'store before the load');
++  check(sumstore(@r, 3) = 6, 'store b');
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

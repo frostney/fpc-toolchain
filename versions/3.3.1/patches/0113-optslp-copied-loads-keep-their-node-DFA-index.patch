@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 17:25:40 +0000
+Subject: [PATCH 113/118] optslp: copied loads keep their node DFA index
+
+The loads that optslp copies (operands of packs and broadcasts, vector load
+addresses, the targets of the element extraction, hoisted loads) had no DFA
+index, so the loop register sync kept their variables live through the whole
+loop. The transformations only move reads within an iteration (or before the
+loop, where the pointer is live anyway) and drop uses, so the loops' life
+information stays valid for them; the copies get the index of the original.
+nbody: dx/dy are squared in place (inner loop 48 -> 46 instructions).
+---
+ compiler/optslp.pas | 51 +++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 45 insertions(+), 6 deletions(-)
+
+diff --git a/compiler/optslp.pas b/compiler/optslp.pas
+index 295b0eed..dc6fcfd9 100644
+--- a/compiler/optslp.pas
++++ b/compiler/optslp.pas
+@@ -323,6 +323,45 @@ function prov_array(p: pprovinfo; depth: longint): tabstractvarsym;
+   end;
+ 
+ 
++
++{ a copy of n whose loads keep their node dfa index: the transformations
++  here only move reads within an iteration of a loop (or before it, where
++  the pointer is live anyway) and drop uses, so the life information of the
++  loops stays a superset (see get_used_live_regvars) }
++function collect_loads(var n: tnode; arg: pointer): foreachnoderesult;
++  begin
++    result:=fen_false;
++    if n.nodetype=loadn then
++      TFPList(arg).Add(n);
++  end;
++
++
++function getcopy_dfa(n: tnode): tnode;
++  var
++    a, b: TFPList;
++    i: longint;
++  begin
++    result:=n.getcopy;
++    a:=TFPList.Create;
++    b:=TFPList.Create;
++    try
++      foreachnodestatic(pm_postprocess,n,@collect_loads,a);
++      foreachnodestatic(pm_postprocess,result,@collect_loads,b);
++      if a.Count=b.Count then
++        for i:=0 to a.Count-1 do
++          if assigned(tnode(a[i]).optinfo) and tnode(a[i]).optinfo^.dfaindexed then
++            begin
++              tnode(b[i]).allocoptinfo;
++              tnode(b[i]).optinfo^.index:=tnode(a[i]).optinfo^.index;
++              tnode(b[i]).optinfo^.dfaindexed:=true;
++            end;
++    finally
++      a.Free;
++      b.Free;
++    end;
++  end;
++
++
+ {*****************************************************************************
+                               Memory accesses
+ *****************************************************************************}
+@@ -603,7 +642,7 @@ function vecload(ctx: pslpctx; n: tnode): tnode;
+   var
+     hp: tnode;
+   begin
+-    hp:=caddrnode.create_internal(n.getcopy);
++    hp:=caddrnode.create_internal(getcopy_dfa(n));
+     hp:=ctypeconvnode.create_internal(hp,ctx^.pvec2def);
+     hp:=cderefnode.create(hp);
+     include(tderefnode(hp).derefnodeflags,drnf_unaligned);
+@@ -733,10 +772,10 @@ function build(lc: plistctx; a, b: tnode; var cost: longint; var loads: longint)
+       begin
+         if scalar_cost(b)>0 then
+           dec(cost,scalar_cost(b));
+-        result:=mkintrinsic(in_vec2d_dup,a.getcopy,nil);
++        result:=mkintrinsic(in_vec2d_dup,getcopy_dfa(a),nil);
+       end
+     else
+-      result:=mkintrinsic(in_vec2d_pack,a.getcopy,b.getcopy);
++      result:=mkintrinsic(in_vec2d_pack,getcopy_dfa(a),getcopy_dfa(b));
+     { kept in a temp for later statements }
+     if plain_value(a) and plain_value(b) then
+       begin
+@@ -1012,13 +1051,13 @@ function try_local_pair(lc: plistctx; s1, s2: tstatementnode): boolean;
+       lc^.preblock:=internalstatements(lc^.pre);
+     addstatement(lc^.pre,t);
+     addstatement(lc^.pre,cassignmentnode.create_internal(ctemprefnode.create(t),v));
+-    st:=cassignmentnode.create(x.getcopy,mkintrinsic(in_vec2d_lo,ctemprefnode.create(t),nil));
++    st:=cassignmentnode.create(getcopy_dfa(a1.left),mkintrinsic(in_vec2d_lo,ctemprefnode.create(t),nil));
+     st.fileinfo:=a1.fileinfo;
+     st:=wrap_pre(lc,st);
+     finish_statement(st);
+     s1.left.free;
+     s1.left:=st;
+-    st:=cassignmentnode.create(y.getcopy,mkintrinsic(in_vec2d_hi,ctemprefnode.create(t),nil));
++    st:=cassignmentnode.create(getcopy_dfa(a2.left),mkintrinsic(in_vec2d_hi,ctemprefnode.create(t),nil));
+     st.fileinfo:=a2.fileinfo;
+     finish_statement(st);
+     s2.left.free;
+@@ -1434,7 +1473,7 @@ function hoist_loop(hi: phoistinfo; var n: tnode; packs: boolean): boolean;
+             found:=true;
+         if not found then
+           begin
+-            hp:=tnode(hi^.cands[i]).getcopy;
++            hp:=getcopy_dfa(tnode(hi^.cands[i]));
+             hi^.copies.Add(hp);
+             hi^.temps.Add(ctempcreatenode.create(hp.resultdef,hp.resultdef.size,tt_persistent,true));
+           end;

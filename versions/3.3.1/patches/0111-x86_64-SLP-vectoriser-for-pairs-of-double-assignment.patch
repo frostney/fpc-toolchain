@@ -1,0 +1,1896 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 17:08:52 +0000
+Subject: [PATCH 111/118] x86_64: SLP vectoriser for pairs of double
+ assignments (SSE2)
+
+optslp (optimizer switch SLP, on at -O4) turns two consecutive assignments
+to adjacent doubles in memory (m2 at m1+8 through the same pointer or array
+element) with right-hand sides of the same shape into one assignment of a
+two-element double vector: adjacent loads become a vector load, equal
+operands a broadcast, other operand pairs a pack; packs and broadcasts of
+variables are kept in vector temps for later statements of the list, and two
+local double assignments that later statements use as a pair become a vector
+with its elements extracted. The second statement must not read memory that
+may be the first one's target: accesses are compared by base and field
+offset, and pointers whose every assignment is @a[i], a copy or inc/dec of
+such a pointer point at whole elements of a (provenance), so different fields
+do not overlap. With unmasked floating-point exceptions, an exception of the
+second element is raised before the first result is stored (hence a switch).
+
+New: in_vec2d_* intrinsics (pack, dup, add, sub, mul, div, lo, hi) with x86
+code generation, drnf_unaligned derefs (element alignment, the reference of
+the addressed operand without lea), vector temps in xmm registers, OS_M128
+moves in the floating-point domain (movups instead of movdqu), unpck*pd and
+packed operations in the MovapX chain rename.
+nbody: the inner loop's dx/dy and the velocity updates, the position update;
+tests/test/opt/tslp1.pp.
+---
+ compiler/compinnr.pas              |   13 +
+ compiler/globtype.pas              |    6 +-
+ compiler/ncginl.pas                |   16 +
+ compiler/ncgmem.pas                |   27 +-
+ compiler/ncgutil.pas               |   13 +
+ compiler/ninl.pas                  |   19 +
+ compiler/nmem.pas                  |    5 +-
+ compiler/optslp.pas                | 1123 ++++++++++++++++++++++++++++
+ compiler/psub.pas                  |    5 +-
+ compiler/utils/ppuutils/ppudump.pp |    3 +-
+ compiler/x86/aoptx86.pas           |    3 +-
+ compiler/x86/cgx86.pas             |   27 +-
+ compiler/x86/nx86inl.pas           |  113 +++
+ compiler/x86_64/cpuinfo.pas        |    4 +-
+ tests/test/opt/tslp1.pp            |  245 ++++++
+ 15 files changed, 1605 insertions(+), 17 deletions(-)
+ create mode 100644 compiler/optslp.pas
+ create mode 100644 tests/test/opt/tslp1.pp
+
+diff --git a/compiler/compinnr.pas b/compiler/compinnr.pas
+index 63174248..9230ee3e 100644
+--- a/compiler/compinnr.pas
++++ b/compiler/compinnr.pas
+@@ -179,6 +179,19 @@ type
+      in_min_quad         = 149,
+      in_max_quad         = 150,
+ 
++     { two-element double vectors (SSE2) built by the SLP vectoriser
++       (optslp); internal only, like min/max:
++       pack(a,b) = [a,b], add/sub/mul/div(v,w) elementwise }
++     in_vec2d_pack       = 151,
++     in_vec2d_add        = 152,
++     in_vec2d_sub        = 153,
++     in_vec2d_mul        = 154,
++     in_vec2d_div        = 155,
++     { dup(a) = [a,a]; lo(v), hi(v): the elements of v }
++     in_vec2d_dup        = 156,
++     in_vec2d_lo         = 157,
++     in_vec2d_hi         = 158,
++
+ { MMX functions }
+ { these constants are used by the mmx unit }
+ 
+diff --git a/compiler/globtype.pas b/compiler/globtype.pas
+index 0e810d41..e1a26b8d 100644
+--- a/compiler/globtype.pas
++++ b/compiler/globtype.pas
+@@ -380,7 +380,9 @@ interface
+          cs_opt_use_load_modify_store,
+          cs_opt_unused_para,
+          cs_opt_consts,
+-         cs_opt_forloop
++         cs_opt_forloop,
++         { pairs of double operations as SSE2 vectors (optslp) }
++         cs_opt_slp
+        );
+        toptimizerswitches = set of toptimizerswitch;
+ 
+@@ -454,7 +456,7 @@ interface
+          'ORDERFIELDS','FASTMATH','DEADVALUES','REMOVEEMPTYPROCS',
+          'CONSTPROP',
+          'DEADSTORE','FORCENOSTACKFRAME','USELOADMODIFYSTORE',
+-         'UNUSEDPARA','CONSTS','FORLOOP'
++         'UNUSEDPARA','CONSTS','FORLOOP','SLP'
+        );
+        WPOptimizerSwitchStr : array [twpoptimizerswitch] of string[14] = (
+          'DEVIRTCALLS','OPTVMTS','SYMBOLLIVENESS'
+diff --git a/compiler/ncginl.pas b/compiler/ncginl.pas
+index 905eeceb..44b7a026 100644
+--- a/compiler/ncginl.pas
++++ b/compiler/ncginl.pas
+@@ -68,6 +68,7 @@ interface
+           procedure second_frac_real; virtual;
+           procedure second_high; virtual;
+           procedure second_minmax; virtual;
++          procedure second_vec2d; virtual;
+        protected
+           function  second_incdec_tempregdef: tdef;virtual;
+        end;
+@@ -234,6 +235,15 @@ implementation
+             in_max_single,
+             in_max_double:
+                second_minmax;
++            in_vec2d_pack,
++            in_vec2d_add,
++            in_vec2d_sub,
++            in_vec2d_mul,
++            in_vec2d_div,
++            in_vec2d_dup,
++            in_vec2d_lo,
++            in_vec2d_hi:
++               second_vec2d;
+             in_and_assign_x_y,
+             in_or_assign_x_y,
+             in_xor_assign_x_y,
+@@ -1031,6 +1041,12 @@ implementation
+       end;
+ 
+ 
++    procedure tcginlinenode.second_vec2d;
++      begin
++        internalerror(2026110702);
++      end;
++
++
+     procedure tcginlinenode.second_minmax;
+       begin
+         internalerror(2020120510);
+diff --git a/compiler/ncgmem.pas b/compiler/ncgmem.pas
+index a67e10f0..240df051 100644
+--- a/compiler/ncgmem.pas
++++ b/compiler/ncgmem.pas
+@@ -84,10 +84,10 @@ implementation
+     uses
+       systems,
+       cutils,cclasses,verbose,globals,constexp,fmodule,
+-      symconst,symbase,symdef,symsym,symtable,defutil,paramgr,
++      symconst,symbase,symdef,symsym,symtable,defutil,defcmp,paramgr,
+       aasmbase,aasmdata,
+       procinfo,pass_2,parabase,
+-      ncon,nadd,nutils,
++      ncon,nadd,ncnv,nutils,
+       cgobj,hlcgobj,
+       objcgutl;
+ 
+@@ -235,7 +235,28 @@ implementation
+       begin
+          sym:=nil;
+          { assume natural alignment, except for packed records }
+-         if not(resultdef.typ in [recorddef,objectdef]) or
++         if (drnf_unaligned in derefnodeflags) and (resultdef.typ=arraydef) then
++           begin
++             { a vector over adjacent fields (optslp): deref(addr(x)) is the
++               reference of x itself, with the size of the vector }
++             hp:=@left;
++             while (hp^.nodetype=typeconvn) and (ttypeconvnode(hp^).convtype=tc_equal) do
++               hp:=@ttypeconvnode(hp^).left;
++             if hp^.nodetype=addrn then
++               begin
++                 secondpass(taddrnode(hp^).left);
++                 if taddrnode(hp^).left.location.loc in [LOC_REFERENCE,LOC_CREFERENCE] then
++                   begin
++                     location_reset_ref(location,LOC_REFERENCE,def_cgsize(resultdef),tarraydef(resultdef).elementdef.alignment,[]);
++                     location.reference:=taddrnode(hp^).left.location.reference;
++                     location.reference.alignment:=tarraydef(resultdef).elementdef.alignment;
++                     exit;
++                   end;
++                 internalerror(2026110704);
++               end;
++             location_reset_ref(location,LOC_REFERENCE,def_cgsize(resultdef),tarraydef(resultdef).elementdef.alignment,[]);
++           end
++         else if not(resultdef.typ in [recorddef,objectdef]) or
+             (tabstractrecordsymtable(tabstractrecorddef(resultdef).symtable).usefieldalignment<>1) then
+            location_reset_ref(location,LOC_REFERENCE,def_cgsize(resultdef),resultdef.alignment,[])
+          else
+diff --git a/compiler/ncgutil.pas b/compiler/ncgutil.pas
+index 57c09669..cd518ee7 100644
+--- a/compiler/ncgutil.pas
++++ b/compiler/ncgutil.pas
+@@ -430,6 +430,19 @@ implementation
+     procedure location_allocate_register(list: TAsmList;out l: tlocation;def: tdef;constant: boolean);
+       begin
+         l.size:=def_cgsize(def);
++{$ifdef x86}
++        { a hardware vector (optslp) }
++        if is_vector(def) and fits_in_mm_register(def) then
++          begin
++            l.size:=def_cgmmsize(def);
++            if constant then
++              location_reset(l,LOC_CMMREGISTER,l.size)
++            else
++              location_reset(l,LOC_MMREGISTER,l.size);
++            l.register:=cg.getmmregister(list,l.size);
++            exit;
++          end;
++{$endif x86}
+         if (def.typ=floatdef) and
+            not(cs_fp_emulation in current_settings.moduleswitches) then
+           begin
+diff --git a/compiler/ninl.pas b/compiler/ninl.pas
+index bba76c63..3d10f7d7 100644
+--- a/compiler/ninl.pas
++++ b/compiler/ninl.pas
+@@ -4274,6 +4274,16 @@ implementation
+                   set_varstate(tcallparanode(tcallparanode(left).right).left,vs_read,[vsf_must_be_valid]);
+                   resultdef:=tcallparanode(left).left.resultdef;
+                 end;
++              in_vec2d_pack,
++              in_vec2d_add,
++              in_vec2d_sub,
++              in_vec2d_mul,
++              in_vec2d_div,
++              in_vec2d_dup:
++                resultdef:=carraydef.getreusable_vector(s64floattype,2);
++              in_vec2d_lo,
++              in_vec2d_hi:
++                resultdef:=s64floattype;
+               in_delete_x_y_z:
+                 begin
+                   result:=handle_delete;
+@@ -4828,6 +4838,15 @@ implementation
+          in_max_single,
+          in_max_double:
+            result:=first_minmax;
++         in_vec2d_pack,
++         in_vec2d_add,
++         in_vec2d_sub,
++         in_vec2d_mul,
++         in_vec2d_div,
++         in_vec2d_dup,
++         in_vec2d_lo,
++         in_vec2d_hi:
++           expectloc:=LOC_MMREGISTER;
+          in_atomic_inc,
+          in_atomic_dec,
+          in_atomic_xchg,
+diff --git a/compiler/nmem.pas b/compiler/nmem.pas
+index 53421c83..e36a6695 100644
+--- a/compiler/nmem.pas
++++ b/compiler/nmem.pas
+@@ -107,7 +107,10 @@ interface
+        taddrnodeclass = class of taddrnode;
+ 
+        TDerefNodeFlag = (
+-         drnf_no_checkpointer
++         drnf_no_checkpointer,
++         { the target has only the alignment of its elements (a vector made
++           of two adjacent fields, see optslp) }
++         drnf_unaligned
+        );
+ 
+        TDerefNodeFlags = set of TDerefNodeFlag;
+diff --git a/compiler/optslp.pas b/compiler/optslp.pas
+new file mode 100644
+index 00000000..9418cc97
+--- /dev/null
++++ b/compiler/optslp.pas
+@@ -0,0 +1,1123 @@
++{
++    Copyright (c) 2026 by the fpc-toolchain contributors
++
++    Superword level parallelism: pairs of double assignments as SSE2 vectors
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program; if not, write to the Free Software
++    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++
++ ****************************************************************************
++}
++unit optslp;
++
++{ Two consecutive statements
++
++    m1 := e1;
++    m2 := e2;
++
++  where m1 and m2 are adjacent doubles in memory (m2 at the address of m1
++  plus 8, through the same pointer or array element) and e1 and e2 have the
++  same shape (the same +, -, *, / operations) become one statement on a
++  two-element double vector (in_vec2d_* intrinsics, SSE2 packed operations):
++  pairs of adjacent loads become a vector load, equal operands a broadcast,
++  other operand pairs are packed.
++
++  The vector statement reads everything before it writes m1 and m2, so e2
++  must not read memory that may be m1. Memory accesses are compared as a
++  base (a pointer variable or temp, dereferenced, or an array element) plus
++  a field offset: with the same base, the offsets decide. With two pointer
++  variables whose every assignment is the address of an element of one array
++  of records (@a[i]), a copy of such a pointer, or inc/dec of it, both point
++  at whole elements of that array, so fields at different offsets do not
++  overlap (provenance). Anything else may alias, and the pair stays scalar.
++
++  Floating-point exceptions: with unmasked exceptions, an exception of the
++  second lane is raised before the first result is stored, where the scalar
++  code would have stored it. The optimisation is a separate optimizer
++  switch (SLP, on at -O4) for this reason. }
++
++{$i fpcdefs.inc}
++
++interface
++
++uses
++  node;
++
++function do_slp_vectorize(var code: tnode): boolean;
++
++implementation
++
++uses
++  cclasses,
++  globtype,globals,verbose,
++  symconst,symtype,symdef,symsym,symtable,
++  defutil,defcmp,compinnr,
++  nutils,nbas,nld,ncon,nflw,nmem,nadd,ncnv,ninl,ncal,
++  pass_1,procinfo,paramgr;
++
++
++function paramanager_push_addr(sym: tparavarsym): boolean;
++  begin
++    result:=paramanager.push_addr_param(sym.varspez,sym.vardef,current_procinfo.procdef.proccalloption);
++  end;
++
++type
++  tprovkind = (pk_unknown, pk_array);
++
++  pprovinfo = ^tprovinfo;
++  tprovinfo = record
++    { a pointer variable (sym) or temp (temp) }
++    sym: tabstractvarsym;
++    temp: ptempinfo;
++    kind: tprovkind;
++    arr: tabstractvarsym;   { the array the pointer points into }
++    copies: TFPList;        { pprovinfo of the pointers copied into this one }
++    bad: boolean;
++  end;
++
++  tslpctx = record
++    provs: TFPList;
++    changed: boolean;
++    vec2def: tdef;
++    pvec2def: tdef;
++  end;
++  pslpctx = ^tslpctx;
++
++  { a memory access: base node (deref of a pointer load/temp, or an array
++    element) plus a byte offset }
++  taccess = record
++    valid: boolean;
++    base: tnode;      { the derefn or vecn node (not owned) }
++    offset: asizeint;
++    size: asizeint;
++    recdef: tdef;     { the record type the offset is relative to }
++  end;
++
++
++{*****************************************************************************
++                           Pointer provenance
++*****************************************************************************}
++
++function findprov(ctx: pslpctx; n: tnode; create: boolean): pprovinfo;
++  var
++    i: longint;
++    sym: tabstractvarsym;
++    temp: ptempinfo;
++  begin
++    result:=nil;
++    sym:=nil;
++    temp:=nil;
++    if (n.nodetype=loadn) and
++       (tloadnode(n).symtableentry.typ in [localvarsym,paravarsym]) and
++       not assigned(tloadnode(n).left) then
++      sym:=tabstractvarsym(tloadnode(n).symtableentry)
++    else if n.nodetype=temprefn then
++      temp:=ttemprefnode(n).tempinfo
++    else
++      exit;
++    for i:=0 to ctx^.provs.Count-1 do
++      if (pprovinfo(ctx^.provs[i])^.sym=sym) and (pprovinfo(ctx^.provs[i])^.temp=temp) then
++        exit(pprovinfo(ctx^.provs[i]));
++    if not create then
++      exit;
++    new(result);
++    result^.sym:=sym;
++    result^.temp:=temp;
++    result^.kind:=pk_unknown;
++    result^.arr:=nil;
++    result^.copies:=TFPList.Create;
++    result^.bad:=false;
++    if assigned(sym) then
++      begin
++        if not(sym.vardef.typ=pointerdef) or
++           (vo_volatile in sym.varoptions) or
++           ((sym.varsymaccess*[vsa_addr_taken,vsa_different_scope])<>[]) or
++           ((sym.typ=paravarsym) and not(tparavarsym(sym).varspez in [vs_value,vs_const])) then
++          result^.bad:=true;
++      end
++    else if not assigned(temp^.typedef) or (temp^.typedef.typ<>pointerdef) then
++      result^.bad:=true;
++    ctx^.provs.Add(result);
++  end;
++
++
++function strip_conv(n: tnode): tnode;
++  begin
++    result:=n;
++    while (result.nodetype=typeconvn) and
++          (ttypeconvnode(result).convtype=tc_equal) do
++      result:=ttypeconvnode(result).left;
++  end;
++
++
++{ rhs assigned to the pointer p }
++procedure prov_assign(ctx: pslpctx; p: pprovinfo; rhs: tnode);
++  var
++    n: tnode;
++    q: pprovinfo;
++    arrsym: tabstractvarsym;
++  begin
++    n:=strip_conv(rhs);
++    { p + c, p - c, pointer arithmetic in elements }
++    if (n.nodetype in [addn,subn]) and
++       (taddnode(n).left.resultdef.typ=pointerdef) and
++       is_integer(taddnode(n).right.resultdef) then
++      n:=strip_conv(taddnode(n).left);
++    case n.nodetype of
++      addrn:
++        begin
++          n:=taddrnode(n).left;
++          { an element of an array variable (static, open or dynamic: the
++            elements are contiguous) }
++          if (n.nodetype=vecn) and
++             (tvecnode(n).left.nodetype=loadn) and
++             not assigned(tloadnode(tvecnode(n).left).left) and
++             (tloadnode(tvecnode(n).left).symtableentry.typ in [localvarsym,staticvarsym,paravarsym]) and
++             (tvecnode(n).left.resultdef.typ=arraydef) and
++             not is_packed_array(tvecnode(n).left.resultdef) and
++             equal_defs(tarraydef(tvecnode(n).left.resultdef).elementdef,tpointerdef(p^.sym.vardef).pointeddef) then
++            begin
++              arrsym:=tabstractvarsym(tloadnode(tvecnode(n).left).symtableentry);
++              if (p^.kind=pk_array) and (p^.arr<>arrsym) then
++                p^.bad:=true;
++              p^.kind:=pk_array;
++              p^.arr:=arrsym;
++            end
++          else
++            p^.bad:=true;
++        end;
++      loadn,temprefn:
++        begin
++          q:=findprov(ctx,n,true);
++          if assigned(q) then
++            p^.copies.Add(q)
++          else
++            p^.bad:=true;
++        end;
++      else
++        p^.bad:=true;
++    end;
++  end;
++
++
++function prov_collect(var n: tnode; arg: pointer): foreachnoderesult; forward;
++
++function prov_collect_rec(var n: tnode; arg: pointer): foreachnoderesult;
++  begin
++    result:=prov_collect(n,arg);
++  end;
++
++
++function prov_collect(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    ctx: pslpctx absolute arg;
++    p: pprovinfo;
++    para: tnode;
++  begin
++    result:=fen_false;
++    case n.nodetype of
++      assignn:
++        if tassignmentnode(n).left.nodetype in [loadn,temprefn] then
++          begin
++            p:=findprov(ctx,tassignmentnode(n).left,true);
++            if assigned(p) and assigned(p^.sym) or assigned(p) and assigned(p^.temp) then
++              begin
++                if (p^.sym=nil) or (p^.sym.vardef.typ=pointerdef) then
++                  begin
++                    if assigned(p^.temp) then
++                      begin
++                        { a temp gets the provenance of what it holds }
++                        if tassignmentnode(n).right.nodetype in [loadn,temprefn] then
++                          begin
++                            p^.copies.Add(findprov(ctx,tassignmentnode(n).right,true));
++                            if not assigned(p^.copies.Last) then
++                              p^.bad:=true;
++                          end
++                        else
++                          p^.bad:=true;
++                      end
++                    else
++                      prov_assign(ctx,p,tassignmentnode(n).right);
++                  end;
++              end;
++            foreachnodestatic(tassignmentnode(n).right,@prov_collect_rec,arg);
++            result:=fen_norecurse_false;
++          end;
++      inlinen:
++        if (tinlinenode(n).inlinenumber in [in_inc_x,in_dec_x]) and
++           assigned(tinlinenode(n).left) then
++          begin
++            para:=tcallparanode(tinlinenode(n).left).left;
++            if para.nodetype in [loadn,temprefn] then
++              begin
++                { inc/dec of a pointer keeps it on the array's elements }
++                findprov(ctx,para,true);
++                if assigned(tcallparanode(tinlinenode(n).left).right) then
++                  foreachnodestatic(tcallparanode(tcallparanode(tinlinenode(n).left).right).left,@prov_collect_rec,arg);
++                result:=fen_norecurse_false;
++              end;
++          end;
++      loadn,temprefn:
++        { any other write }
++        if (n.flags*[nf_write,nf_modify])<>[] then
++          begin
++            p:=findprov(ctx,n,true);
++            if assigned(p) then
++              p^.bad:=true;
++          end;
++      addrn:
++        if taddrnode(n).left.nodetype in [loadn,temprefn] then
++          begin
++            p:=findprov(ctx,taddrnode(n).left,true);
++            if assigned(p) then
++              p^.bad:=true;
++          end;
++      tempcreaten:
++        if assigned(ttempcreatenode(n).tempinfo^.tempinitcode) then
++          begin
++            { the init code is an assignment to the temp: handled there }
++          end;
++      else
++        ;
++    end;
++  end;
++
++
++{ resolve copies: a pointer is on array a if all its sources are }
++function prov_array(p: pprovinfo; depth: longint): tabstractvarsym;
++  var
++    i: longint;
++    a: tabstractvarsym;
++  begin
++    result:=nil;
++    if (p=nil) or p^.bad or (depth>8) then
++      exit;
++    if p^.kind=pk_array then
++      result:=p^.arr;
++    for i:=0 to p^.copies.Count-1 do
++      begin
++        if pprovinfo(p^.copies[i])=p then
++          continue;
++        a:=prov_array(pprovinfo(p^.copies[i]),depth+1);
++        if not assigned(a) then
++          exit(nil);
++        if assigned(result) and (result<>a) then
++          exit(nil);
++        result:=a;
++      end;
++  end;
++
++
++{*****************************************************************************
++                              Memory accesses
++*****************************************************************************}
++
++function get_access(n: tnode): taccess;
++  var
++    off: asizeint;
++  begin
++    result.valid:=false;
++    result.base:=nil;
++    result.offset:=0;
++    result.size:=0;
++    result.recdef:=nil;
++    if not assigned(n.resultdef) then
++      exit;
++    result.size:=n.resultdef.size;
++    off:=0;
++    while n.nodetype=subscriptn do
++      begin
++        if not(tsubscriptnode(n).left.resultdef.typ=recorddef) or
++           (tabstractrecordsymtable(trecorddef(tsubscriptnode(n).left.resultdef).symtable).usefieldalignment=bit_alignment) or
++           trecorddef(tsubscriptnode(n).left.resultdef).isunion and false then
++          exit;
++        inc(off,tsubscriptnode(n).vs.fieldoffset);
++        result.recdef:=tsubscriptnode(n).left.resultdef;
++        n:=tsubscriptnode(n).left;
++      end;
++    if not assigned(result.recdef) then
++      exit;
++    case n.nodetype of
++      derefn:
++        if strip_conv(tderefnode(n).left).nodetype in [loadn,temprefn] then
++          begin
++            result.base:=n;
++            result.offset:=off;
++            result.valid:=true;
++          end;
++      vecn:
++        if (tvecnode(n).left.nodetype=loadn) and
++           (tvecnode(n).left.resultdef.typ=arraydef) and
++           not is_packed_array(tvecnode(n).left.resultdef) then
++          begin
++            result.base:=n;
++            result.offset:=off;
++            result.valid:=true;
++          end;
++      else
++        ;
++    end;
++  end;
++
++
++function same_base(const a, b: taccess): boolean;
++  begin
++    result:=a.valid and b.valid and (a.recdef=b.recdef) and a.base.isequal(b.base);
++  end;
++
++
++{ the array a base points into, nil if unknown }
++function base_array(ctx: pslpctx; const a: taccess): tabstractvarsym;
++  var
++    p: tnode;
++  begin
++    result:=nil;
++    case a.base.nodetype of
++      derefn:
++        begin
++          p:=strip_conv(tderefnode(a.base).left);
++          result:=prov_array(findprov(ctx,p,false),0);
++          if assigned(result) and
++             not equal_defs(tarraydef(result.vardef).elementdef,a.recdef) then
++            result:=nil;
++        end;
++      vecn:
++        if equal_defs(tarraydef(tvecnode(a.base).left.resultdef).elementdef,a.recdef) then
++          result:=tabstractvarsym(tloadnode(tvecnode(a.base).left).symtableentry);
++      else
++        ;
++    end;
++  end;
++
++
++function overlap(const a, b: taccess): boolean;
++  begin
++    result:=(a.offset<b.offset+b.size) and (b.offset<a.offset+a.size);
++  end;
++
++
++function may_alias(ctx: pslpctx; const a, b: taccess): boolean;
++  var
++    arra, arrb: tabstractvarsym;
++  begin
++    result:=true;
++    if not a.valid or not b.valid then
++      exit;
++    if same_base(a,b) then
++      exit(overlap(a,b));
++    { whole elements of the same array of records }
++    if a.recdef=b.recdef then
++      begin
++        arra:=base_array(ctx,a);
++        arrb:=base_array(ctx,b);
++        if assigned(arra) and (arra=arrb) then
++          exit(overlap(a,b));
++      end;
++  end;
++
++
++type
++  treadcheck = record
++    ctx: pslpctx;
++    target: taccess;
++    alias: boolean;   { check the reads against target }
++    ok: boolean;
++  end;
++  preadcheck = ^treadcheck;
++
++
++{ a read of a variable that is not reached through memory: a local or value
++  parameter whose address is never taken, or (when target is reached through
++  a pointer known to point into an array a) a global other than a }
++function var_ok(rc: preadcheck; n: tloadnode): boolean;
++  var
++    sym: tabstractvarsym;
++  begin
++    result:=false;
++    if assigned(n.left) or not(n.symtableentry.typ in [localvarsym,paravarsym,staticvarsym]) then
++      exit;
++    sym:=tabstractvarsym(n.symtableentry);
++    if (vo_volatile in sym.varoptions) or
++       (sym.typ=paravarsym) and not(tparavarsym(sym).varspez in [vs_value,vs_const]) or
++       (sym.typ=paravarsym) and paramanager_push_addr(tparavarsym(sym)) then
++      exit;
++    if not rc^.alias then
++      exit(true);
++    if (sym.typ in [localvarsym,paravarsym]) and
++       ((sym.varsymaccess*[vsa_addr_taken,vsa_different_scope])=[]) then
++      exit(true);
++    { globals: only if the target is an element of a known array }
++    result:=(sym.typ=staticvarsym) and
++      (base_array(rc^.ctx,rc^.target)<>nil) and
++      (base_array(rc^.ctx,rc^.target)<>sym);
++  end;
++
++
++function check_reads(var n: tnode; arg: pointer): foreachnoderesult; forward;
++
++function check_reads_rec(var n: tnode; arg: pointer): foreachnoderesult;
++  begin
++    result:=check_reads(n,arg);
++  end;
++
++
++function check_reads(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    rc: preadcheck absolute arg;
++    acc: taccess;
++    p: tnode;
++  begin
++    result:=fen_false;
++    case n.nodetype of
++      addn,subn,muln,slashn:
++        if nf_swapped in n.flags then
++          rc^.ok:=rc^.ok and (n.nodetype in [addn,muln]);
++      typeconvn,realconstn,ordconstn,temprefn:
++        ;
++      loadn:
++        if not var_ok(rc,tloadnode(n)) then
++          rc^.ok:=false;
++      subscriptn,derefn,vecn:
++        begin
++          acc:=get_access(n);
++          if not acc.valid or (rc^.alias and may_alias(rc^.ctx,acc,rc^.target)) then
++            rc^.ok:=false
++          else
++            begin
++              { the base pointer and the index }
++              case acc.base.nodetype of
++                derefn:
++                  begin
++                    p:=strip_conv(tderefnode(acc.base).left);
++                    if (p.nodetype=loadn) and assigned(tloadnode(p).left) then
++                      rc^.ok:=false;
++                  end;
++                vecn:
++                  foreachnodestatic(tvecnode(acc.base).right,@check_reads_rec,arg);
++                else
++                  ;
++              end;
++            end;
++          result:=fen_norecurse_false;
++        end;
++      else
++        rc^.ok:=false;
++    end;
++    if not rc^.ok then
++      result:=fen_norecurse_true;
++  end;
++
++
++{ e has no side effects; with alias, it also reads nothing that may be target }
++function reads_ok(ctx: pslpctx; e: tnode; const target: taccess; alias: boolean): boolean;
++  var
++    rc: treadcheck;
++  begin
++    rc.ctx:=ctx;
++    rc.target:=target;
++    rc.alias:=alias;
++    rc.ok:=true;
++    foreachnodestatic(e,@check_reads,@rc);
++    result:=rc.ok;
++  end;
++
++
++{*****************************************************************************
++                              Vector trees
++*****************************************************************************}
++
++type
++  { a vector temp holding [lane0, lane1] of plain values (variables, temps,
++    constants), valid until one of them is written }
++  pcacheentry = ^tcacheentry;
++  tcacheentry = record
++    lane0, lane1: tnode;      { copies, owned }
++    temp: ttempcreatenode;
++  end;
++
++  tlistctx = record
++    ctx: pslpctx;
++    cache: TFPList;           { pcacheentry }
++    pre: tstatementnode;      { statements to put before the vector statement }
++    preblock: tblocknode;
++  end;
++  plistctx = ^tlistctx;
++
++
++function pure_double(n: tnode): boolean;
++  begin
++    result:=assigned(n.resultdef) and is_double(n.resultdef);
++  end;
++
++
++{ a value that a vector temp can hold for later statements }
++function plain_value(n: tnode): boolean;
++  begin
++    case n.nodetype of
++      realconstn,temprefn:
++        result:=true;
++      loadn:
++        result:=not assigned(tloadnode(n).left) and
++          (tloadnode(n).symtableentry.typ in [localvarsym,paravarsym]) and
++          ((tabstractvarsym(tloadnode(n).symtableentry).varsymaccess*[vsa_addr_taken,vsa_different_scope])=[]) and
++          not(vo_volatile in tabstractvarsym(tloadnode(n).symtableentry).varoptions) and
++          ((tloadnode(n).symtableentry.typ=localvarsym) or
++           (tparavarsym(tloadnode(n).symtableentry).varspez in [vs_value,vs_const]) and
++           not paramanager_push_addr(tparavarsym(tloadnode(n).symtableentry)));
++      else
++        result:=false;
++    end;
++  end;
++
++
++{ cost estimate: scalar instructions of e }
++function scalar_cost(n: tnode): longint;
++  begin
++    case n.nodetype of
++      addn,subn,muln,slashn:
++        result:=1+scalar_cost(taddnode(n).left)+scalar_cost(taddnode(n).right);
++      subscriptn,derefn,vecn:
++        result:=1;
++      else
++        result:=0;
++    end;
++  end;
++
++
++function vecload(ctx: pslpctx; n: tnode): tnode;
++  var
++    hp: tnode;
++  begin
++    hp:=caddrnode.create_internal(n.getcopy);
++    hp:=ctypeconvnode.create_internal(hp,ctx^.pvec2def);
++    hp:=cderefnode.create(hp);
++    include(tderefnode(hp).derefnodeflags,drnf_unaligned);
++    result:=hp;
++  end;
++
++
++function mkintrinsic(nr: tinlinenumber; a, b: tnode): tnode;
++  begin
++    if assigned(b) then
++      result:=geninlinenode(nr,false,ccallparanode.create(b,ccallparanode.create(a,nil)))
++    else
++      result:=geninlinenode(nr,false,ccallparanode.create(a,nil));
++  end;
++
++
++function cache_lookup(lc: plistctx; a, b: tnode): ttempcreatenode;
++  var
++    i: longint;
++    e: pcacheentry;
++  begin
++    result:=nil;
++    for i:=0 to lc^.cache.Count-1 do
++      begin
++        e:=pcacheentry(lc^.cache[i]);
++        if e^.lane0.isequal(a) and e^.lane1.isequal(b) then
++          exit(e^.temp);
++      end;
++  end;
++
++
++procedure cache_add(lc: plistctx; a, b: tnode; temp: ttempcreatenode);
++  var
++    e: pcacheentry;
++  begin
++    new(e);
++    e^.lane0:=a.getcopy;
++    e^.lane1:=b.getcopy;
++    { the copies are compared with reads }
++    node_reset_flags(e^.lane0,[nf_write,nf_modify],[]);
++    node_reset_flags(e^.lane1,[nf_write,nf_modify],[]);
++    e^.temp:=temp;
++    lc^.cache.Add(e);
++  end;
++
++
++procedure cache_clear(lc: plistctx);
++  var
++    i: longint;
++  begin
++    for i:=0 to lc^.cache.Count-1 do
++      begin
++        pcacheentry(lc^.cache[i])^.lane0.free;
++        pcacheentry(lc^.cache[i])^.lane1.free;
++        dispose(pcacheentry(lc^.cache[i]));
++      end;
++    lc^.cache.Clear;
++  end;
++
++
++function new_vectemp(lc: plistctx; value: tnode): ttempcreatenode;
++  begin
++    result:=ctempcreatenode.create(lc^.ctx^.vec2def,16,tt_persistent,true);
++    if not assigned(lc^.preblock) then
++      lc^.preblock:=internalstatements(lc^.pre);
++    addstatement(lc^.pre,result);
++    addstatement(lc^.pre,cassignmentnode.create_internal(ctemprefnode.create(result),value));
++  end;
++
++
++{ the vector of (a, b), nil if the shapes differ; cost counts the vector
++  instructions, loads the vector loads }
++function build(lc: plistctx; a, b: tnode; var cost: longint; var loads: longint): tnode;
++  var
++    l, r: tnode;
++    acca, accb: taccess;
++    nr: tinlinenumber;
++    t: ttempcreatenode;
++  begin
++    result:=nil;
++    if not pure_double(a) or not pure_double(b) then
++      exit;
++    { a value an earlier vector statement made }
++    t:=cache_lookup(lc,a,b);
++    if assigned(t) then
++      exit(ctemprefnode.create(t));
++    if (a.nodetype=b.nodetype) and (a.nodetype in [addn,subn,muln,slashn]) and
++       ((a.nodetype in [addn,muln]) or
++        (((nf_swapped in a.flags)=false) and ((nf_swapped in b.flags)=false))) then
++      begin
++        l:=build(lc,taddnode(a).left,taddnode(b).left,cost,loads);
++        if not assigned(l) then
++          exit;
++        r:=build(lc,taddnode(a).right,taddnode(b).right,cost,loads);
++        if not assigned(r) then
++          begin
++            l.free;
++            exit;
++          end;
++        case a.nodetype of
++          addn: nr:=in_vec2d_add;
++          subn: nr:=in_vec2d_sub;
++          muln: nr:=in_vec2d_mul;
++          else nr:=in_vec2d_div;
++        end;
++        inc(cost);
++        exit(mkintrinsic(nr,l,r));
++      end;
++    { adjacent loads }
++    acca:=get_access(a);
++    accb:=get_access(b);
++    if acca.valid and accb.valid and same_base(acca,accb) and
++       (acca.size=8) and (accb.size=8) and (accb.offset=acca.offset+8) then
++      begin
++        inc(cost);
++        inc(loads);
++        exit(vecload(lc^.ctx,a));
++      end;
++    { a broadcast or a pack of two values }
++    if not (a.nodetype in [loadn,temprefn,realconstn,subscriptn,derefn,vecn,typeconvn,
++                           addn,subn,muln,slashn]) or
++       not (b.nodetype in [loadn,temprefn,realconstn,subscriptn,derefn,vecn,typeconvn,
++                           addn,subn,muln,slashn]) then
++      exit;
++    inc(cost,2+scalar_cost(a)+scalar_cost(b));
++    if a.isequal(b) then
++      begin
++        if scalar_cost(b)>0 then
++          dec(cost,scalar_cost(b));
++        result:=mkintrinsic(in_vec2d_dup,a.getcopy,nil);
++      end
++    else
++      result:=mkintrinsic(in_vec2d_pack,a.getcopy,b.getcopy);
++    { kept in a temp for later statements }
++    if plain_value(a) and plain_value(b) then
++      begin
++        t:=new_vectemp(lc,result);
++        cache_add(lc,a,b,t);
++        result:=ctemprefnode.create(t);
++      end;
++  end;
++
++
++function wrap_pre(lc: plistctx; st: tnode): tnode;
++  begin
++    if assigned(lc^.preblock) then
++      begin
++        addstatement(lc^.pre,st);
++        result:=lc^.preblock;
++        lc^.preblock:=nil;
++        lc^.pre:=nil;
++      end
++    else
++      result:=st;
++  end;
++
++
++procedure drop_pre(lc: plistctx);
++  begin
++    { the temps of a failed attempt: forget them and their cache entries }
++    if assigned(lc^.preblock) then
++      begin
++        lc^.preblock.free;
++        lc^.preblock:=nil;
++        lc^.pre:=nil;
++      end;
++  end;
++
++
++type
++  twritecheck = record
++    e: pcacheentry;
++    hit: boolean;
++  end;
++  pwritecheck = ^twritecheck;
++
++
++function writes_lane(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    wc: pwritecheck absolute arg;
++  begin
++    result:=fen_false;
++    case n.nodetype of
++      loadn,temprefn:
++        if ((n.flags*[nf_write,nf_modify])<>[]) and
++           (n.isequal(wc^.e^.lane0) or n.isequal(wc^.e^.lane1)) then
++          wc^.hit:=true;
++      calln,asmn:
++        wc^.hit:=true;
++      addrn:
++        if taddrnode(n).left.isequal(wc^.e^.lane0) or taddrnode(n).left.isequal(wc^.e^.lane1) then
++          wc^.hit:=true;
++      else
++        ;
++    end;
++    if wc^.hit then
++      result:=fen_norecurse_true;
++  end;
++
++
++{ drop the cache entries whose values statement st may change }
++procedure invalidate(lc: plistctx; st: tnode);
++  var
++    i: longint;
++    wc: twritecheck;
++  begin
++    if not assigned(st) then
++      exit;
++    for i:=lc^.cache.Count-1 downto 0 do
++      begin
++        wc.e:=pcacheentry(lc^.cache[i]);
++        wc.hit:=false;
++        foreachnodestatic(st,@writes_lane,@wc);
++        if wc.hit then
++          begin
++            pcacheentry(lc^.cache[i])^.lane0.free;
++            pcacheentry(lc^.cache[i])^.lane1.free;
++            dispose(pcacheentry(lc^.cache[i]));
++            lc^.cache.Delete(i);
++          end;
++      end;
++  end;
++
++
++procedure finish_statement(st: tnode);
++  begin
++    typecheckpass(st);
++    do_firstpass(st);
++  end;
++
++
++function try_pair(lc: plistctx; s1, s2: tstatementnode): boolean;
++  var
++    a1, a2: tassignmentnode;
++    m1, m2: taccess;
++    v, st: tnode;
++    cost, loads, scost, ncache: longint;
++  begin
++    result:=false;
++    if not assigned(s1.left) or not assigned(s2.left) or
++       (s1.left.nodetype<>assignn) or (s2.left.nodetype<>assignn) then
++      exit;
++    a1:=tassignmentnode(s1.left);
++    a2:=tassignmentnode(s2.left);
++    if not assigned(a1.left.resultdef) or not is_double(a1.left.resultdef) or
++       not assigned(a2.left.resultdef) or not is_double(a2.left.resultdef) or
++       (a1.assignmentnodeflags<>[]) or (a2.assignmentnodeflags<>[]) then
++      exit;
++    m1:=get_access(a1.left);
++    m2:=get_access(a2.left);
++    if not m1.valid or not same_base(m1,m2) or (m1.size<>8) or (m2.size<>8) or
++       (m2.offset<>m1.offset+8) then
++      exit;
++    { e2 is evaluated before m1 is written: it must not read m1; neither
++      side may have side effects }
++    if not reads_ok(lc^.ctx,a2.right,m1,true) or
++       not reads_ok(lc^.ctx,a1.right,m1,false) or
++       not reads_ok(lc^.ctx,a1.left,m1,false) then
++      exit;
++    cost:=0;
++    loads:=0;
++    ncache:=lc^.cache.Count;
++    v:=build(lc,a1.right,a2.right,cost,loads);
++    if not assigned(v) then
++      begin
++        drop_pre(lc);
++        while lc^.cache.Count>ncache do
++          begin
++            pcacheentry(lc^.cache.Last)^.lane0.free;
++            pcacheentry(lc^.cache.Last)^.lane1.free;
++            dispose(pcacheentry(lc^.cache.Last));
++            lc^.cache.Delete(lc^.cache.Count-1);
++          end;
++        exit;
++      end;
++    { scalar: the operations and loads of both, two stores; vector: the
++      vector operations, loads and packs, one store }
++    scost:=scalar_cost(a1.right)+scalar_cost(a2.right)+2;
++    if (cost+1>=scost) or (loads=0) then
++      begin
++        v.free;
++        drop_pre(lc);
++        while lc^.cache.Count>ncache do
++          begin
++            pcacheentry(lc^.cache.Last)^.lane0.free;
++            pcacheentry(lc^.cache.Last)^.lane1.free;
++            dispose(pcacheentry(lc^.cache.Last));
++            lc^.cache.Delete(lc^.cache.Count-1);
++          end;
++        exit;
++      end;
++    st:=cassignmentnode.create_internal(vecload(lc^.ctx,a1.left),v);
++    st.fileinfo:=a1.fileinfo;
++    st:=wrap_pre(lc,st);
++    finish_statement(st);
++    s1.left.free;
++    s1.left:=st;
++    s2.left.free;
++    s2.left:=cnothingnode.create;
++    finish_statement(s2.left);
++    result:=true;
++  end;
++
++
++type
++  trefcheck = record
++    target: tnode;
++    hit: boolean;
++  end;
++
++
++function refers_to(var n: tnode; arg: pointer): foreachnoderesult;
++  begin
++    result:=fen_false;
++    if (n.nodetype in [loadn,temprefn]) and n.isequal(trefcheck(arg^).target) then
++      begin
++        trefcheck(arg^).hit:=true;
++        result:=fen_norecurse_true;
++      end;
++  end;
++
++
++function refers(n, target: tnode): boolean;
++  var
++    rc: trefcheck;
++  begin
++    rc.target:=target;
++    rc.hit:=false;
++    if assigned(n) then
++      foreachnodestatic(n,@refers_to,@rc);
++    result:=rc.hit;
++  end;
++
++
++{ x := e1; y := e2 with local doubles x, y that later statements use as a
++  pair: v := vector(e1,e2); x := lo(v); y := hi(v), and [x,y] is v }
++function try_local_pair(lc: plistctx; s1, s2: tstatementnode): boolean;
++  var
++    a1, a2: tassignmentnode;
++    x, y, v, st: tnode;
++    cost, loads, scost, ncache: longint;
++    later: tstatementnode;
++    used: boolean;
++    t: ttempcreatenode;
++    dummy: taccess;
++  begin
++    result:=false;
++    if not assigned(s1.left) or not assigned(s2.left) or
++       (s1.left.nodetype<>assignn) or (s2.left.nodetype<>assignn) then
++      exit;
++    a1:=tassignmentnode(s1.left);
++    a2:=tassignmentnode(s2.left);
++    x:=a1.left;
++    y:=a2.left;
++    if not plain_value(x) or not plain_value(y) or (x.nodetype<>loadn) or (y.nodetype<>loadn) or
++       x.isequal(y) or
++       not is_double(x.resultdef) or not is_double(y.resultdef) or
++       (a1.assignmentnodeflags<>[]) or (a2.assignmentnodeflags<>[]) then
++      exit;
++    { e2 runs after x is written }
++    if refers(a2.right,x) then
++      exit;
++    dummy.valid:=false;
++    if not reads_ok(lc^.ctx,a1.right,dummy,false) or
++       not reads_ok(lc^.ctx,a2.right,dummy,false) then
++      exit;
++    { worth it only if a later statement pair uses x and y together }
++    used:=false;
++    later:=tstatementnode(s2.right);
++    while assigned(later) and (later.nodetype=statementn) and assigned(later.right) and
++          (later.right.nodetype=statementn) do
++      begin
++        if refers(later.left,x) and refers(tstatementnode(later.right).left,y) then
++          begin
++            used:=true;
++            break;
++          end;
++        later:=tstatementnode(later.right);
++      end;
++    if not used then
++      exit;
++    cost:=0;
++    loads:=0;
++    ncache:=lc^.cache.Count;
++    v:=build(lc,a1.right,a2.right,cost,loads);
++    scost:=scalar_cost(a1.right)+scalar_cost(a2.right);
++    { the extraction costs 3, a pack saved later 2 }
++    if not assigned(v) or (loads=0) or (cost+3>scost+2) then
++      begin
++        v.free;
++        drop_pre(lc);
++        while lc^.cache.Count>ncache do
++          begin
++            pcacheentry(lc^.cache.Last)^.lane0.free;
++            pcacheentry(lc^.cache.Last)^.lane1.free;
++            dispose(pcacheentry(lc^.cache.Last));
++            lc^.cache.Delete(lc^.cache.Count-1);
++          end;
++        exit;
++      end;
++    { x and y belong to the statements that are replaced below }
++    x:=x.getcopy;
++    y:=y.getcopy;
++    t:=ctempcreatenode.create(lc^.ctx^.vec2def,16,tt_persistent,true);
++    if not assigned(lc^.preblock) then
++      lc^.preblock:=internalstatements(lc^.pre);
++    addstatement(lc^.pre,t);
++    addstatement(lc^.pre,cassignmentnode.create_internal(ctemprefnode.create(t),v));
++    st:=cassignmentnode.create(x.getcopy,mkintrinsic(in_vec2d_lo,ctemprefnode.create(t),nil));
++    st.fileinfo:=a1.fileinfo;
++    st:=wrap_pre(lc,st);
++    finish_statement(st);
++    s1.left.free;
++    s1.left:=st;
++    st:=cassignmentnode.create(y.getcopy,mkintrinsic(in_vec2d_hi,ctemprefnode.create(t),nil));
++    st.fileinfo:=a2.fileinfo;
++    finish_statement(st);
++    s2.left.free;
++    s2.left:=st;
++    invalidate(lc,s1.left);
++    invalidate(lc,s2.left);
++    cache_add(lc,x,y,t);
++    x.free;
++    y.free;
++    result:=true;
++  end;
++
++
++function slp_statements(var n: tnode; arg: pointer): foreachnoderesult; forward;
++
++function slp_statements_rec(var n: tnode; arg: pointer): foreachnoderesult;
++  begin
++    result:=slp_statements(n,arg);
++  end;
++
++
++function slp_statements(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    ctx: pslpctx absolute arg;
++    s, nxt: tstatementnode;
++    lc: tlistctx;
++  begin
++    result:=fen_false;
++    if n.nodetype<>statementn then
++      exit;
++    lc.ctx:=ctx;
++    lc.cache:=TFPList.Create;
++    lc.pre:=nil;
++    lc.preblock:=nil;
++    try
++      s:=tstatementnode(n);
++      while assigned(s) do
++        begin
++          if assigned(s.right) and (s.right.nodetype=statementn) then
++            nxt:=tstatementnode(s.right)
++          else
++            nxt:=nil;
++          if assigned(nxt) and try_local_pair(@lc,s,nxt) then
++            begin
++              ctx^.changed:=true;
++              s:=nxt;
++            end
++          else if assigned(nxt) and try_pair(@lc,s,nxt) then
++            begin
++              ctx^.changed:=true;
++              s:=nxt;
++            end
++          else
++            invalidate(@lc,s.left);
++          if assigned(s.right) and (s.right.nodetype=statementn) then
++            s:=tstatementnode(s.right)
++          else
++            break;
++        end;
++    finally
++      cache_clear(@lc);
++      lc.cache.Free;
++    end;
++    { nested statement lists }
++    s:=tstatementnode(n);
++    while assigned(s) do
++      begin
++        if assigned(s.left) then
++          foreachnodestatic(pm_postprocess,s.left,@slp_statements_rec,arg);
++        if assigned(s.right) and (s.right.nodetype=statementn) then
++          s:=tstatementnode(s.right)
++        else
++          break;
++      end;
++    result:=fen_norecurse_false;
++  end;
++
++
++function do_slp_vectorize(var code: tnode): boolean;
++  var
++    ctx: tslpctx;
++    i: longint;
++  begin
++    result:=false;
++{$ifndef x86_64}
++    exit;
++{$endif x86_64}
++    ctx.provs:=TFPList.Create;
++    ctx.changed:=false;
++    ctx.vec2def:=carraydef.getreusable_vector(s64floattype,2);
++    ctx.pvec2def:=cpointerdef.getreusable(ctx.vec2def);
++    try
++      foreachnodestatic(pm_postprocess,code,@prov_collect,@ctx);
++      foreachnodestatic(pm_postprocess,code,@slp_statements,@ctx);
++    finally
++      for i:=0 to ctx.provs.Count-1 do
++        begin
++          pprovinfo(ctx.provs[i])^.copies.Free;
++          dispose(pprovinfo(ctx.provs[i]));
++        end;
++      ctx.provs.Free;
++    end;
++    result:=ctx.changed;
++  end;
++
++end.
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index 215264bc..e7638bdb 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -144,7 +144,7 @@ implementation
+        fmodule,
+        { pass 1 }
+        ngenutil,nld,ncal,ncon,nflw,nadd,ncnv,nmem,
+-       optexcregvar,optbitcast,optrange,
++       optexcregvar,optbitcast,optrange,optslp,
+        pass_1,
+     {$ifdef state_tracking}
+        nstate,
+@@ -1322,6 +1322,9 @@ implementation
+                      dfabuilder.redodfainfo(code);
+                  end;
+              end;
++
++           if cs_opt_slp in current_settings.optimizerswitches then
++             do_slp_vectorize(code);
+          end
+        else
+          begin
+diff --git a/compiler/utils/ppuutils/ppudump.pp b/compiler/utils/ppuutils/ppudump.pp
+index e830b2ef..2f84a134 100644
+--- a/compiler/utils/ppuutils/ppudump.pp
++++ b/compiler/utils/ppuutils/ppudump.pp
+@@ -2552,7 +2552,8 @@ const
+          'cs_opt_use_load_modify_store',
+          'cs_opt_unused_para',
+          'cs_opt_consts',
+-         'cs_opt_forloop'
++         'cs_opt_forloop',
++         'cs_opt_slp'
+        );
+     var
+          globalswitch  : tglobalswitch;
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 8d550c2f..bcc67320 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -2610,7 +2610,8 @@ unit aoptx86;
+                 end;
+               A_ADDSD,A_SUBSD,A_MULSD,A_DIVSD,A_SQRTSD,A_MINSD,A_MAXSD,
+               A_ADDSS,A_SUBSS,A_MULSS,A_DIVSS,A_SQRTSS,A_MINSS,A_MAXSS,
+-              A_COMISD,A_UCOMISD,A_COMISS,A_UCOMISS:
++              A_COMISD,A_UCOMISD,A_COMISS,A_UCOMISS,
++              A_UNPCKLPD,A_UNPCKHPD,A_ADDPD,A_SUBPD,A_MULPD,A_DIVPD:
+                 if (taicpu(hp).ops<>2) then
+                   exit;
+               else
+diff --git a/compiler/x86/cgx86.pas b/compiler/x86/cgx86.pas
+index 67ddbbe3..a1b31ae4 100644
+--- a/compiler/x86/cgx86.pas
++++ b/compiler/x86/cgx86.pas
+@@ -1561,8 +1561,23 @@ unit cgx86;
+                    op := A_VMOVQ
+                  else
+                    op := A_MOVQ;
+-               OS_128,
+                OS_M128:
++                 { a vector: stay in the floating-point domain }
++                 if UseAVX then
++                   begin
++                     if GetRefAlignment(tmpref) = 16 then
++                       op := A_VMOVAPS
++                     else
++                       op := A_VMOVUPS;
++                   end
++                 else
++                   begin
++                     if GetRefAlignment(tmpref) = 16 then
++                       op := A_MOVAPS
++                     else
++                       op := A_MOVUPS;
++                   end;
++               OS_128:
+                  { Use XMM integer transfer }
+                  if UseAVX then
+                    begin
+@@ -1657,19 +1672,19 @@ unit cgx86;
+                  else
+                    op := A_MOVQ;
+                OS_M128:
+-                 { Use XMM integer transfer }
++                 { a vector: stay in the floating-point domain }
+                  if UseAVX then
+                  begin
+                    if GetRefAlignment(tmpref) = 16 then
+-                     op := A_VMOVDQA
++                     op := A_VMOVAPS
+                    else
+-                     op := A_VMOVDQU;
++                     op := A_VMOVUPS;
+                  end else
+                  begin
+                    if GetRefAlignment(tmpref) = 16 then
+-                     op := A_MOVDQA
++                     op := A_MOVAPS
+                    else
+-                     op := A_MOVDQU;
++                     op := A_MOVUPS;
+                  end;
+                OS_M256:
+                  { Use XMM integer transfer }
+diff --git a/compiler/x86/nx86inl.pas b/compiler/x86/nx86inl.pas
+index 222f51cb..43fa0001 100644
+--- a/compiler/x86/nx86inl.pas
++++ b/compiler/x86/nx86inl.pas
+@@ -82,6 +82,7 @@ interface
+           procedure second_int_real;override;
+           procedure second_high;override;
+           procedure second_minmax;override;
++          procedure second_vec2d;override;
+        private
+           procedure load_fpu_location(lnode: tnode);
+        end;
+@@ -1581,6 +1582,118 @@ implementation
+       end;
+ 
+ 
++    { the two-element double vector intrinsics of the SLP vectoriser: operands
++      in xmm registers (a packed SSE memory operand would need 16 byte
++      alignment), the result in a new one }
++    procedure tx86inlinenode.second_vec2d;
++      var
++        a, b: tnode;
++        ra, rb, res: tregister;
++        op, vop: tasmop;
++      begin
++        if (inlinenumber=in_vec2d_dup) or (inlinenumber=in_vec2d_lo) or (inlinenumber=in_vec2d_hi) then
++          begin
++            a:=tcallparanode(parameters).paravalue;
++            secondpass(a);
++            if inlinenumber=in_vec2d_dup then
++              begin
++                location_reset(location,LOC_MMREGISTER,OS_M128);
++                hlcg.location_force_mmregscalar(current_asmdata.CurrAsmList,a.location,a.resultdef,true);
++                ra:=newreg(R_MMREGISTER,getsupreg(a.location.register),R_SUBMMWHOLE);
++                if a.location.loc=LOC_MMREGISTER then
++                  res:=ra
++                else
++                  begin
++                    res:=cg.getmmregister(current_asmdata.CurrAsmList,OS_M128);
++                    emit_reg_reg(A_MOVAPD,S_NO,ra,res);
++                  end;
++                emit_reg_reg(A_UNPCKLPD,S_NO,res,res);
++              end
++            else
++              begin
++                location_reset(location,LOC_MMREGISTER,OS_F64);
++                location_force_mmreg(current_asmdata.CurrAsmList,a.location,true);
++                ra:=a.location.register;
++                { the same register name as the scalar result, so that the
++                  peephole optimiser sees the moves of one register }
++                res:=cg.getmmregister(current_asmdata.CurrAsmList,OS_F64);
++                emit_reg_reg(A_MOVAPD,S_NO,newreg(R_MMREGISTER,getsupreg(ra),getsubreg(res)),res);
++                if inlinenumber=in_vec2d_hi then
++                  emit_reg_reg(A_UNPCKHPD,S_NO,res,res);
++              end;
++            location.register:=res;
++            exit;
++          end;
++        a:=tcallparanode(tcallparanode(parameters).nextpara).paravalue;
++        b:=tcallparanode(parameters).paravalue;
++        secondpass(a);
++        secondpass(b);
++        location_reset(location,LOC_MMREGISTER,OS_M128);
++        if inlinenumber=in_vec2d_pack then
++          begin
++            hlcg.location_force_mmregscalar(current_asmdata.CurrAsmList,a.location,a.resultdef,true);
++            hlcg.location_force_mmregscalar(current_asmdata.CurrAsmList,b.location,b.resultdef,true);
++            ra:=newreg(R_MMREGISTER,getsupreg(a.location.register),R_SUBMMWHOLE);
++            rb:=newreg(R_MMREGISTER,getsupreg(b.location.register),R_SUBMMWHOLE);
++            if UseAVX then
++              begin
++                res:=cg.getmmregister(current_asmdata.CurrAsmList,OS_M128);
++                emit_reg_reg_reg(A_VUNPCKLPD,S_NO,rb,ra,res);
++              end
++            else if a.location.loc=LOC_MMREGISTER then
++              begin
++                { a temporary value: build the vector in its register }
++                res:=ra;
++                emit_reg_reg(A_UNPCKLPD,S_NO,rb,res);
++              end
++            else
++              begin
++                res:=cg.getmmregister(current_asmdata.CurrAsmList,OS_M128);
++                emit_reg_reg(A_MOVAPD,S_NO,ra,res);
++                emit_reg_reg(A_UNPCKLPD,S_NO,rb,res);
++              end;
++          end
++        else
++          begin
++            location_force_mmreg(current_asmdata.CurrAsmList,a.location,true);
++            location_force_mmreg(current_asmdata.CurrAsmList,b.location,true);
++            ra:=a.location.register;
++            rb:=b.location.register;
++            case inlinenumber of
++              in_vec2d_add: begin op:=A_ADDPD; vop:=A_VADDPD; end;
++              in_vec2d_sub: begin op:=A_SUBPD; vop:=A_VSUBPD; end;
++              in_vec2d_mul: begin op:=A_MULPD; vop:=A_VMULPD; end;
++              in_vec2d_div: begin op:=A_DIVPD; vop:=A_VDIVPD; end;
++              else
++                internalerror(2026110703);
++            end;
++            if UseAVX then
++              begin
++                res:=cg.getmmregister(current_asmdata.CurrAsmList,OS_M128);
++                emit_reg_reg_reg(vop,S_NO,rb,ra,res);
++              end
++            else if a.location.loc=LOC_MMREGISTER then
++              begin
++                { a temporary value: compute in its register }
++                res:=ra;
++                emit_reg_reg(op,S_NO,rb,res);
++              end
++            else if (b.location.loc=LOC_MMREGISTER) and ((op=A_ADDPD) or (op=A_MULPD)) then
++              begin
++                res:=rb;
++                emit_reg_reg(op,S_NO,ra,res);
++              end
++            else
++              begin
++                res:=cg.getmmregister(current_asmdata.CurrAsmList,OS_M128);
++                emit_reg_reg(A_MOVAPD,S_NO,ra,res);
++                emit_reg_reg(op,S_NO,rb,res);
++              end;
++          end;
++        location.register:=res;
++      end;
++
++
+     procedure tx86inlinenode.second_minmax;
+ {$ifndef i8086}
+       const
+diff --git a/compiler/x86_64/cpuinfo.pas b/compiler/x86_64/cpuinfo.pas
+index 1d7445b5..1f765c51 100644
+--- a/compiler/x86_64/cpuinfo.pas
++++ b/compiler/x86_64/cpuinfo.pas
+@@ -208,13 +208,13 @@ const
+                                  { no need to write info about those }
+                                  [cs_opt_level1,cs_opt_level2,cs_opt_level3]+
+                                  [{$ifndef llvm}cs_opt_regvar,{$endif}cs_opt_loopunroll,cs_opt_stackframe,cs_userbp,
+-				  cs_opt_tailrecursion,cs_opt_nodecse,cs_opt_reorder_fields,cs_opt_fastmath];
++				  cs_opt_tailrecursion,cs_opt_nodecse,cs_opt_reorder_fields,cs_opt_fastmath,cs_opt_slp];
+ 
+    level1optimizerswitches = genericlevel1optimizerswitches;
+    level2optimizerswitches = genericlevel2optimizerswitches + level1optimizerswitches +
+      [{$ifndef llvm}cs_opt_regvar,{$endif}cs_opt_stackframe,cs_opt_tailrecursion,cs_opt_nodecse,cs_opt_consts];
+    level3optimizerswitches = genericlevel3optimizerswitches + level2optimizerswitches;
+-   level4optimizerswitches = genericlevel4optimizerswitches + level3optimizerswitches + [cs_userbp];
++   level4optimizerswitches = genericlevel4optimizerswitches + level3optimizerswitches + [cs_userbp,cs_opt_slp];
+ 
+ type
+    tcpuflags =
+diff --git a/tests/test/opt/tslp1.pp b/tests/test/opt/tslp1.pp
+new file mode 100644
+index 00000000..a2bb77eb
+--- /dev/null
++++ b/tests/test/opt/tslp1.pp
+@@ -0,0 +1,245 @@
++{ %CPU=x86_64 }
++{ %OPT=-O4 -OoNOFASTMATH }
++{ SLP vectoriser (optslp): pairs of double assignments to adjacent memory;
++  every routine is compared with the same statements kept apart by a call }
++program tslp1;
++
++{$mode objfpc}
++
++type
++  TBody = record
++    x, y, z, vx, vy, vz, mass: double;
++  end;
++  PBody = ^TBody;
++
++var
++  errors: longint = 0;
++  b, r: array[1..6] of TBody;
++  g: double = 3.0;
++
++procedure barrier; noinline;
++begin
++end;
++
++procedure check(got, expected: double; const what: string);
++begin
++  if got <> expected then
++    begin
++      writeln(what, ': got ', got, ', expected ', expected);
++      inc(errors);
++    end;
++end;
++
++procedure init(var a: array of TBody);
++var
++  i: longint;
++begin
++  for i := 0 to high(a) do
++    with a[i] do
++      begin
++        x := i + 0.5; y := i * 2 + 0.25; z := i * 3;
++        vx := i * 0.1; vy := i * 0.2; vz := 0; mass := i + 1;
++      end;
++end;
++
++procedure compare(const what: string);
++var
++  i: longint;
++begin
++  for i := 1 to 6 do
++    begin
++      check(b[i].x, r[i].x, what + ' x');
++      check(b[i].y, r[i].y, what + ' y');
++      check(b[i].vx, r[i].vx, what + ' vx');
++      check(b[i].vy, r[i].vy, what + ' vy');
++      check(b[i].mass, r[i].mass, what + ' mass');
++    end;
++end;
++
++{ the nbody inner loop: pointers on whole elements of one array }
++procedure advance(var a: array of TBody; dt: double; sep: boolean);
++var
++  bi, bj: PBody;
++  i, j: longint;
++  dx, dy, mag: double;
++begin
++  bi := @a[0];
++  for i := 0 to high(a) - 1 do
++    begin
++      bj := bi;
++      for j := i + 1 to high(a) do
++        begin
++          inc(bj);
++          dx := bi^.x - bj^.x;
++          dy := bi^.y - bj^.y;
++          mag := dt / (dx * dx + dy * dy + 1);
++          bi^.vx := bi^.vx - dx * bj^.mass * mag;
++          bi^.vy := bi^.vy - dy * bj^.mass * mag;
++          bj^.vx := bj^.vx + dx * bi^.mass * mag;
++          bj^.vy := bj^.vy + dy * bi^.mass * mag;
++        end;
++      inc(bi);
++    end;
++  bi := @a[0];
++  for i := 0 to high(a) do
++    begin
++      with bi^ do
++        begin
++          x := x + dt * vx;
++          y := y + dt * vy;
++        end;
++      inc(bi);
++    end;
++end;
++
++procedure advance_ref(var a: array of TBody; dt: double; sep: boolean);
++var
++  bi, bj: PBody;
++  i, j: longint;
++  dx, dy, mag: double;
++begin
++  bi := @a[0];
++  for i := 0 to high(a) - 1 do
++    begin
++      bj := bi;
++      for j := i + 1 to high(a) do
++        begin
++          inc(bj);
++          dx := bi^.x - bj^.x;
++          barrier;
++          dy := bi^.y - bj^.y;
++          mag := dt / (dx * dx + dy * dy + 1);
++          bi^.vx := bi^.vx - dx * bj^.mass * mag;
++          barrier;
++          bi^.vy := bi^.vy - dy * bj^.mass * mag;
++          bj^.vx := bj^.vx + dx * bi^.mass * mag;
++          barrier;
++          bj^.vy := bj^.vy + dy * bi^.mass * mag;
++        end;
++      inc(bi);
++    end;
++  bi := @a[0];
++  for i := 0 to high(a) do
++    begin
++      with bi^ do
++        begin
++          x := x + dt * vx;
++          barrier;
++          y := y + dt * vy;
++        end;
++      inc(bi);
++    end;
++end;
++
++{ bj = bi: the same element }
++procedure same(p: PBody; sep: boolean);
++var
++  q: PBody;
++begin
++  q := p;
++  p^.vx := p^.vx - q^.mass * 2.0;
++  p^.vy := p^.vy - q^.mass * 3.0;
++end;
++
++procedure same_ref(p: PBody; sep: boolean);
++var
++  q: PBody;
++begin
++  q := p;
++  p^.vx := p^.vx - q^.mass * 2.0;
++  barrier;
++  p^.vy := p^.vy - q^.mass * 3.0;
++end;
++
++{ the second statement reads what the first writes }
++procedure dep(p: PBody; sep: boolean);
++begin
++  p^.x := p^.y * 2.0 + p^.vx;
++  p^.y := p^.x * 3.0 + p^.vy;
++end;
++
++procedure dep_ref(p: PBody; sep: boolean);
++begin
++  p^.x := p^.y * 2.0 + p^.vx;
++  barrier;
++  p^.y := p^.x * 3.0 + p^.vy;
++end;
++
++{ q^.mass overlaps p^.vx (no provenance) }
++procedure overlap(p, q: PBody; sep: boolean);
++begin
++  p^.vx := p^.vx + q^.mass * 2.0;
++  p^.vy := p^.vy + q^.mass * 2.0;
++end;
++
++procedure overlap_ref(p, q: PBody; sep: boolean);
++begin
++  p^.vx := p^.vx + q^.mass * 2.0;
++  barrier;
++  p^.vy := p^.vy + q^.mass * 2.0;
++end;
++
++{ a global read by the second statement }
++procedure global(p: PBody; sep: boolean);
++begin
++  p^.x := p^.x * g + 1.0;
++  p^.y := p^.y * g + 2.0;
++end;
++
++procedure global_ref(p: PBody; sep: boolean);
++begin
++  p^.x := p^.x * g + 1.0;
++  barrier;
++  p^.y := p^.y * g + 2.0;
++end;
++
++{ dx changes between the local pair and its use }
++procedure reuse(p, q: PBody; sep: boolean);
++var
++  dx, dy: double;
++begin
++  dx := p^.x - q^.x;
++  dy := p^.y - q^.y;
++  dx := dx * 0.5;
++  p^.vx := p^.vx + dx * 2.0;
++  p^.vy := p^.vy + dy * 2.0;
++end;
++
++procedure reuse_ref(p, q: PBody; sep: boolean);
++var
++  dx, dy: double;
++begin
++  dx := p^.x - q^.x;
++  barrier;
++  dy := p^.y - q^.y;
++  dx := dx * 0.5;
++  p^.vx := p^.vx + dx * 2.0;
++  barrier;
++  p^.vy := p^.vy + dy * 2.0;
++end;
++
++var
++  i: longint;
++begin
++  init(b); init(r);
++  for i := 1 to 20 do
++    begin
++      advance(b, 0.01, false);
++      advance_ref(r, 0.01, true);
++    end;
++  compare('advance');
++  init(b); init(r);
++  same(@b[2], false); same_ref(@r[2], true);
++  dep(@b[3], false); dep_ref(@r[3], true);
++  global(@b[4], false); global_ref(@r[4], true);
++  reuse(@b[5], @b[1], false); reuse_ref(@r[5], @r[1], true);
++  compare('small');
++  init(b); init(r);
++  { q^.mass is p^.vx }
++  overlap(@b[2], PBody(PByte(@b[2].vx) - PtrUInt(@PBody(nil)^.mass)), false);
++  overlap_ref(@r[2], PBody(PByte(@r[2].vx) - PtrUInt(@PBody(nil)^.mass)), true);
++  compare('overlap');
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

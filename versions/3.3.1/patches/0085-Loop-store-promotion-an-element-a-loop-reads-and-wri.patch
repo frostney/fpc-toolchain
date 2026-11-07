@@ -1,0 +1,639 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 01:17:09 +0000
+Subject: [PATCH 085/118] Loop store promotion: an element a loop reads and
+ writes stays in a register
+
+In "av[i] := av[i] + x" inner loops every iteration reloaded the element it
+had just stored, which puts a store-to-load forwarding latency on the
+loop-carried path. optloop.optimize_loop_stores (-O3, with node DFA) keeps
+such an element in a register temp: it is loaded once before the loop
+(guarded by the loop condition, and only if the first statement of the body
+that is not a local update stores to it), read from the temp, and every
+store still goes to memory as well, so other reads see it. Only when the
+loop has no calls, exceptions, labels or impure inline nodes, every store
+goes to the element itself, a temp or a local whose address is never taken,
+and the element's address does not change in the loop.
+tests/test/opt/tloopstore1.pp.
+---
+ compiler/optloop.pas          | 437 +++++++++++++++++++++++++++++++++-
+ compiler/psub.pas             |   3 +
+ tests/test/opt/tloopstore1.pp | 133 +++++++++++
+ 3 files changed, 572 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test/opt/tloopstore1.pp
+
+diff --git a/compiler/optloop.pas b/compiler/optloop.pas
+index 416e1c3d..3104e362 100644
+--- a/compiler/optloop.pas
++++ b/compiler/optloop.pas
+@@ -35,6 +35,10 @@ unit optloop;
+     function OptimizeInductionVariables(node : tnode) : boolean;
+     function optimize_record_writes(var n: tnode): boolean;
+     function OptimizeForLoop(var node : tnode) : boolean;
++    { keeps an array element or field that a loop reads and writes in a register
++      temp (stores still go to memory), see optimize_loop_stores in the
++      implementation }
++    function optimize_loop_stores(var n: tnode): boolean;
+ 
+   implementation
+ 
+@@ -52,7 +56,7 @@ unit optloop;
+       ncgmem,
+       pass_1,
+       optbase,optutils,
+-      procinfo;
++      procinfo,paramgr,defcmp,nmat;
+ 
+     function number_unrolls(node : tnode) : cardinal;
+       var
+@@ -1077,6 +1081,437 @@ unit optloop;
+       end;
+ 
+ 
++{****************************************************************************
++                    Loop store promotion (write-through)
++****************************************************************************}
++
++    {
++      while c do                          if c then t:=e;
++        begin                             while c do
++          e:=f(e,...);           ===>       begin
++          ...                                 t:=f(t,...); e:=t;
++        end;                                  ...
++                                            end;
++
++      e is a scalar element or field (a[i], p^.f, r.f[i]) whose address the
++      loop does not change. The loop keeps e in a register temp, so the
++      next iteration does not reload what it just stored (a store-to-load
++      forwarding latency on the loop-carried path, as in "sum[i] := sum[i] + x"
++      inner loops). Every store still goes to memory, so other reads in the
++      loop see it. Conditions, all checked on the loop (condition and body):
++      - no calls, no inline nodes outside a pure whitelist, no exceptions, no
++        labels or assembler;
++      - every store goes to e itself, to a temp, or to a local variable or
++        by-value parameter whose address is never taken (and that is not the
++        base of e): nothing else can alias e;
++      - e is the target of the first statement of the body, so the first
++        iteration accesses it anyway (the load is not speculative), and it is
++        also read in the loop.
++    }
++
++    type
++      tloopstoreinfo = record
++        abort : boolean;
++        targets : TFPList;     { store target nodes }
++        written : TFPList;     { syms of the local variables stored to }
++        cand : tnode;
++        candread : boolean;
++        temp : ttempcreatenode;
++      end;
++      ploopstoreinfo = ^tloopstoreinfo;
++
++
++    { the variable at the bottom of a store target, through fields and
++      elements of static arrays and records (no pointers) }
++    function local_store_base(n: tnode): tabstractvarsym;
++      begin
++        result:=nil;
++        while true do
++          case n.nodetype of
++            subscriptn:
++              begin
++                if tsubscriptnode(n).left.resultdef.typ<>recorddef then
++                  exit;
++                n:=tsubscriptnode(n).left;
++              end;
++            vecn:
++              begin
++                if (tvecnode(n).left.resultdef.typ<>arraydef) or
++                   is_dynamic_array(tvecnode(n).left.resultdef) or
++                   is_open_array(tvecnode(n).left.resultdef) or
++                   is_array_of_const(tvecnode(n).left.resultdef) then
++                  exit;
++                n:=tvecnode(n).left;
++              end;
++            typeconvn:
++              begin
++                if ttypeconvnode(n).convtype<>tc_equal then
++                  exit;
++                n:=ttypeconvnode(n).left;
++              end;
++            else
++              break;
++          end;
++        if (n.nodetype<>loadn) or
++           not(tloadnode(n).symtableentry.typ in [localvarsym,paravarsym]) then
++          exit;
++        result:=tabstractvarsym(tloadnode(n).symtableentry);
++        if ((result.owner<>current_procinfo.procdef.localst) and
++            (result.owner<>current_procinfo.procdef.parast)) or
++           ((result.varsymaccess*[vsa_addr_taken,vsa_different_scope])<>[]) or
++           (vo_volatile in result.varoptions) or
++           ((result.typ=paravarsym) and
++            (not(result.varspez in [vs_value,vs_const]) or
++             paramanager.push_addr_param(result.varspez,result.vardef,current_procinfo.procdef.proccalloption))) then
++          result:=nil;
++      end;
++
++
++    procedure loopstore_addtarget(info: ploopstoreinfo; n: tnode);
++      var
++        sym: tabstractvarsym;
++      begin
++        if n.nodetype=temprefn then
++          exit;
++        info^.targets.Add(n);
++        sym:=local_store_base(n);
++        if assigned(sym) then
++          info^.written.Add(sym);
++      end;
++
++
++    function loopstore_scan(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        info: ploopstoreinfo absolute arg;
++      begin
++        result:=fen_false;
++        case n.nodetype of
++          assignn:
++            loopstore_addtarget(info,tassignmentnode(n).left);
++          inlinen:
++            case tinlinenode(n).inlinenumber of
++              in_inc_x,in_dec_x,in_include_x_y,in_exclude_x_y:
++                if assigned(tinlinenode(n).left) and
++                   (tinlinenode(n).left.nodetype=callparan) then
++                  loopstore_addtarget(info,tcallparanode(tinlinenode(n).left).left)
++                else
++                  info^.abort:=true;
++              { pure }
++              in_lo_long,in_hi_long,in_lo_word,in_hi_word,in_lo_qword,in_hi_qword,
++              in_succ_x,in_pred_x,in_ord_x,in_assigned_x,in_unaligned_x,
++              in_abs_long,in_sar_x,in_sar_x_y,in_rol_x,in_ror_x,in_rol_x_y,in_ror_x_y,
++              in_bsf_x,in_bsr_x,in_popcnt_x,
++              in_trunc_real,in_round_real,in_frac_real,in_int_real,
++              in_abs_real,in_sqr_real,in_sqrt_real:
++                ;
++              else
++                info^.abort:=true;
++            end;
++          calln,asmn,tryexceptn,tryfinallyn,raisen,goton,labeln,onn:
++            info^.abort:=true;
++          loadn:
++            if (tloadnode(n).symtableentry.typ in [localvarsym,paravarsym,staticvarsym]) and
++               (vo_volatile in tabstractvarsym(tloadnode(n).symtableentry).varoptions) then
++              info^.abort:=true;
++          else
++            ;
++        end;
++        if info^.abort then
++          result:=fen_norecurse_true;
++      end;
++
++
++    { e: loads of variables the loop does not write, constants, element and
++      field selection, at most a dereference of such a variable }
++    function loopstore_invariant_addr(info: ploopstoreinfo; n: tnode; allowderef: boolean): boolean;
++      begin
++        result:=false;
++        case n.nodetype of
++          loadn:
++            result:=(tloadnode(n).symtableentry.typ in [localvarsym,paravarsym,staticvarsym]) and
++              (info^.written.IndexOf(tloadnode(n).symtableentry)<0) and
++              not assigned(tloadnode(n).left);
++          ordconstn:
++            result:=true;
++          typeconvn:
++            result:=loopstore_invariant_addr(info,ttypeconvnode(n).left,allowderef);
++          subscriptn:
++            result:=loopstore_invariant_addr(info,tsubscriptnode(n).left,allowderef);
++          vecn:
++            result:=loopstore_invariant_addr(info,tvecnode(n).left,allowderef) and
++              loopstore_invariant_addr(info,tvecnode(n).right,false);
++          derefn:
++            result:=allowderef and
++              (tderefnode(n).left.nodetype=loadn) and
++              loopstore_invariant_addr(info,tderefnode(n).left,false);
++          addn,subn,muln,shln,shrn,andn,orn,xorn:
++            result:=loopstore_invariant_addr(info,tbinarynode(n).left,false) and
++              loopstore_invariant_addr(info,tbinarynode(n).right,false);
++          else
++            ;
++        end;
++      end;
++
++
++    function loopstore_findread(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        info: ploopstoreinfo absolute arg;
++      begin
++        result:=fen_false;
++        if n.isequal(info^.cand) then
++          begin
++            info^.candread:=true;
++            result:=fen_norecurse_true;
++          end;
++      end;
++
++
++    function loopstore_replace(var n: tnode; arg: pointer): foreachnoderesult; forward;
++
++    function loopstore_replace_recursive(var n: tnode; arg: pointer): foreachnoderesult;
++      begin
++        result:=loopstore_replace(n,arg);
++      end;
++
++    function loopstore_replace(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        info: ploopstoreinfo absolute arg;
++        newblock: tblocknode;
++        newstat: tstatementnode;
++        hp: tnode;
++      begin
++        result:=fen_false;
++        if (n.nodetype=assignn) and
++           tassignmentnode(n).left.isequal(info^.cand) then
++          begin
++            { e := x  ==>  t := x'; e := t }
++            hp:=tassignmentnode(n).right;
++            foreachnodestatic(pm_postprocess,hp,@loopstore_replace_recursive,arg);
++            tassignmentnode(n).right:=nil;
++            newblock:=internalstatements(newstat);
++            addstatement(newstat,cassignmentnode.create_internal(ctemprefnode.create(info^.temp),hp));
++            addstatement(newstat,cassignmentnode.create_internal(tassignmentnode(n).left.getcopy,ctemprefnode.create(info^.temp)));
++            newblock.fileinfo:=n.fileinfo;
++            n.free;
++            n:=newblock;
++            typecheckpass(n);
++            result:=fen_norecurse_true;
++          end
++        else if n.isequal(info^.cand) then
++          begin
++            hp:=ctemprefnode.create(info^.temp);
++            hp.fileinfo:=n.fileinfo;
++            typecheckpass(hp);
++            n.free;
++            n:=hp;
++            result:=fen_norecurse_true;
++          end;
++      end;
++
++
++    { an expression that cannot fault and has no side effects }
++    function loopstore_simple_expr(n: tnode): boolean;
++      begin
++        case n.nodetype of
++          loadn:
++            result:=assigned(local_store_base(n)) or
++              (tloadnode(n).symtableentry.typ in [localvarsym,paravarsym]);
++          ordconstn,temprefn:
++            result:=true;
++          typeconvn:
++            result:=(ttypeconvnode(n).convtype in [tc_equal,tc_int_2_int]) and
++              loopstore_simple_expr(ttypeconvnode(n).left);
++          addn,subn,andn,orn,xorn:
++            result:=is_integer(n.resultdef) and
++              loopstore_simple_expr(tbinarynode(n).left) and
++              loopstore_simple_expr(tbinarynode(n).right);
++          else
++            result:=false;
++        end;
++      end;
++
++
++    { "inc(v)", "dec(v)", "v := v + 1" for a local variable that cannot alias
++      memory: the counter update of a converted for loop }
++    function loopstore_trivial_update(n: tnode): boolean;
++      begin
++        result:=false;
++        case n.nodetype of
++          inlinen:
++            if (tinlinenode(n).inlinenumber in [in_inc_x,in_dec_x]) and
++               assigned(tinlinenode(n).left) and
++               (tinlinenode(n).left.nodetype=callparan) then
++              begin
++                { inc(v) or inc(v, simple) }
++                result:=(tcallparanode(tinlinenode(n).left).left.nodetype=loadn) and
++                  assigned(local_store_base(tcallparanode(tinlinenode(n).left).left)) and
++                  (not assigned(tcallparanode(tinlinenode(n).left).right) or
++                   loopstore_simple_expr(tcallparanode(tcallparanode(tinlinenode(n).left).right).left));
++              end;
++          assignn:
++            result:=(tassignmentnode(n).left.nodetype=temprefn) or
++              ((tassignmentnode(n).left.nodetype=loadn) and
++               assigned(local_store_base(tassignmentnode(n).left)));
++          else
++            ;
++        end;
++        if result and ([cs_check_overflow,cs_check_range]*current_settings.localswitches<>[]) then
++          result:=false;
++      end;
++
++
++    { finds the first statement in n that is not a local update (see
++      loopstore_trivial_update) or a temp creation; returns false if the
++      search must stop without one (the statement list ended) }
++    function loopstore_findfirst(n: tnode; out first: tnode): boolean;
++      var
++        hp: tnode;
++      begin
++        first:=nil;
++        result:=false;
++        if not assigned(n) then
++          exit;
++        case n.nodetype of
++          blockn:
++            result:=loopstore_findfirst(tblocknode(n).left,first);
++          statementn:
++            begin
++              hp:=n;
++              while assigned(hp) and (hp.nodetype=statementn) do
++                begin
++                  if loopstore_findfirst(tstatementnode(hp).left,first) then
++                    exit(true);
++                  hp:=tstatementnode(hp).right;
++                end;
++            end;
++          tempcreaten:
++            ;
++          else
++            if not loopstore_trivial_update(n) then
++              begin
++                first:=n;
++                result:=true;
++              end;
++        end;
++      end;
++
++
++    function _optimize_loop_stores(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        info: tloopstoreinfo;
++        body, first, cond, hp: tnode;
++        i: longint;
++        ok: boolean;
++        newblock: tblocknode;
++        newstat: tstatementnode;
++        init: tnode;
++      begin
++        result:=fen_false;
++        if (n.nodetype<>whilerepeatn) or
++           (nf_internal in n.flags) then
++          exit;
++        body:=twhilerepeatnode(n).right;
++        cond:=twhilerepeatnode(n).left;
++        if not assigned(body) or not assigned(cond) then
++          exit;
++        { the first statement of the body that does more than update a
++          counter, a temp or another local variable }
++        first:=nil;
++        if not loopstore_findfirst(body,first) or not assigned(first) then
++          exit;
++        if not assigned(first) or (first.nodetype<>assignn) then
++          exit;
++        if not(tassignmentnode(first).left.nodetype in [vecn,subscriptn,derefn]) then
++          exit;
++        if not(tassignmentnode(first).left.resultdef.typ in [orddef,floatdef,pointerdef,enumdef]) or
++           (tassignmentnode(first).left.resultdef.size>sizeof(aint)) or
++           ((tassignmentnode(first).left.resultdef.typ=floatdef) and
++            not(tfloatdef(tassignmentnode(first).left.resultdef).floattype in [s32real,s64real])) then
++          exit;
++        { already a local variable that can be a register? }
++        if assigned(local_store_base(tassignmentnode(first).left)) then
++          exit;
++
++        info.abort:=false;
++        info.targets:=TFPList.Create;
++        info.written:=TFPList.Create;
++        info.cand:=tassignmentnode(first).left;
++        info.candread:=false;
++        info.temp:=nil;
++        try
++          foreachnodestatic(pm_postprocess,cond,@loopstore_scan,@info);
++          if not info.abort then
++            foreachnodestatic(pm_postprocess,body,@loopstore_scan,@info);
++          if info.abort then
++            exit;
++          { every store goes to e or to an unaliased local }
++          for i:=0 to info.targets.Count-1 do
++            if not tnode(info.targets[i]).isequal(info.cand) and
++               not assigned(local_store_base(tnode(info.targets[i]))) then
++              exit;
++          { e's address does not change }
++          if not loopstore_invariant_addr(@info,info.cand,true) then
++            exit;
++          { and e is read in the loop }
++          hp:=tassignmentnode(first).right;
++          foreachnodestatic(pm_postprocess,hp,@loopstore_findread,@info);
++          if not info.candread then
++            begin
++              hp:=body;
++              foreachnodestatic(pm_postprocess,hp,@loopstore_findread,@info);
++              foreachnodestatic(pm_postprocess,cond,@loopstore_findread,@info);
++            end;
++          if not info.candread then
++            exit;
++
++          { the replacement frees the first statement's target }
++          info.cand:=info.cand.getcopy;
++          info.temp:=ctempcreatenode.create(info.cand.resultdef,info.cand.resultdef.size,tt_persistent,true);
++          init:=cassignmentnode.create_internal(ctemprefnode.create(info.temp),info.cand.getcopy);
++          { the loop, with e replaced }
++          foreachnodestatic(pm_postprocess,twhilerepeatnode(n).left,@loopstore_replace,@info);
++          foreachnodestatic(pm_postprocess,twhilerepeatnode(n).right,@loopstore_replace,@info);
++          node_reset_flags(n,[],[tnf_pass1_done]);
++          include(n.flags,nf_internal);
++
++          newblock:=internalstatements(newstat);
++          addstatement(newstat,info.temp);
++          if lnf_testatbegin in twhilerepeatnode(n).loopflags then
++            begin
++              { the loop may run zero times: load e only if it runs at all }
++              hp:=twhilerepeatnode(n).left.getcopy;
++              node_reset_flags(hp,[],[tnf_pass1_done]);
++              if lnf_checknegate in twhilerepeatnode(n).loopflags then
++                hp:=cnotnode.create(hp);
++              addstatement(newstat,cifnode.create(hp,init,nil));
++            end
++          else
++            addstatement(newstat,init);
++          addstatement(newstat,n);
++          addstatement(newstat,ctempdeletenode.create(info.temp));
++          newblock.fileinfo:=n.fileinfo;
++          n:=newblock;
++          typecheckpass(n);
++          result:=fen_norecurse_true;
++        finally
++          if assigned(info.temp) then
++            info.cand.free;
++          info.targets.Free;
++          info.written.Free;
++        end;
++      end;
++
++
++    function optimize_loop_stores(var n: tnode): boolean;
++      begin
++        result:=false;
++        if (current_procinfo.flags*[pi_uses_exceptions,pi_has_label,pi_has_interproclabel,pi_has_assembler_block])<>[] then
++          exit;
++        { innermost loops first (pm_preprocess handles the children first) }
++        result:=foreachnodestatic(pm_preprocess,n,@_optimize_loop_stores,nil);
++      end;
++
++
+     type
+       toptimizeforloopcontext = object
+         changedforloop : boolean;
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index 65c8ff90..b35b51c7 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -1268,6 +1268,9 @@ implementation
+            if cs_opt_forloop in current_settings.optimizerswitches then
+              RedoDFA:=optimize_record_writes(code) or RedoDFA;
+ 
++           if cs_opt_loopstrength in current_settings.optimizerswitches then
++             RedoDFA:=optimize_loop_stores(code) or RedoDFA;
++
+            if RedoDFA then
+              dfabuilder.redodfainfo(code);
+ 
+diff --git a/tests/test/opt/tloopstore1.pp b/tests/test/opt/tloopstore1.pp
+new file mode 100644
+index 00000000..9f91c8fe
+--- /dev/null
++++ b/tests/test/opt/tloopstore1.pp
+@@ -0,0 +1,133 @@
++{ %OPT=-O3 }
++{ loop store promotion (optloop.optimize_loop_stores): an element the loop
++  reads and writes is kept in a register, stores still go to memory }
++program tloopstore1;
++
++{$mode objfpc}
++
++type
++  tdarr = array of double;
++  plong = ^longint;
++
++var
++  errors: longint = 0;
++
++procedure check(ok: boolean; const what: string);
++begin
++  if not ok then
++    begin
++      writeln('failed: ', what);
++      inc(errors);
++    end;
++end;
++
++{ the accumulation pattern }
++procedure mulav(const v: array of double; var av: array of double);
++var
++  i, j: longint;
++begin
++  for i := low(av) to high(av) do
++    begin
++      av[i] := 0.0;
++      for j := low(v) to high(v) do
++        av[i] := av[i] + (i + 1) * v[j];
++    end;
++end;
++
++{ the loop reads the promoted element through another index }
++procedure selfread(var a: array of longint; i: longint);
++var
++  j: longint;
++begin
++  for j := 0 to high(a) do
++    a[i] := a[i] + a[j];
++end;
++
++{ zero iterations with an invalid address: no speculative load }
++function zerotrip(p: plong; n: longint): longint;
++begin
++  while n > 0 do
++    begin
++      p^ := p^ + n;
++      dec(n);
++    end;
++  result := n;
++end;
++
++{ repeat..until }
++procedure rep(p: plong; n: longint);
++begin
++  repeat
++    p^ := p^ * 2 + 1;
++    dec(n);
++  until n <= 0;
++end;
++
++{ a store through another pointer that may alias: not promoted }
++procedure twoptr(p, q: plong; n: longint);
++var
++  i: longint;
++begin
++  for i := 1 to n do
++    begin
++      p^ := p^ + 1;
++      q^ := q^ + 10;
++    end;
++end;
++
++{ the address changes in the loop: not promoted }
++function walk(p: plong; n: longint): longint;
++var
++  i: longint;
++begin
++  result := 0;
++  for i := 1 to n do
++    begin
++      p^ := p^ + i;
++      result := result + p^;
++      inc(p);
++    end;
++end;
++
++var
++  v, av: tdarr;
++  a: array[0..3] of longint;
++  x, y: longint;
++  w: array[0..4] of longint;
++  i: longint;
++begin
++  setlength(v, 5);
++  setlength(av, 3);
++  for i := 0 to 4 do
++    v[i] := i;
++  mulav(v, av);
++  check((av[0] = 10) and (av[1] = 20) and (av[2] = 30), 'mulav');
++
++  a[0] := 1; a[1] := 2; a[2] := 3; a[3] := 4;
++  selfread(a, 1);
++  { a[1]: 2 -> 3 (+a0) -> 6 (+a1) -> 9 (+a2) -> 13 (+a3) }
++  check(a[1] = 13, 'selfread');
++
++  check(zerotrip(nil, 0) = 0, 'zerotrip');
++  x := 5;
++  check((zerotrip(@x, 3) = 0) and (x = 11), 'zerotrip 3');
++
++  x := 1;
++  rep(@x, 3);
++  check(x = 15, 'repeat');
++
++  x := 0;
++  twoptr(@x, @x, 3);
++  check(x = 33, 'twoptr alias');
++  x := 0; y := 0;
++  twoptr(@x, @y, 3);
++  check((x = 3) and (y = 30), 'twoptr');
++
++  for i := 0 to 4 do
++    w[i] := 100;
++  check(walk(@w[0], 5) = 515, 'walk');
++
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

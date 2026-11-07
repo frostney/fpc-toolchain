@@ -1,0 +1,235 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 10:41:59 +0000
+Subject: [PATCH 095/118] x86 peephole: a scalar SSE chain is computed in its
+ destination register
+
+"movapd %xmm2,%xmm7; mulsd %xmm7,%xmm7; movapd %xmm7,%xmm4" (ti := zi*zi)
+computed in a scratch register only to copy it. MovapXChainRename
+(-O3) renames the scratch register to the destination over a straight run of
+scalar SSE arithmetic, compares and reads of it that ends at a move of it
+after which it is dead, when the destination is not used before that last
+move; the last move goes, and the first as well when it moved the
+destination into the scratch register. MovapXOpMovapX2Op handled only a
+single operation from and back to the same register.
+tests/test/opt/tsserename1.pp.
+---
+ compiler/x86/aoptx86.pas      | 106 ++++++++++++++++++++++++++++++++++
+ tests/test/opt/tsserename1.pp |  77 ++++++++++++++++++++++++
+ 2 files changed, 183 insertions(+)
+ create mode 100644 tests/test/opt/tsserename1.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 7c9c2c56..b6df4550 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -192,6 +192,7 @@ unit aoptx86;
+         function OptPass1CMOVcc(var p: tai): Boolean;
+         function OptPass1_V_MOVAP(var p : tai) : boolean;
+         function OptPass1VOP(var p : tai) : boolean;
++        function TryMovapXChainRename(var p : tai) : boolean;
+         function OptPass1MOV(var p : tai) : boolean;
+         function OptPass1MOVD(var p : tai) : boolean;
+         function OptPass1Movx(var p : tai) : boolean;
+@@ -2541,6 +2542,105 @@ unit aoptx86;
+       end;
+ 
+ 
++
++    {
++      movapX   reg1,reg2           movapX  reg1,reg3
++      <op>s?   x,reg2              <op>s?  x,reg3
++      ...                   =>     ...
++      movapX   reg2,reg3
++      (reg2 not used afterwards, reg3 not used before the last move)
++
++      A straight run of scalar SSE arithmetic (and moves and compares reading
++      reg2) that computes a value in a scratch register only to copy it to
++      reg3 computes it in reg3 directly; with reg1 = reg3 the first move goes
++      as well. The run ends at the first move of reg2 after which reg2 is
++      dead, and must not touch reg3 in between.
++    }
++    function TX86AsmOptimizer.TryMovapXChainRename(var p : tai) : boolean;
++      const
++        MaxChain = 16;
++      var
++        chain: array[0..MaxChain] of tai;
++        count, i, j: longint;
++        hp: tai;
++        a, t, b: tregister;
++        found: boolean;
++      begin
++        result:=false;
++        if not(cs_opt_level3 in current_settings.optimizerswitches) or
++           not MatchInstruction(p,[A_MOVAPD,A_MOVAPS],[S_NO]) or
++           not MatchOpType(taicpu(p),top_reg,top_reg) then
++          exit;
++        a:=taicpu(p).oper[0]^.reg;
++        t:=taicpu(p).oper[1]^.reg;
++        if (getregtype(t)<>R_MMREGISTER) or (a=t) then
++          exit;
++        count:=0;
++        found:=false;
++        b:=NR_NO;
++        hp:=p;
++        while count<MaxChain do
++          begin
++            if not GetNextInstruction(hp,hp) or (hp.typ<>ait_instruction) then
++              exit;
++            { no control flow inside the run }
++            if is_calljmp(taicpu(hp).opcode) then
++              exit;
++            chain[count]:=hp;
++            inc(count);
++            case taicpu(hp).opcode of
++              A_MOVAPD,A_MOVAPS:
++                begin
++                  if not MatchOpType(taicpu(hp),top_reg,top_reg) then
++                    exit;
++                  if taicpu(hp).oper[1]^.reg=t then
++                    exit;
++                  if taicpu(hp).oper[0]^.reg=t then
++                    begin
++                      TransferUsedRegs(TmpUsedRegs);
++                      UpdateUsedRegsBetween(TmpUsedRegs,tai(p.next),hp);
++                      if not RegUsedAfterInstruction(t,hp,TmpUsedRegs) then
++                        begin
++                          b:=taicpu(hp).oper[1]^.reg;
++                          found:=true;
++                          break;
++                        end;
++                    end;
++                end;
++              A_ADDSD,A_SUBSD,A_MULSD,A_DIVSD,A_SQRTSD,A_MINSD,A_MAXSD,
++              A_ADDSS,A_SUBSS,A_MULSS,A_DIVSS,A_SQRTSS,A_MINSS,A_MAXSS,
++              A_COMISD,A_UCOMISD,A_COMISS,A_UCOMISS:
++                if (taicpu(hp).ops<>2) then
++                  exit;
++              else
++                { anything else must leave reg2 alone }
++                if RegInInstruction(t,hp) then
++                  exit;
++            end;
++          end;
++        if not found or (b=t) or (getregtype(b)<>R_MMREGISTER) then
++          exit;
++        { reg3 must not be used between the first and the last move }
++        for i:=0 to count-2 do
++          if RegInInstruction(b,chain[i]) then
++            exit;
++        { rename reg2 to reg3 from the first move up to the last one }
++        for i:=0 to taicpu(p).ops-1 do
++          if (taicpu(p).oper[i]^.typ=top_reg) and (taicpu(p).oper[i]^.reg=t) then
++            taicpu(p).loadreg(i,b);
++        for i:=0 to count-2 do
++          for j:=0 to taicpu(chain[i]).ops-1 do
++            if (taicpu(chain[i]).oper[j]^.typ=top_reg) and (taicpu(chain[i]).oper[j]^.reg=t) then
++              taicpu(chain[i]).loadreg(j,b);
++        AllocRegBetween(b,p,chain[count-1],UsedRegs);
++        DebugMsg(SPeepholeOptimization + 'MovapXChainRename done',p);
++        RemoveInstruction(chain[count-1]);
++        if a=b then
++          RemoveCurrentP(p);
++        result:=true;
++      end;
++
++
+     function TX86AsmOptimizer.OptPass1_V_MOVAP(var p : tai) : boolean;
+       var
+         hp1,hp2 : tai;
+@@ -2558,6 +2658,12 @@ unit aoptx86;
+                 exit;
+               end;
+ 
++            if TryMovapXChainRename(p) then
++              begin
++                result:=true;
++                exit;
++              end;
++
+             if GetNextInstructionUsingReg(p,hp1,taicpu(p).oper[1]^.reg) and
+               (hp1.typ = ait_instruction) and
+               (
+diff --git a/tests/test/opt/tsserename1.pp b/tests/test/opt/tsserename1.pp
+new file mode 100644
+index 00000000..87c19e07
+--- /dev/null
++++ b/tests/test/opt/tsserename1.pp
+@@ -0,0 +1,77 @@
++{ %OPT=-O3 }
++{ x86 peephole MovapXChainRename: a scratch xmm register chain computed into
++  its destination directly; dyadic values keep every result exact }
++program tsserename1;
++
++{$mode objfpc}
++
++var
++  errors: longint = 0;
++
++procedure check(got, expected: double; const what: string);
++begin
++  if got <> expected then
++    begin
++      writeln(what, ': got ', got, ', expected ', expected);
++      inc(errors);
++    end;
++end;
++
++{ the mandelbrot step: tr := zr*zr, ti := zi*zi from fresh values }
++procedure step(var zr, zi, tr, ti: double; cr, ci: double);
++begin
++  zi := 2.0 * zr * zi + ci;
++  zr := tr - ti + cr;
++  tr := zr * zr;
++  ti := zi * zi;
++end;
++
++{ the destination is read inside the chain: must keep the scratch register }
++function readsdest(a, b: double): double;
++var
++  x: double;
++begin
++  x := b;
++  x := a * a + x;
++  result := x * 2.0;
++end;
++
++{ the scratch stays live after the copy }
++function stayslive(a: double; out c: double): double;
++var
++  t: double;
++begin
++  t := a + 1.0;
++  c := t;
++  result := t * t;
++end;
++
++function singles(a, b: single): single;
++var
++  s: single;
++begin
++  s := a - b;
++  s := s * s;
++  result := s + a;
++end;
++
++var
++  zr, zi, tr, ti, c: double;
++  i: longint;
++begin
++  zr := 0; zi := 0; tr := 0; ti := 0;
++  for i := 1 to 3 do
++    step(zr, zi, tr, ti, 0.5, 0.25);
++  { (zr, zi) after three steps, all values dyadic }
++  check(zr, 0.72265625, 'zr');
++  check(zi, 0.9375, 'zi');
++  check(tr, 0.72265625 * 0.72265625, 'tr');
++  check(ti, 0.9375 * 0.9375, 'ti');
++  check(readsdest(1.5, 0.25), 5.0, 'readsdest');
++  check(stayslive(0.5, c), 2.25, 'stayslive');
++  check(c, 1.5, 'stayslive c');
++  check(singles(1.5, 0.5), 2.5, 'singles');
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

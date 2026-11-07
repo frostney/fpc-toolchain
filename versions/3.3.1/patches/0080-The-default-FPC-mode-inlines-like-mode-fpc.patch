@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 00:26:22 +0000
+Subject: [PATCH 080/118] The default (FPC) mode inlines like {$mode fpc}
+
+fpcmodeswitches include m_default_inline, and {$mode fpc} turns cs_do_inline
+on through HandleModeSwitch, but the default settings did not, so a program
+without a mode directive reported "Inlining disabled" for every inline
+routine.
+---
+ compiler/globals.pas | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/compiler/globals.pas b/compiler/globals.pas
+index 501a6a25..ada62d4f 100644
+--- a/compiler/globals.pas
++++ b/compiler/globals.pas
+@@ -529,7 +529,9 @@ Const
+         globalswitches : [cs_check_unit_name,cs_link_static];
+         targetswitches : [];
+         moduleswitches : [cs_extsyntax,cs_implicit_exceptions];
+-        localswitches : [cs_check_io,cs_typed_const_writable,cs_pointermath,cs_imported_data{$ifdef i8086},cs_force_far_calls{$endif}];
++        { cs_do_inline: the default mode is FPC mode, whose switches include
++          m_default_inline; the mode fpc directive turns inlining on, so does the default }
++        localswitches : [cs_check_io,cs_typed_const_writable,cs_pointermath,cs_imported_data,cs_do_inline{$ifdef i8086},cs_force_far_calls{$endif}];
+         modeswitches : fpcmodeswitches;
+         optimizerswitches : [];
+         genwpoptimizerswitches : [];

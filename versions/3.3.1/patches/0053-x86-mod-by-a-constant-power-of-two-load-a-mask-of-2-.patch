@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 16 Oct 2026 09:50:35 +0100
-Subject: [PATCH 53/79] x86 mod by a constant power of two: load a mask of 2^32
- or more through a register (inlined divisors)
+Subject: [PATCH 053/118] x86 mod by a constant power of two: load a mask of
+ 2^32 or more through a register (inlined divisors)
 
 ---
  compiler/x86/nx86mat.pas |  7 ++++++-

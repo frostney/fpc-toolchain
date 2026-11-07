@@ -1,0 +1,350 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 10:38:25 +0000
+Subject: [PATCH 094/118] Float invariants of a loop condition are computed
+ once, under the same guard
+
+"while (i < iter) and (tr + ti <= limit * limit)" multiplied limit by
+itself for every test. optimize_loop_invariants now also hoists float +, -,
+* and sqr of float constants and variables the loop does not write (unaliased
+locals and by-value parameters, or main-program globals whose address is
+never taken when every store in the loop goes directly to a variable) out of
+the condition of a loop that tests first. A float operation can raise, so
+only operands of short-circuit "and" are searched (never below "or" or
+"not"), and the copy before the loop is guarded by the "and" operands that
+precede it: it is evaluated exactly when the first test evaluates it.
+tests/test/opt/tloopinv2.pp.
+---
+ compiler/optloop.pas        | 155 +++++++++++++++++++++++++++++++++++-
+ tests/test/opt/tloopinv2.pp | 100 +++++++++++++++++++++++
+ 2 files changed, 254 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test/opt/tloopinv2.pp
+
+diff --git a/compiler/optloop.pas b/compiler/optloop.pas
+index 9ce16ded..8da1f8a4 100644
+--- a/compiler/optloop.pas
++++ b/compiler/optloop.pas
+@@ -62,7 +62,7 @@ unit optloop;
+       ncgmem,
+       pass_1,
+       optbase,optutils,
+-      procinfo,paramgr,defcmp,nmat;
++      procinfo,paramgr,defcmp,nmat,fmodule;
+ 
+     function number_unrolls(node : tnode) : cardinal;
+       var
+@@ -1540,6 +1540,9 @@ unit optloop;
+         found : TFPList;
+         temps : TFPList;
+         indexes : TFPList;  { index nodes of vecn in the loop }
++        guards : TFPList;   { per found node: nil or the condition guarding its evaluation }
++        direct : TFPList;   { syms stored to directly in the loop }
++        badstore : boolean; { a store through a pointer or reference }
+       end;
+       ploopinvinfo = ^tloopinvinfo;
+ 
+@@ -1573,6 +1576,121 @@ unit optloop;
+       end;
+ 
+ 
++
++    { a float expression of constants and float variables the loop does not
++      write: unaliased locals and by-value parameters, or globals of the main
++      program whose address is never taken when no store in the loop goes
++      through a pointer }
++    function loopinv_floatpure(info: ploopinvinfo; n: tnode): boolean;
++      var
++        sym: tabstractvarsym;
++      begin
++        result:=false;
++        case n.nodetype of
++          realconstn:
++            result:=true;
++          loadn:
++            begin
++              if not(tloadnode(n).symtableentry.typ in [localvarsym,paravarsym,staticvarsym]) or
++                 assigned(tloadnode(n).left) then
++                exit;
++              sym:=tabstractvarsym(tloadnode(n).symtableentry);
++              if (sym.vardef.typ<>floatdef) or
++                 not(tfloatdef(sym.vardef).floattype in [s32real,s64real]) or
++                 (info^.direct.IndexOf(sym)>=0) then
++                exit;
++              if sym.typ=staticvarsym then
++                result:=not info^.badstore and
++                  assigned(current_module) and
++                  (sym.owner=current_module.localsymtable) and
++                  (current_module.globalsymtable=nil) and
++                  not sym.addr_taken and
++                  not(vo_volatile in sym.varoptions)
++              else
++                result:=assigned(local_store_base(n));
++            end;
++          addn,subn,muln:
++            result:=(n.resultdef.typ=floatdef) and
++              loopinv_floatpure(info,tbinarynode(n).left) and
++              loopinv_floatpure(info,tbinarynode(n).right);
++          { x*x is turned into sqr(x) }
++          inlinen:
++            result:=(tinlinenode(n).inlinenumber=in_sqr_real) and
++              (n.resultdef.typ=floatdef) and
++              assigned(tinlinenode(n).left) and
++              loopinv_floatpure(info,tinlinenode(n).left);
++          else
++            ;
++        end;
++      end;
++
++
++    procedure loopinv_condscan(info: ploopinvinfo; m: tnode; prefix: TFPList);
++      var
++        j, k: longint;
++        hp: tnode;
++      begin
++        if not assigned(m) then
++          exit;
++        case m.nodetype of
++          addn,subn,muln,inlinen:
++            if (m.resultdef.typ=floatdef) and loopinv_floatpure(info,m) then
++              begin
++                for j:=0 to info^.found.Count-1 do
++                  if tnode(info^.found[j]).isequal(m) then
++                    exit;
++                info^.found.Add(m);
++                if prefix.Count=0 then
++                  info^.guards.Add(nil)
++                else
++                  begin
++                    hp:=tnode(prefix[0]).getcopy;
++                    for k:=1 to prefix.Count-1 do
++                      hp:=caddnode.create(andn,hp,tnode(prefix[k]).getcopy);
++                    info^.guards.Add(hp);
++                  end;
++                exit;
++              end;
++          orn,xorn,andn,notn,ifn,calln:
++            exit;
++          else
++            ;
++        end;
++        if m.nodetype=inlinen then
++          exit;
++        if m is tbinarynode then
++          begin
++            loopinv_condscan(info,tbinarynode(m).left,prefix);
++            loopinv_condscan(info,tbinarynode(m).right,prefix);
++          end
++        else if m is tunarynode then
++          loopinv_condscan(info,tunarynode(m).left,prefix);
++      end;
++
++
++    { searches the loop condition for float invariants: only through the
++      operands of short-circuit "and" (the guard is the conjunction of the
++      operands before), never below "or", "not" or anything conditional }
++    procedure loopinv_condfloat(info: ploopinvinfo; n: tnode; prefix: TFPList);
++      var
++        i: longint;
++        p2: TFPList;
++      begin
++        if (n.nodetype=andn) and is_boolean(n.resultdef) then
++          begin
++            loopinv_condfloat(info,taddnode(n).left,prefix);
++            p2:=TFPList.Create;
++            for i:=0 to prefix.Count-1 do
++              p2.Add(prefix[i]);
++            p2.Add(taddnode(n).left);
++            loopinv_condfloat(info,taddnode(n).right,p2);
++            p2.Free;
++          end
++        else
++          loopinv_condscan(info,n,prefix);
++      end;
++
++
+     function loopinv_find(var n: tnode; arg: pointer): foreachnoderesult;
+       var
+         info: ploopinvinfo absolute arg;
+@@ -1597,6 +1715,7 @@ unit optloop;
+                (info^.indexes.IndexOf(n)<0) then
+               exit(fen_norecurse_false);
+             info^.found.Add(n);
++            info^.guards.Add(nil);
+             result:=fen_norecurse_false;
+           end;
+       end;
+@@ -1640,6 +1759,7 @@ unit optloop;
+         i: longint;
+         temp: ttempcreatenode;
+         hp: tnode;
++        prefix: TFPList;
+       begin
+         result:=fen_false;
+         { also loops that optimize_loop_stores or record promotion rewrote
+@@ -1657,6 +1777,9 @@ unit optloop;
+         info.found:=TFPList.Create;
+         info.temps:=TFPList.Create;
+         info.indexes:=TFPList.Create;
++        info.guards:=TFPList.Create;
++        info.direct:=TFPList.Create;
++        info.badstore:=false;
+         try
+           foreachnodestatic(pm_postprocess,twhilerepeatnode(n).left,@loopstore_scan,@info.store);
+           if not info.store.abort then
+@@ -1667,6 +1790,26 @@ unit optloop;
+             bound, which the loop entry test evaluates before the loop anyway }
+           foreachnodestatic(pm_postprocess,twhilerepeatnode(n).right,@loopinv_indexes,@info);
+           foreachnodestatic(pm_postprocess,twhilerepeatnode(n).right,@loopinv_find,@info);
++          { float invariants of the condition of a loop that tests first: the
++            first test evaluates them anyway, and the copy before the loop is
++            guarded by the same "and" operands }
++          if lnf_testatbegin in twhilerepeatnode(n).loopflags then
++            begin
++              for i:=0 to info.store.targets.Count-1 do
++                begin
++                  hp:=tnode(info.store.targets[i]);
++                  if assigned(local_store_base(hp)) then
++                    info.direct.Add(local_store_base(hp))
++                  else if (hp.nodetype=loadn) and
++                     (tloadnode(hp).symtableentry.typ in [localvarsym,paravarsym,staticvarsym]) then
++                    info.direct.Add(tloadnode(hp).symtableentry)
++                  else if hp.nodetype<>temprefn then
++                    info.badstore:=true;
++                end;
++              prefix:=TFPList.Create;
++              loopinv_condfloat(@info,twhilerepeatnode(n).left,prefix);
++              prefix.Free;
++            end;
+           if info.found.Count=0 then
+             exit;
+           { the found nodes are part of the loop, which the replacement changes:
+@@ -1689,6 +1832,11 @@ unit optloop;
+               addstatement(newstat,temp);
+               hp:=cassignmentnode.create_internal(ctemprefnode.create(temp),tnode(info.found[i]));
+               info.found[i]:=nil;
++              if assigned(info.guards[i]) then
++                begin
++                  hp:=cifnode.create(tnode(info.guards[i]),hp,nil);
++                  info.guards[i]:=nil;
++                end;
+               addstatement(newstat,hp);
+             end;
+           addstatement(newstat,n);
+@@ -1707,6 +1855,11 @@ unit optloop;
+           info.found.Free;
+           info.temps.Free;
+           info.indexes.Free;
++          for i:=0 to info.guards.Count-1 do
++            if assigned(info.guards[i]) then
++              tnode(info.guards[i]).free;
++          info.guards.Free;
++          info.direct.Free;
+         end;
+       end;
+ 
+diff --git a/tests/test/opt/tloopinv2.pp b/tests/test/opt/tloopinv2.pp
+new file mode 100644
+index 00000000..0c27a541
+--- /dev/null
++++ b/tests/test/opt/tloopinv2.pp
+@@ -0,0 +1,100 @@
++{ %OPT=-O3 }
++{ float invariants of a loop condition (optloop.optimize_loop_invariants):
++  computed before the loop only where the first test evaluates them }
++program tloopinv2;
++
++{$mode objfpc}
++
++uses
++  sysutils, math;
++
++var
++  errors: longint = 0;
++  limit: double;
++  big: double;
++  g: double;
++
++procedure check(ok: boolean; const what: string);
++begin
++  if not ok then
++    begin
++      writeln('failed: ', what);
++      inc(errors);
++    end;
++end;
++
++{ the classic escape test }
++function iterations(cr: double): longint;
++var
++  zr, tr: double;
++  i: longint;
++begin
++  zr := 0; tr := 0; i := 0;
++  while (i < 50) and (tr <= limit * limit) do
++    begin
++      zr := tr + cr;
++      tr := zr * zr;
++      inc(i);
++    end;
++  result := i;
++end;
++
++{ n = 0: big * big would overflow, but the first operand is false so the
++  original never evaluates it }
++function guarded(n: longint): longint;
++var
++  i: longint;
++begin
++  i := 0;
++  while (i < n) and (i < big * big) do
++    inc(i);
++  result := i;
++end;
++
++{ below "or": not hoisted (would be evaluated speculatively) }
++function viaor(n: longint): longint;
++var
++  i: longint;
++begin
++  i := 0;
++  while (i < n) or (i < limit * limit) do
++    inc(i);
++  result := i;
++end;
++
++{ g is written in the loop: g * 2 is not invariant }
++function written(n: longint): longint;
++var
++  i: longint;
++begin
++  i := 0;
++  g := 1;
++  while (i < n) and (g * 2 < 1000) do
++    begin
++      g := g * 2;
++      inc(i);
++    end;
++  result := i;
++end;
++
++begin
++  SetExceptionMask([exDenormalized, exUnderflow, exPrecision]);
++  limit := 2.0;
++  big := 1e300;
++  check(iterations(0.25) = 50, 'iterations 0.25');
++  check(iterations(1.0) = 3, 'iterations 1.0');
++  try
++    check(guarded(0) = 0, 'guarded');
++  except
++    on e: exception do
++      begin
++        writeln('guarded raised ', e.classname);
++        inc(errors);
++      end;
++  end;
++  check(viaor(5) = 5, 'viaor');
++  check(written(100) = 9, 'written');
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

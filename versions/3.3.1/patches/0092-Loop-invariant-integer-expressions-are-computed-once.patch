@@ -1,0 +1,356 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 07:56:46 +0000
+Subject: [PATCH 092/118] Loop invariant integer expressions are computed once
+ before the loop
+
+optloop.optimize_loop_invariants (-O3, with the store promotion's loop
+conditions: no calls, exceptions, labels or impure inline nodes) hoists the
+largest expressions of the loop body built from constants and unaliased
+local variables or by-value parameters that the loop does not write, with
+integer +, -, *, and, or, xor, shl, shr and integer-to-integer or
+integer-to-float conversions. None of these can fault (no overflow or range
+checks), so they are evaluated into temps before the loop unconditionally.
+A bare extension of a variable is hoisted only where it is an array index,
+which then uses the register directly; as a two-operand instruction's operand
+it needs a copy anyway. This also covers loops that store promotion
+rewrote. spectralnorm: the outer index is no longer sign-extended twice per
+inner iteration. tests/test/opt/tloopinv1.pp.
+---
+ compiler/optloop.pas        | 206 ++++++++++++++++++++++++++++++++++++
+ compiler/psub.pas           |   5 +-
+ tests/test/opt/tloopinv1.pp |  85 +++++++++++++++
+ 3 files changed, 295 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test/opt/tloopinv1.pp
+
+diff --git a/compiler/optloop.pas b/compiler/optloop.pas
+index 3104e362..c599d900 100644
+--- a/compiler/optloop.pas
++++ b/compiler/optloop.pas
+@@ -39,6 +39,9 @@ unit optloop;
+       temp (stores still go to memory), see optimize_loop_stores in the
+       implementation }
+     function optimize_loop_stores(var n: tnode): boolean;
++    { moves pure integer expressions of variables a loop does not write out of
++      the loop, see optimize_loop_invariants in the implementation }
++    function optimize_loop_invariants(var n: tnode): boolean;
+ 
+   implementation
+ 
+@@ -1512,6 +1515,209 @@ unit optloop;
+       end;
+ 
+ 
++{****************************************************************************
++                    Loop invariant integer expressions
++****************************************************************************}
++
++    {
++      Hoists out of a loop the largest expressions built from constants and
++      local variables (or by-value parameters) whose address is never taken
++      and that the loop does not write, with integer +, -, *, and, or, xor,
++      shl, shr and integer-to-integer or integer-to-float conversions (the
++      sign extension of a 32 or 16 bit index, int64(i) + c). None of these can
++      fault or have side effects (no overflow or range checks), so the
++      expression is evaluated into a temp before the loop unconditionally.
++      Only loops without calls, exceptions, labels or impure inline nodes
++      (loopstore_scan), so the temps do not have to survive calls.
++    }
++
++    type
++      tloopinvinfo = record
++        store : tloopstoreinfo;
++        found : TFPList;
++        temps : TFPList;
++        indexes : TFPList;  { index nodes of vecn in the loop }
++      end;
++      ploopinvinfo = ^tloopinvinfo;
++
++
++    function loopinv_pure(info: ploopinvinfo; n: tnode): boolean;
++      var
++        sym: tabstractvarsym;
++      begin
++        result:=false;
++        case n.nodetype of
++          ordconstn:
++            result:=true;
++          loadn:
++            begin
++              sym:=local_store_base(n);
++              result:=assigned(sym) and
++                (sym.vardef.typ in [orddef,enumdef]) and
++                (info^.store.written.IndexOf(sym)<0);
++            end;
++          typeconvn:
++            result:=(ttypeconvnode(n).convtype in [tc_int_2_int,tc_int_2_real,tc_equal]) and
++              (ttypeconvnode(n).left.resultdef.typ in [orddef,enumdef]) and
++              loopinv_pure(info,ttypeconvnode(n).left);
++          addn,subn,muln,andn,orn,xorn,shln,shrn:
++            result:=is_integer(n.resultdef) and
++              loopinv_pure(info,tbinarynode(n).left) and
++              loopinv_pure(info,tbinarynode(n).right);
++          else
++            ;
++        end;
++      end;
++
++
++    function loopinv_find(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        info: ploopinvinfo absolute arg;
++        i: longint;
++      begin
++        result:=fen_false;
++        if (n.nodetype in [typeconvn,addn,subn,muln,andn,orn,xorn,shln,shrn]) and
++           assigned(n.resultdef) and
++           (n.resultdef.typ in [orddef,floatdef]) and
++           (n.resultdef.size<=sizeof(aint)) and
++           loopinv_pure(info,n) then
++          begin
++            for i:=0 to info^.found.Count-1 do
++              if tnode(info^.found[i]).isequal(n) then
++                exit(fen_norecurse_false);
++            { a bare sign or zero extension of a variable only saves an
++              instruction where it is an address index (the register is used
++              as it is); as an operand of a two-operand instruction it needs a
++              copy anyway, and hoisting it only costs a register }
++            if (n.nodetype=typeconvn) and
++               (ttypeconvnode(n).left.nodetype=loadn) and
++               (info^.indexes.IndexOf(n)<0) then
++              exit(fen_norecurse_false);
++            info^.found.Add(n);
++            result:=fen_norecurse_false;
++          end;
++      end;
++
++
++    function loopinv_indexes(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        info: ploopinvinfo absolute arg;
++      begin
++        result:=fen_false;
++        if n.nodetype=vecn then
++          info^.indexes.Add(tvecnode(n).right);
++      end;
++
++
++    function loopinv_replace(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        info: ploopinvinfo absolute arg;
++        i: longint;
++        hp: tnode;
++      begin
++        result:=fen_false;
++        for i:=0 to info^.found.Count-1 do
++          if n.isequal(tnode(info^.found[i])) then
++            begin
++              hp:=ctemprefnode.create(ttempcreatenode(info^.temps[i]));
++              hp.fileinfo:=n.fileinfo;
++              typecheckpass(hp);
++              n.free;
++              n:=hp;
++              exit(fen_norecurse_true);
++            end;
++      end;
++
++
++    function _optimize_loop_invariants(var n: tnode; arg: pointer): foreachnoderesult;
++      var
++        info: tloopinvinfo;
++        newblock: tblocknode;
++        newstat: tstatementnode;
++        i: longint;
++        temp: ttempcreatenode;
++        hp: tnode;
++      begin
++        result:=fen_false;
++        { also loops that optimize_loop_stores or record promotion rewrote
++          (marked nf_internal) }
++        if (n.nodetype<>whilerepeatn) or
++           not assigned(twhilerepeatnode(n).left) or
++           not assigned(twhilerepeatnode(n).right) or
++           ([cs_check_overflow,cs_check_range]*current_settings.localswitches<>[]) then
++          exit;
++        info.store.abort:=false;
++        info.store.targets:=TFPList.Create;
++        info.store.written:=TFPList.Create;
++        info.store.cand:=nil;
++        info.store.temp:=nil;
++        info.found:=TFPList.Create;
++        info.temps:=TFPList.Create;
++        info.indexes:=TFPList.Create;
++        try
++          foreachnodestatic(pm_postprocess,twhilerepeatnode(n).left,@loopstore_scan,@info.store);
++          if not info.store.abort then
++            foreachnodestatic(pm_postprocess,twhilerepeatnode(n).right,@loopstore_scan,@info.store);
++          if info.store.abort then
++            exit;
++          { only from the body: the condition of a converted for loop holds the
++            bound, which the loop entry test evaluates before the loop anyway }
++          foreachnodestatic(pm_postprocess,twhilerepeatnode(n).right,@loopinv_indexes,@info);
++          foreachnodestatic(pm_postprocess,twhilerepeatnode(n).right,@loopinv_find,@info);
++          if info.found.Count=0 then
++            exit;
++          { the found nodes are part of the loop, which the replacement changes:
++            work with copies }
++          for i:=0 to info.found.Count-1 do
++            begin
++              info.found[i]:=tnode(info.found[i]).getcopy;
++              info.temps.Add(ctempcreatenode.create(tnode(info.found[i]).resultdef,
++                tnode(info.found[i]).resultdef.size,tt_persistent,true));
++            end;
++          foreachnodestatic(pm_postprocess,twhilerepeatnode(n).left,@loopinv_replace,@info);
++          foreachnodestatic(pm_postprocess,twhilerepeatnode(n).right,@loopinv_replace,@info);
++          node_reset_flags(n,[],[tnf_pass1_done]);
++          include(n.flags,nf_internal);
++
++          newblock:=internalstatements(newstat);
++          for i:=0 to info.found.Count-1 do
++            begin
++              temp:=ttempcreatenode(info.temps[i]);
++              addstatement(newstat,temp);
++              hp:=cassignmentnode.create_internal(ctemprefnode.create(temp),tnode(info.found[i]));
++              info.found[i]:=nil;
++              addstatement(newstat,hp);
++            end;
++          addstatement(newstat,n);
++          for i:=0 to info.temps.Count-1 do
++            addstatement(newstat,ctempdeletenode.create(ttempcreatenode(info.temps[i])));
++          newblock.fileinfo:=n.fileinfo;
++          n:=newblock;
++          typecheckpass(n);
++          result:=fen_norecurse_true;
++        finally
++          for i:=0 to info.found.Count-1 do
++            if assigned(info.found[i]) and (info.temps.Count>i) then
++              tnode(info.found[i]).free;
++          info.store.targets.Free;
++          info.store.written.Free;
++          info.found.Free;
++          info.temps.Free;
++          info.indexes.Free;
++        end;
++      end;
++
++
++    function optimize_loop_invariants(var n: tnode): boolean;
++      begin
++        result:=false;
++        if (current_procinfo.flags*[pi_uses_exceptions,pi_has_label,pi_has_interproclabel,pi_has_assembler_block])<>[] then
++          exit;
++        { innermost loops first }
++        result:=foreachnodestatic(pm_preprocess,n,@_optimize_loop_invariants,nil);
++      end;
++
++
+     type
+       toptimizeforloopcontext = object
+         changedforloop : boolean;
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index d18c1428..706dced2 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -1269,7 +1269,10 @@ implementation
+              RedoDFA:=optimize_record_writes(code) or RedoDFA;
+ 
+            if cs_opt_loopstrength in current_settings.optimizerswitches then
+-             RedoDFA:=optimize_loop_stores(code) or RedoDFA;
++             begin
++               RedoDFA:=optimize_loop_stores(code) or RedoDFA;
++               RedoDFA:=optimize_loop_invariants(code) or RedoDFA;
++             end;
+ 
+            if RedoDFA then
+              dfabuilder.redodfainfo(code);
+diff --git a/tests/test/opt/tloopinv1.pp b/tests/test/opt/tloopinv1.pp
+new file mode 100644
+index 00000000..7653d5e3
+--- /dev/null
++++ b/tests/test/opt/tloopinv1.pp
+@@ -0,0 +1,85 @@
++{ %OPT=-O3 }
++{ loop invariant integer expressions (optloop.optimize_loop_invariants) }
++program tloopinv1;
++
++{$mode objfpc}
++
++var
++  errors: longint = 0;
++
++procedure check(ok: boolean; const what: string);
++begin
++  if not ok then
++    begin
++      writeln('failed: ', what);
++      inc(errors);
++    end;
++end;
++
++{ int64(i) as an index and in arithmetic, i a 16 bit counter }
++procedure accum(var a: array of int64; n: smallint);
++var
++  i, j: smallint;
++begin
++  for i := 0 to high(a) do
++    begin
++      a[i] := 0;
++      for j := 0 to n - 1 do
++        a[i] := a[i] + (i + j) * (i + 1);
++    end;
++end;
++
++{ k changes in the outer loop only; the inner loop may run zero times }
++function inner(n: longint): int64;
++var
++  k, i: longint;
++  b: array[0..15] of int64;
++begin
++  result := 0;
++  for i := 0 to 15 do
++    b[i] := i;
++  for k := 0 to n do
++    for i := 0 to k - 1 do
++      result := result + b[(k * 3 + 1) and 15] + i;
++end;
++
++{ x is written in the loop: (x + 1) must not be hoisted }
++function written(n: longint): int64;
++var
++  x, i: longint;
++begin
++  x := 1;
++  result := 0;
++  for i := 1 to n do
++    begin
++      result := result + (x + 1) * 2;
++      x := x * 2 mod 1000;
++    end;
++end;
++
++var
++  a: array[0..2] of int64;
++  r: int64;
++  i, k: longint;
++  x: longint;
++begin
++  accum(a, 4);
++  { a[i] = (i+1) * sum_j (i+j), j = 0..3 = (i+1) * (4*i + 6) }
++  check((a[0] = 6) and (a[1] = 20) and (a[2] = 42), 'accum');
++  r := 0;
++  for k := 0 to 5 do
++    for i := 0 to k - 1 do
++      r := r + ((k * 3 + 1) and 15) + i;
++  check(inner(5) = r, 'inner');
++  check(inner(-1) = 0, 'inner zero trip');
++  r := 0; x := 1;
++  for i := 1 to 10 do
++    begin
++      r := r + (x + 1) * 2;
++      x := x * 2 mod 1000;
++    end;
++  check(written(10) = r, 'written');
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

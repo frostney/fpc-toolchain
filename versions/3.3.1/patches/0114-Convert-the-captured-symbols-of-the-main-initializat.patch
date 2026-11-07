@@ -1,0 +1,191 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 17:43:50 +0000
+Subject: [PATCH 114/118] Convert the captured symbols of the main,
+ initialization and finalization blocks
+
+psub converts the loads of captured symbols (convert_captured_syms) of a
+routine and its nested routines before generating their code; pmodules
+generated the code of the main program block and of the initialization and
+finalization sections without it. An anonymous function written there is a
+nested routine of that block, so an anonymous function nested in it read
+the captured parameters and locals of the outer one from its own frame:
+garbage, often runtime error 216 (gitlab #40316, open since 2023; the same
+code inside a procedure works). tests/test/tanonfunc75.pp.
+---
+ compiler/pmodules.pas     |   9 ++++
+ compiler/psub.pas         |   5 +-
+ tests/test/tanonfunc75.pp | 100 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 113 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test/tanonfunc75.pp
+
+diff --git a/compiler/pmodules.pas b/compiler/pmodules.pas
+index d81dec6e..2593a229 100644
+--- a/compiler/pmodules.pas
++++ b/compiler/pmodules.pas
+@@ -1648,6 +1648,9 @@ type
+                 not(has_no_code(init_procinfo.code)) then
+                begin
+                  init_procinfo.code:=cnodeutils.wrap_proc_body(init_procinfo.procdef,init_procinfo.code);
++                 { the captured symbols of anonymous functions in the
++                   initialization, as psub does for a routine }
++                 init_procinfo.convert_captured_syms;
+                  init_procinfo.generate_code_tree;
+                  include(module.moduleflags,mf_init);
+                end
+@@ -1663,6 +1666,7 @@ type
+                 not(has_no_code(finalize_procinfo.code)) then
+                begin
+                  finalize_procinfo.code:=cnodeutils.wrap_proc_body(finalize_procinfo.procdef,finalize_procinfo.code);
++                 finalize_procinfo.convert_captured_syms;
+                  finalize_procinfo.generate_code_tree;
+                  include(module.moduleflags,mf_finalize);
+                end
+@@ -2789,6 +2793,10 @@ type
+           tstoredsymtable(curr.localsymtable).checklabels;
+ 
+         { See remark in unit init/final }
++        { the captured symbols of anonymous functions in the main block (their
++          parameters and locals captured by nested anonymous functions), as
++          psub does for a routine before its code generation }
++        main_procinfo.convert_captured_syms;
+         main_procinfo.generate_code_tree;
+         main_procinfo.resetprocdef;
+         release_main_proc(curr,main_procinfo);
+@@ -2808,6 +2816,7 @@ type
+                not(has_no_code(finalize_procinfo.code)) then
+               begin
+                 finalize_procinfo.code:=cnodeutils.wrap_proc_body(finalize_procinfo.procdef,finalize_procinfo.code);
++                finalize_procinfo.convert_captured_syms;
+                 finalize_procinfo.generate_code_tree;
+                 include(curr.moduleflags,mf_finalize);
+               end;
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index 56afb1bf..144e81bf 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -52,7 +52,6 @@ interface
+         procedure add_entry_exit_code;
+         procedure setup_tempgen;
+         procedure TransformNodeTree;
+-        procedure convert_captured_syms;
+       protected
+         procedure generate_code_exceptfilters;
+       public
+@@ -80,6 +79,10 @@ interface
+         procedure printproc(pass:string);
+         procedure generate_code;
+         procedure generate_code_tree;
++        { converts the loads of captured symbols in this routine and its nested
++          ones; also called by pmodules for the main, initialization and
++          finalization blocks }
++        procedure convert_captured_syms;
+         procedure generate_exceptfilter(nestedpi: tcgprocinfo);
+         procedure generate_exit_label(list: tasmlist); virtual;
+         procedure resetprocdef;
+diff --git a/tests/test/tanonfunc75.pp b/tests/test/tanonfunc75.pp
+new file mode 100644
+index 00000000..b7e3c253
+--- /dev/null
++++ b/tests/test/tanonfunc75.pp
+@@ -0,0 +1,100 @@
++{ anonymous functions nested in anonymous functions of the main block: the
++  parameters and locals of the outer one that the inner one captures
++  (gitlab #40316; the main block did not convert the captured symbols) }
++program tanonfunc75;
++
++{$mode objfpc}{$H+}
++{$modeswitch anonymousfunctions}
++{$modeswitch functionreferences}
++
++type
++  TIntFunc = reference to function(x: Integer): Integer;
++  TMaker = reference to function(n: Integer): TIntFunc;
++  TStrFunc = reference to function: string;
++  TStrMaker = reference to function(const s: string): TStrFunc;
++  TProc = reference to procedure;
++
++var
++  mk: TMaker;
++  f, g: TIntFunc;
++  smk: TStrMaker;
++  sf: TStrFunc;
++  p_inner: TProc;
++  base, x2: Integer;
++  errors: Integer = 0;
++
++procedure check(got, expected: Integer; const what: string);
++begin
++  if got <> expected then
++    begin
++      writeln(what, ': got ', got, ', expected ', expected);
++      inc(errors);
++    end;
++end;
++
++begin
++  base := 100;
++  { a parameter of the outer function }
++  mk := function(n: Integer): TIntFunc
++        begin
++          Result := function(x: Integer): Integer
++                    begin
++                      Result := x + n + base;
++                    end;
++        end;
++  f := mk(5);
++  g := mk(7);
++  check(f(1), 106, 'param 1');
++  check(f(2), 107, 'param 2');
++  check(g(1), 108, 'param 3');
++
++  { a local of the outer function, and a managed type }
++  smk := function(const s: string): TStrFunc
++         var
++           t: string;
++         begin
++           t := s + '!';
++           Result := function: string
++                     begin
++                       Result := t + s;
++                     end;
++         end;
++  sf := smk('ab');
++  if sf() <> 'ab!ab' then
++    begin
++      writeln('string: got ', sf());
++      inc(errors);
++    end;
++
++  { the example of #40316: called directly }
++  x2 := 0;
++  procedure(s: Integer)
++  begin
++    p_inner := procedure
++               begin
++                 x2 := s;
++               end;
++  end(1);
++  p_inner();
++  check(x2, 1, '#40316');
++
++  { three levels }
++  f := function(a: Integer): Integer
++       var
++         h: TMaker;
++       begin
++         h := function(b: Integer): TIntFunc
++              begin
++                Result := function(c: Integer): Integer
++                          begin
++                            Result := a * 100 + b * 10 + c;
++                          end;
++              end;
++         Result := h(2)(3);
++       end;
++  check(f(1), 123, 'three levels');
++
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

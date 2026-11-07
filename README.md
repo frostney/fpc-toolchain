@@ -4,7 +4,9 @@ Free Pascal 3.2.4 and 3.3.1 for Linux, macOS and Windows, with every cross compi
 
 - **3.2.4**: release candidate 2, with two fcl-process fixes.
 - **3.3.1**: trunk, with our compiler and wasm32 fixes. On Linux x86_64, i386 and arm, threadvars live in ELF TLS
-  sections instead of being looked up through `pthread_getspecific`.
+  sections instead of being looked up through `pthread_getspecific`. On x86_64, the optimiser has more loop
+  optimisations and an SLP vectoriser at `-O4`, and outside Windows register variables in procedures with exception
+  handling.
 
 ## GitHub Actions
 

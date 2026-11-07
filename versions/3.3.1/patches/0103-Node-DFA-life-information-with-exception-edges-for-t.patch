@@ -1,0 +1,851 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 14:43:19 +0000
+Subject: [PATCH 103/118] Node DFA life information with exception edges for
+ the register variables of procedures with try
+
+Procedures with exception handling (pi_uses_exceptions) got no node DFA, so
+their loops kept every register variable used in them live across the back
+edge (get_used_live_regvars needs life information) and the register variable
+rule of optexcregvar had to be conservative.
+
+SetNodeSucessors now handles try..except, on and try..finally nodes and
+records in optinfo^.excsucc where an exception raised in a protected block
+continues (the first on handler, the default handler, the finally block, or
+after the statement for an empty except block); the life computation adds
+the life of that node to every node of the block. For procedures with
+exception handling (no labels, no assembler), this life information is
+created after the node transformations, which stay off (excdfaavailable, not
+pi_dfaavailable). It is used by the loop register sync, and by
+optexcregvar: a by-value scalar or a single-field record written in a
+protected block is unsafe only when it is live where the exception continues;
+other variables, self and the result keep the old rule.
+vm2: Frame, self and Template in registers, the per-instruction scratch values
+no longer live across the loop (cycles -14%, instructions -4.3%);
+tests/test/texcregvar3.pp.
+---
+ compiler/ncgutil.pas      |   3 +-
+ compiler/optbase.pas      |   4 +
+ compiler/optdfa.pas       |  65 +++++++-
+ compiler/optexcregvar.pas | 125 ++++++++++++++-
+ compiler/optutils.pas     |  93 ++++++++++-
+ compiler/procinfo.pas     |   6 +
+ compiler/psub.pas         |  11 ++
+ tests/test/texcregvar3.pp | 321 ++++++++++++++++++++++++++++++++++++++
+ 8 files changed, 614 insertions(+), 14 deletions(-)
+ create mode 100644 tests/test/texcregvar3.pp
+
+diff --git a/compiler/ncgutil.pas b/compiler/ncgutil.pas
+index 8142f1d1..38f0139a 100644
+--- a/compiler/ncgutil.pas
++++ b/compiler/ncgutil.pas
+@@ -1221,7 +1221,8 @@ implementation
+       var
+         info: tusedliveregvarsinfo;
+       begin
+-        if (pi_dfaavailable in current_procinfo.flags) and
++        if ((pi_dfaavailable in current_procinfo.flags) or
++            current_procinfo.excdfaavailable) and
+            assigned(n.optinfo) and
+            assigned(n.optinfo^.life) then
+           begin
+diff --git a/compiler/optbase.pas b/compiler/optbase.pas
+index 9de63b98..65f50c07 100644
+--- a/compiler/optbase.pas
++++ b/compiler/optbase.pas
+@@ -48,6 +48,10 @@ unit optbase;
+         avail : tdfaset;
+         { estimation, how often the node is executed per subroutine call times 100, calculated by optutils.CalcExecutionWeight }
+         executionweight : longint;
++        { a tnode: where an exception raised while this node executes goes
++          (the handler or finally block of the innermost enclosing try
++          statement), nil outside a protected block; set by SetNodeSucessors }
++        excsucc : pointer;
+       end;
+ 
+       poptinfo = ^toptinfo;
+diff --git a/compiler/optdfa.pas b/compiler/optdfa.pas
+index f29af4a7..5e53f0f3 100644
+--- a/compiler/optdfa.pas
++++ b/compiler/optdfa.pas
+@@ -188,7 +188,23 @@ unit optdfa;
+           life info for the node
+         }
+         procedure updatelifeinfo(n : tnode;const l : TDFASet);
++          var
++            lexc : TDFASet;
+           begin
++            { an exception raised while n executes (before any of its
++              definitions took effect) continues in the handler of the
++              enclosing try statement: everything live there is live here }
++            if assigned(n.optinfo^.excsucc) and
++               assigned(tnode(n.optinfo^.excsucc).optinfo) then
++              begin
++                lexc:=copy(l);
++                DynSetIncludeSet(lexc,tnode(n.optinfo^.excsucc).optinfo^.life);
++                if not DynSetNotEqual(lexc,n.optinfo^.life) then
++                  exit;
++                changed:=true;
++                n.optinfo^.life:=lexc;
++                exit;
++              end;
+             if not DynSetNotEqual(l,n.optinfo^.life) then
+               exit;
+ {$ifdef DEBUG_DFA}
+@@ -244,6 +260,10 @@ unit optdfa;
+           if assigned(node.successor) then
+             CreateInfo(node.successor);
+ 
++          { the handler first, see updatelifeinfo }
++          if assigned(node.optinfo^.excsucc) then
++            CreateInfo(tnode(node.optinfo^.excsucc));
++
+ {$ifdef EXTDEBUG_DFA}
+           writeln('Handling: ',nodetype2str[node.nodetype],'(',node.fileinfo.line,',',node.fileinfo.column,')');
+ {$endif EXTDEBUG_DFA}
+@@ -414,7 +434,10 @@ unit optdfa;
+                 { nested statement }
+                 CreateInfo(tstatementnode(node).statement);
+                 { propagate info }
+-                node.optinfo^.life:=tstatementnode(node).successor.optinfo^.life;
++                if assigned(node.optinfo^.excsucc) then
++                  UpdateLifeInfo(node,tstatementnode(node).successor.optinfo^.life)
++                else
++                  node.optinfo^.life:=tstatementnode(node).successor.optinfo^.life;
+               end;
+ 
+             blockn:
+@@ -584,9 +607,49 @@ unit optdfa;
+               begin
+                 calclife(node);
+               end;
++
++            tryexceptn:
++              begin
++                { the protected block, then the handlers; see SetNodeSucessors }
++                CreateInfo(ttryexceptnode(node).left);
++                CreateInfo(ttryexceptnode(node).right);
++                CreateInfo(ttryexceptnode(node).t1);
++                l:=copy(node.optinfo^.life);
++                if assigned(ttryexceptnode(node).left) then
++                  DynSetIncludeSet(l,ttryexceptnode(node).left.optinfo^.life)
++                else if assigned(node.successor) then
++                  DynSetIncludeSet(l,node.successor.optinfo^.life);
++                UpdateLifeInfo(node,l);
++              end;
++
++            tryfinallyn:
++              begin
++                CreateInfo(ttryfinallynode(node).left);
++                CreateInfo(ttryfinallynode(node).right);
++                l:=copy(node.optinfo^.life);
++                if assigned(ttryfinallynode(node).left) then
++                  DynSetIncludeSet(l,ttryfinallynode(node).left.optinfo^.life)
++                else if assigned(ttryfinallynode(node).right) then
++                  DynSetIncludeSet(l,ttryfinallynode(node).right.optinfo^.life)
++                else if assigned(node.successor) then
++                  DynSetIncludeSet(l,node.successor.optinfo^.life);
++                UpdateLifeInfo(node,l);
++              end;
++
++            onn:
++              begin
++                { this handler's statement, or the next handler }
++                CreateInfo(tonnode(node).right);
++                l:=copy(node.optinfo^.life);
++                DynSetIncludeSet(l,tonnode(node).right.optinfo^.life);
++                if assigned(node.successor) then
++                  DynSetIncludeSet(l,node.successor.optinfo^.life);
++                UpdateLifeInfo(node,l);
++              end;
+             else
+               internalerror(2007050502);
+           end;
++
+         end;
+ 
+       var
+diff --git a/compiler/optexcregvar.pas b/compiler/optexcregvar.pas
+index bc4855fa..4e08638a 100644
+--- a/compiler/optexcregvar.pas
++++ b/compiler/optexcregvar.pas
+@@ -42,7 +42,15 @@ unit optexcregvar;
+   A variable that R does not write keeps its value in a callee-saved register
+   (setjmp/longjmp save and restore them) or in its spill slot. A variable
+   that only R references and that R writes before it reads is dead when R is
+-  left by an exception. Procedures with labels keep the old rule. }
++  left by an exception. Procedures with labels keep the old rule.
++
++  With node dfa life information with exception edges (excdfaavailable, see
++  SetNodeSucessors), the two conditions become one, exact one for a variable
++  whose register holds its whole value (a by-value scalar or a record with a
++  single scalar field): it is unsafe when R writes it and it is live where an
++  exception raised in R continues (the handler or finally block). A variable
++  that is read after the try statement only on the path that leaves R
++  normally (the handler exits) is then safe. }
+ 
+ {$i fpcdefs.inc}
+ 
+@@ -56,10 +64,10 @@ procedure mark_exceptsafe_regvars(code: tnode; pd: tprocdef);
+ implementation
+ 
+ uses
+-  cclasses,cutils,
++  cclasses,cutils,cdynset,
+   globtype,globals,
+   symconst,symbase,symtype,symsym,symtable,
+-  procinfo,
++  defutil,paramgr,procinfo,optbase,
+   nutils,nbas,nld,nflw,ncal;
+ 
+ type
+@@ -77,6 +85,8 @@ type
+     { exposure walk }
+     assigned_: tboolarray;
+     exposed: tboolarray;
++    { dfa index of each candidate, -1: unknown or not usable }
++    dfaindex: tlongintarray;
+   end;
+ 
+ 
+@@ -255,8 +265,89 @@ procedure walk(info: pexcregvarinfo; n: tnode);
+   end;
+ 
+ 
++{ the dfa tracks the value of the variable as a whole: a write is a
++  definition of all of it }
++function dfa_tracks_whole_value(vs: tabstractnormalvarsym): boolean;
++  var
++    i,fields: longint;
++    sym: tsym;
++    fielddef: tdef;
++  begin
++    result:=false;
++    if (vs.varoptions*[vo_is_funcret,vo_is_result,vo_is_self,vo_is_high_para,vo_is_parentfp])<>[] then
++      exit;
++    if (vs.typ=paravarsym) and
++       paramanager.push_addr_param(vs.varspez,vs.vardef,current_procinfo.procdef.proccalloption) then
++      exit;
++    if (vs.vardef.typ in [orddef,floatdef,pointerdef,enumdef,classrefdef]) or
++       is_implicit_pointer_object_type(vs.vardef) then
++      exit(true);
++    { a record with a single field of a scalar type that fills it: a write
++      of the field writes the whole record }
++    if (vs.vardef.typ=recorddef) and
++       not trecorddef(vs.vardef).isunion then
++      begin
++        fields:=0;
++        fielddef:=nil;
++        for i:=0 to trecorddef(vs.vardef).symtable.SymList.Count-1 do
++          begin
++            sym:=tsym(trecorddef(vs.vardef).symtable.SymList[i]);
++            if (sym.typ=fieldvarsym) and
++               not(sp_static in sym.symoptions) then
++              begin
++                inc(fields);
++                fielddef:=tfieldvarsym(sym).vardef;
++              end;
++          end;
++        result:=(fields=1) and
++          (fielddef.typ in [orddef,floatdef,pointerdef,enumdef]) and
++          (fielddef.size=vs.vardef.size);
++      end;
++  end;
++
++
++function find_dfaindex(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    info: pexcregvarinfo absolute arg;
++    i: longint;
++  begin
++    result:=fen_false;
++    if (n.nodetype=loadn) and
++       assigned(n.optinfo) and
++       (tloadnode(n).symtableentry.typ in [localvarsym,paravarsym]) then
++      begin
++        i:=info^.cands.IndexOf(tloadnode(n).symtableentry);
++        if (i>=0) and (info^.dfaindex[i]=-2) then
++          info^.dfaindex[i]:=n.optinfo^.index;
++      end;
++  end;
++
++
++{ the life information where an exception raised in the protected block of
++  the try node t continues, nil if there is none }
++function handler_life(t: tnode; out life: tdfaset): boolean;
++  var
++    r: tnode;
++  begin
++    result:=false;
++    life:=nil;
++    if not current_procinfo.excdfaavailable then
++      exit;
++    r:=tbinarynode(t).left;
++    if not assigned(r) or
++       not assigned(r.optinfo) or
++       not assigned(r.optinfo^.excsucc) or
++       not assigned(tnode(r.optinfo^.excsucc).optinfo) then
++      exit;
++    life:=tnode(r.optinfo^.excsucc).optinfo^.life;
++    result:=true;
++  end;
++
++
+ procedure mark_exceptsafe_regvars(code: tnode; pd: tprocdef);
+   var
++    hlife: tdfaset;
++    usedfa: boolean;
+     info: texcregvarinfo;
+     unsafe: tboolarray;
+     total: tlongintarray;
+@@ -301,6 +392,18 @@ procedure mark_exceptsafe_regvars(code: tnode; pd: tprocdef);
+       setlength(info.written,info.cands.Count);
+       setlength(info.assigned_,info.cands.Count);
+       setlength(info.exposed,info.cands.Count);
++      setlength(info.dfaindex,info.cands.Count);
++      for i:=0 to info.cands.Count-1 do
++        if current_procinfo.excdfaavailable and
++           dfa_tracks_whole_value(tabstractnormalvarsym(info.cands[i])) then
++          info.dfaindex[i]:=-2
++        else
++          info.dfaindex[i]:=-1;
++      if current_procinfo.excdfaavailable then
++        foreachnodestatic(code,@find_dfaindex,@info);
++      for i:=0 to info.cands.Count-1 do
++        if info.dfaindex[i]=-2 then
++          info.dfaindex[i]:=-1;
+ 
+       { the function result and self are also read at the end of the procedure }
+       for i:=0 to info.cands.Count-1 do
+@@ -339,11 +442,19 @@ procedure mark_exceptsafe_regvars(code: tnode; pd: tprocdef);
+                 end;
+               walk(@info,tbinarynode(t).left);
+             end;
++          usedfa:=handler_life(t,hlife);
+           for i:=0 to info.cands.Count-1 do
+-            if info.written[i] and
+-               ((total[i]>info.counts[i]) or
+-                (inloop and info.exposed[i])) then
+-              unsafe[i]:=true;
++            if info.written[i] then
++              begin
++                if usedfa and (info.dfaindex[i]>=0) then
++                  begin
++                    if DynSetIn(hlife,info.dfaindex[i]) then
++                      unsafe[i]:=true;
++                  end
++                else if (total[i]>info.counts[i]) or
++                   (inloop and info.exposed[i]) then
++                  unsafe[i]:=true;
++              end;
+         end;
+ 
+       for i:=0 to info.cands.Count-1 do
+diff --git a/compiler/optutils.pas b/compiler/optutils.pas
+index e50e1bd6..18e3bcbb 100644
+--- a/compiler/optutils.pas
++++ b/compiler/optutils.pas
+@@ -67,7 +67,8 @@ unit optutils;
+       cutils,cdynset,
+       verbose,
+       optbase,
+-      ncal,nbas,nflw,nutils,nset,ncon;
++      ncal,nbas,nflw,nutils,nset,ncon,
++      pass_1;
+ 
+     function TIndexedNodeSet.Add(node : tnode) : boolean;
+       var
+@@ -222,16 +223,25 @@ unit optutils;
+       var
+         BreakContinueStack : TBreakContinueStack;
+         Exitsuccessor: TNode;
++        { the handler or finally block that an exception raised in the
++          current protected block goes to }
++        ExcSuccessor: TNode;
++        { the default handler of the try..except statement whose on handlers
++          are being processed (nil: an exception no on handler matches is
++          raised again) }
++        CurrentTryDefault: TNode;
+       { sets the successor nodes of a node tree block
+         returns the first node of the tree if it's a control flow node }
+       function DoSet(p : tnode;succ : tnode) : tnode;
+         var
+-          hp1,hp2, oldexitsuccessor: tnode;
++          hp1,hp2, oldexitsuccessor, oldexcsuccessor, oldtrydefault: tnode;
+           i : longint;
+         begin
+           result:=nil;
+           if p=nil then
+             exit;
++          p.allocoptinfo;
++          p.optinfo^.excsucc:=ExcSuccessor;
+           case p.nodetype of
+             statementn:
+               begin
+@@ -239,6 +249,8 @@ unit optutils;
+                 result:=p;
+                 while assigned(hp1) do
+                   begin
++                    hp1.allocoptinfo;
++                    hp1.optinfo^.excsucc:=ExcSuccessor;
+                     { does another statement follow? }
+                     if assigned(tstatementnode(hp1).next) then
+                       begin
+@@ -380,10 +392,79 @@ unit optutils;
+                 { raise never returns }
+                 p.successor:=nil;
+               end;
+-            tryexceptn,
+-            tryfinallyn,
++            tryexceptn:
++              begin
++                {
++                  left: the protected block
++                  right: the chain of on handlers (tonnode, the next one in left)
++                  t1: the default handler (except without on, or the else part)
++                  An exception in the protected block goes to the first on
++                  handler, else to the default handler; an empty except block
++                  continues after the statement.
++                }
++                result:=p;
++                oldexcsuccessor:=ExcSuccessor;
++                if assigned(ttryexceptnode(p).right) then
++                  ExcSuccessor:=ttryexceptnode(p).right
++                else if assigned(ttryexceptnode(p).t1) then
++                  ExcSuccessor:=ttryexceptnode(p).t1
++                else
++                  ExcSuccessor:=succ;
++                DoSet(ttryexceptnode(p).left,succ);
++                { an exception in a handler goes to the enclosing handler }
++                ExcSuccessor:=oldexcsuccessor;
++                oldtrydefault:=CurrentTryDefault;
++                CurrentTryDefault:=ttryexceptnode(p).t1;
++                DoSet(ttryexceptnode(p).right,succ);
++                CurrentTryDefault:=oldtrydefault;
++                DoSet(ttryexceptnode(p).t1,succ);
++                p.successor:=succ;
++              end;
+             onn:
+-              internalerror(2007050501);
++              begin
++                {
++                  left: the next on handler
++                  right: the statement
++                  The handler chain is tried in order; the successor of an on
++                  node is the next one or the default handler. When no handler
++                  matches, the exception is raised again (excsucc).
++                }
++                result:=p;
++                { the statement continues after the try statement }
++                if not assigned(tonnode(p).right) then
++                  begin
++                    tonnode(p).right:=cnothingnode.create;
++                    tonnode(p).right.fileinfo:=p.fileinfo;
++                    typecheckpass(tonnode(p).right);
++                    firstpass(tonnode(p).right);
++                  end;
++                DoSet(tonnode(p).right,succ);
++                DoSet(tonnode(p).left,succ);
++                if assigned(tonnode(p).left) then
++                  p.successor:=tonnode(p).left
++                else
++                  p.successor:=CurrentTryDefault;
++              end;
++            tryfinallyn:
++              begin
++                {
++                  left: the protected block
++                  right: the finally block, run after the protected block and
++                    when it is left by an exception (then raising it again)
++                }
++                result:=p;
++                oldexcsuccessor:=ExcSuccessor;
++                if assigned(ttryfinallynode(p).right) then
++                  begin
++                    ExcSuccessor:=ttryfinallynode(p).right;
++                    DoSet(ttryfinallynode(p).left,ttryfinallynode(p).right);
++                  end
++                else
++                  DoSet(ttryfinallynode(p).left,succ);
++                ExcSuccessor:=oldexcsuccessor;
++                DoSet(ttryfinallynode(p).right,succ);
++                p.successor:=succ;
++              end;
+             else
+               ;
+           end;
+@@ -392,6 +473,8 @@ unit optutils;
+       begin
+         BreakContinueStack.Init;
+         Exitsuccessor:=nil;
++        ExcSuccessor:=nil;
++        CurrentTryDefault:=nil;
+         DoSet(p,last);
+         BreakContinueStack.Done;
+       end;
+diff --git a/compiler/procinfo.pas b/compiler/procinfo.pas
+index c1323094..462bf70a 100644
+--- a/compiler/procinfo.pas
++++ b/compiler/procinfo.pas
+@@ -84,6 +84,12 @@ unit procinfo;
+             see pi_xxxx constants above
+           }
+           flags : tprocinfoflags;
++          { node dfa life information with exception edges was created for a
++            procedure with exception handling (pi_uses_exceptions), for the
++            register variable decisions only (optexcregvar,
++            get_used_live_regvars); the dfa based node transformations
++            (pi_dfaavailable) stay off there }
++          excdfaavailable : boolean;
+ 
+           { register used as frame pointer }
+           framepointer : tregister;
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index 341a9d67..d34da136 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -1322,6 +1322,17 @@ implementation
+            ConvertForLoops(code);
+            if cs_opt_forloop in current_settings.optimizerswitches then
+              optimize_record_writes(code);
++           { life information with exception edges for the register
++             variables of procedures with exception handling }
++           if (cs_opt_nodedfa in current_settings.optimizerswitches) and
++             (cs_opt_regvar in current_settings.optimizerswitches) and
++             (pi_uses_exceptions in flags) and
++             ((flags*[pi_has_assembler_block,pi_is_assembler,pi_has_label,pi_has_interproclabel])=[]) then
++             begin
++               dfabuilder:=TDFABuilder.Create;
++               dfabuilder.createdfainfo(code);
++               excdfaavailable:=true;
++             end;
+          end;
+ 
+        if (cs_opt_remove_empty_proc in current_settings.optimizerswitches) and
+diff --git a/tests/test/texcregvar3.pp b/tests/test/texcregvar3.pp
+new file mode 100644
+index 00000000..115435c4
+--- /dev/null
++++ b/tests/test/texcregvar3.pp
+@@ -0,0 +1,321 @@
++{ %OPT=-O3 }
++{ register variables in procedures with try..except/finally, decided with
++  node dfa life information with exception edges: a variable written in the
++  protected block is in a register only when it is dead where an exception
++  raised in the block continues. Every function returns what the program
++  computes without any register variables. }
++program texcregvar3;
++
++{$mode objfpc}
++
++uses
++  sysutils;
++
++type
++  TOne = record
++    v: longint;
++  end;
++  EOther = class(Exception);
++
++var
++  errors: longint = 0;
++  zero: longint = 0;
++
++procedure check(got, expected: int64; const what: string);
++begin
++  if got <> expected then
++    begin
++      writeln(what, ': got ', got, ', expected ', expected);
++      inc(errors);
++    end;
++end;
++
++procedure boom(i: longint);
++begin
++  if i >= 0 then
++    raise Exception.Create('boom');
++end;
++
++procedure boomother(i: longint);
++begin
++  if i >= 0 then
++    raise EOther.Create('other');
++end;
++
++{ the handler exits: the value read after the try statement comes from the
++  normal path only }
++function handlerexits(n: longint): int64;
++var
++  x: int64;
++  i: longint;
++begin
++  x := 0;
++  i := 0;
++  while i < n do
++    try
++      x := x + i;
++      inc(i);
++      if i = n + zero + 100 then
++        boom(0);
++    except
++      result := -1;
++      exit;
++    end;
++  result := x * 10 + i;
++end;
++
++{ the same, the exception is raised: the handler's value }
++function handlerexits2(n: longint): int64;
++var
++  x: int64;
++  i: longint;
++begin
++  x := 0;
++  i := 0;
++  while i < n do
++    try
++      x := x + i;
++      inc(i);
++      if i = 3 then
++        boom(0);
++    except
++      result := -1000 - i;
++      exit;
++    end;
++  result := x;
++end;
++
++{ the handler falls through to code that reads the value }
++function fallthrough(n: longint): int64;
++var
++  x: int64;
++  i: longint;
++begin
++  x := 0;
++  try
++    for i := 1 to n do
++      begin
++        x := x + i;
++        if i = 4 then
++          boom(0);
++      end;
++  except
++    inc(zero, 0);
++  end;
++  result := x;
++end;
++
++{ loop re-entered after a swallowed exception: the protected block reads
++  the value written before the exception }
++function reentry(n: longint): int64;
++var
++  acc, k: int64;
++  i: longint;
++begin
++  acc := 0;
++  k := 1;
++  for i := 1 to n do
++    try
++      acc := acc + k;
++      k := k + 1;
++      if i mod 2 = 0 then
++        boom(i);
++      k := k * 2;
++    except
++    end;
++  result := acc * 1000 + k;
++end;
++
++{ the handler writes the variable before it reads it: dead at the handler }
++function handlerwrites(n: longint): int64;
++var
++  x: int64;
++  i: longint;
++begin
++  x := 5;
++  try
++    for i := 1 to n do
++      x := x * 2;
++    boom(0);
++  except
++    x := 7;
++    x := x + 1;
++  end;
++  result := x;
++end;
++
++{ only one of the on handlers reads it; another exception class is raised }
++function onchain(n: longint): int64;
++var
++  x: int64;
++  i: longint;
++begin
++  x := 0;
++  result := 0;
++  try
++    for i := 1 to n do
++      x := x + i * i;
++    boomother(0);
++  except
++    on E: EOther do
++      result := x;
++    on E: Exception do
++      result := -1;
++  end;
++end;
++
++{ no handler matches in the inner statement; the outer one reads it }
++function reraised(n: longint): int64;
++var
++  x: int64;
++  i: longint;
++begin
++  x := 0;
++  result := 0;
++  try
++    try
++      for i := 1 to n do
++        x := x + 3;
++      boom(0);
++    except
++      on E: EOther do
++        result := -1;
++    end;
++  except
++    result := x;
++  end;
++end;
++
++{ the finally block reads it }
++function infinally(n: longint): int64;
++var
++  x: int64;
++  i: longint;
++begin
++  x := 0;
++  result := 0;
++  try
++    try
++      for i := 1 to n do
++        x := x + i;
++      boom(0);
++    finally
++      result := x;
++    end;
++  except
++    result := result * 2;
++  end;
++end;
++
++{ exit and break through a finally block that reads it }
++function exitfinally(n: longint): int64;
++var
++  x: int64;
++  i: longint;
++begin
++  x := 0;
++  result := 0;
++  try
++    for i := 1 to n do
++      begin
++        x := x + i;
++        if i = 5 then
++          exit;
++      end;
++  finally
++    result := x;
++  end;
++  result := -1;
++end;
++
++function breakfinally(n: longint): int64;
++var
++  x, y: int64;
++  i: longint;
++begin
++  x := 0;
++  y := 0;
++  for i := 1 to n do
++    try
++      x := x + i;
++      if i = 6 then
++        break;
++    finally
++      y := y + x;
++    end;
++  result := y * 100 + x;
++end;
++
++{ a record with one field, read in the handler and after the try }
++function onefield(n: longint): int64;
++var
++  r: TOne;
++  i: longint;
++begin
++  r.v := 0;
++  try
++    for i := 1 to n do
++      begin
++        r.v := r.v + i;
++        if i = 5 then
++          boom(0);
++      end;
++  except
++    r.v := r.v * 10;
++  end;
++  result := r.v;
++end;
++
++{ ... and with a handler that exits }
++function onefieldexit(n: longint): int64;
++var
++  r: TOne;
++begin
++  r.v := 0;
++  while r.v < n do
++    try
++      r.v := r.v + 1;
++      if r.v = n + 50 + zero then
++        boom(0);
++    except
++      exit(-1);
++    end;
++  result := r.v;
++end;
++
++{ a hardware exception (integer division by zero) after the write }
++function divzero(n: longint): int64;
++var
++  x: int64;
++  i: longint;
++begin
++  x := 0;
++  try
++    for i := 1 to n do
++      x := x + i;
++    x := x + (n div zero);
++  except
++    on E: EDivByZero do
++      x := x + 1000;
++  end;
++  result := x;
++end;
++
++begin
++  check(handlerexits(10), 450 + 10, 'handlerexits');
++  check(handlerexits2(10), -1003, 'handlerexits2');
++  check(fallthrough(10), 10, 'fallthrough');
++  check(reentry(6), 63 * 1000 + 29, 'reentry');
++  check(handlerwrites(4), 8, 'handlerwrites');
++  check(onchain(4), 30, 'onchain');
++  check(reraised(4), 12, 'reraised');
++  check(infinally(4), 20, 'infinally');
++  check(exitfinally(10), 15, 'exitfinally');
++  check(breakfinally(10), 56 * 100 + 21, 'breakfinally');
++  check(onefield(10), 150, 'onefield');
++  check(onefieldexit(20), 20, 'onefieldexit');
++  check(divzero(10), 1055, 'divzero');
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

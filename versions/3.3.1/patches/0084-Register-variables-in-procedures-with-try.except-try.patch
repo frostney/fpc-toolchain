@@ -1,0 +1,670 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 00:53:46 +0000
+Subject: [PATCH 084/118] Register variables in procedures with
+ try..except/try..finally where it is safe
+
+A procedure with an explicit exception frame got no register variables at
+all. optexcregvar.mark_exceptsafe_regvars, run before the locals and
+parameters get their locations, marks the ones that may stay register
+variables: those that no protected block writes and then needs afterwards
+(in a handler, a finally block, outside the try statement, or implicitly as
+the result or self), and, for a try statement inside a loop, that the block
+writes before it reads. setjmp/longjmp restore the callee-saved registers, so
+a value no protected block changed is intact in the handler; a value only
+used inside the block is dead when the block is left by an exception.
+tests/test/texcregvar1.pp covers the cases that must stay in memory.
+---
+ compiler/optexcregvar.pas | 347 ++++++++++++++++++++++++++++++++++++++
+ compiler/psub.pas         |   4 +
+ compiler/symsym.pas       |  11 +-
+ tests/test/texcregvar1.pp | 235 ++++++++++++++++++++++++++
+ 4 files changed, 596 insertions(+), 1 deletion(-)
+ create mode 100644 compiler/optexcregvar.pas
+ create mode 100644 tests/test/texcregvar1.pp
+
+diff --git a/compiler/optexcregvar.pas b/compiler/optexcregvar.pas
+new file mode 100644
+index 00000000..1a84261e
+--- /dev/null
++++ b/compiler/optexcregvar.pas
+@@ -0,0 +1,347 @@
++{
++    Copyright (c) 2026 by the fpc-toolchain contributors
++
++    Register variables in procedures that use exceptions
++
++    This program is free software; you can redistribute it and/or modify
++    it under the terms of the GNU General Public License as published by
++    the Free Software Foundation; either version 2 of the License, or
++    (at your option) any later version.
++
++    This program is distributed in the hope that it will be useful,
++    but WITHOUT ANY WARRANTY; without even the implied warranty of
++    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++    GNU General Public License for more details.
++
++    You should have received a copy of the GNU General Public License
++    along with this program; if not, write to the Free Software
++    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++
++ ****************************************************************************
++}
++unit optexcregvar;
++
++{ A procedure with an explicit try..except or try..finally gets no register
++  variables (tabstractvarsym.is_regvar, pi_uses_exceptions): when an exception
++  is raised in the protected block, the handler and the code after the try
++  statement are reached with the registers of the setjmp at the start of the
++  block (callee-saved ones restored, the others undefined), so a value that the
++  block wrote to a register variable would be lost.
++
++  mark_exceptsafe_regvars marks the local variables and parameters that may be
++  register variables all the same (tabstractnormalvarsym.exceptsafe_regvar).
++  A variable is safe unless, for some try statement with protected block R,
++
++  - it is written in R and referenced anywhere outside R (in a handler, a
++    finally block, before or after the try statement, or implicitly at the
++    end of the procedure like the function result), or
++  - it is written in R, the try statement can be entered again in the same
++    invocation (it is inside a loop) and R can read it before it writes it,
++    so the value of an earlier run of R (lost by the exception) would be read.
++
++  A variable that R does not write keeps its value in a callee-saved register
++  (setjmp/longjmp save and restore them) or in its spill slot. A variable
++  that only R references and that R writes before it reads is dead when R is
++  left by an exception. Procedures with labels keep the old rule. }
++
++{$i fpcdefs.inc}
++
++interface
++
++uses
++  node,symdef;
++
++procedure mark_exceptsafe_regvars(code: tnode; pd: tprocdef);
++
++implementation
++
++uses
++  cclasses,
++  globtype,globals,
++  symconst,symbase,symtype,symsym,symtable,
++  procinfo,
++  nutils,nbas,nld,nflw;
++
++type
++  tboolarray = array of boolean;
++  tlongintarray = array of longint;
++
++  pexcregvarinfo = ^texcregvarinfo;
++  texcregvarinfo = record
++    cands: TFPList;           { the candidate tabstractnormalvarsyms }
++    counts: tlongintarray;    { references, filled by count_refs }
++    written: tboolarray;      { written in the scanned tree, filled by count_refs }
++    trys: TFPList;            { try nodes, filled by collect_nodes }
++    loops: TFPList;           { loop nodes, filled by collect_nodes }
++    looptrys: TFPList;        { try nodes inside a loop }
++    { exposure walk }
++    assigned_: tboolarray;
++    exposed: tboolarray;
++  end;
++
++
++function candidx(info: pexcregvarinfo; n: tnode): longint;
++  begin
++    result:=-1;
++    if (n.nodetype=loadn) and
++       (tloadnode(n).symtableentry.typ in [localvarsym,paravarsym]) then
++      result:=info^.cands.IndexOf(tloadnode(n).symtableentry);
++  end;
++
++
++function count_refs(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    info: pexcregvarinfo absolute arg;
++    i: longint;
++  begin
++    result:=fen_false;
++    i:=candidx(info,n);
++    if i>=0 then
++      begin
++        inc(info^.counts[i]);
++        if (n.flags*[nf_write,nf_modify])<>[] then
++          info^.written[i]:=true;
++      end;
++  end;
++
++
++function collect_nodes(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    info: pexcregvarinfo absolute arg;
++  begin
++    result:=fen_false;
++    case n.nodetype of
++      tryexceptn:
++        info^.trys.Add(n);
++      tryfinallyn:
++        if not ttryfinallynode(n).implicitframe then
++          info^.trys.Add(n);
++      whilerepeatn,forn:
++        info^.loops.Add(n);
++      else
++        ;
++    end;
++  end;
++
++
++function collect_looptrys(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    info: pexcregvarinfo absolute arg;
++  begin
++    result:=fen_false;
++    if (n.nodetype in [tryexceptn,tryfinallyn]) and
++       (info^.looptrys.IndexOf(n)<0) then
++      info^.looptrys.Add(n);
++  end;
++
++
++{ any load of a candidate that is not definitely assigned yet is a read that
++  can see a value from before the walked block }
++function check_reads(var n: tnode; arg: pointer): foreachnoderesult;
++  var
++    info: pexcregvarinfo absolute arg;
++    i: longint;
++  begin
++    result:=fen_false;
++    i:=candidx(info,n);
++    if (i>=0) and not info^.assigned_[i] then
++      info^.exposed[i]:=true;
++  end;
++
++
++procedure check_reads_in(info: pexcregvarinfo; n: tnode);
++  begin
++    if assigned(n) then
++      foreachnodestatic(n,@check_reads,info);
++  end;
++
++
++procedure walk(info: pexcregvarinfo; n: tnode);
++  var
++    saved, thenset: tboolarray;
++    i: longint;
++  begin
++    if not assigned(n) then
++      exit;
++    case n.nodetype of
++      blockn:
++        walk(info,tblocknode(n).left);
++      statementn:
++        begin
++          while assigned(n) and (n.nodetype=statementn) do
++            begin
++              walk(info,tstatementnode(n).left);
++              n:=tstatementnode(n).right;
++            end;
++          walk(info,n);
++        end;
++      assignn:
++        begin
++          check_reads_in(info,tassignmentnode(n).right);
++          i:=candidx(info,tassignmentnode(n).left);
++          if (i>=0) and
++             (nf_write in tassignmentnode(n).left.flags) and
++             not(nf_modify in tassignmentnode(n).left.flags) then
++            info^.assigned_[i]:=true
++          else
++            { a partial write (field, element) also reads the variable }
++            check_reads_in(info,tassignmentnode(n).left);
++        end;
++      ifn:
++        begin
++          check_reads_in(info,tifnode(n).left);
++          saved:=copy(info^.assigned_);
++          walk(info,tifnode(n).right);
++          thenset:=info^.assigned_;
++          info^.assigned_:=copy(saved);
++          walk(info,tifnode(n).t1);
++          { definitely assigned after the if: on both paths }
++          for i:=0 to high(thenset) do
++            info^.assigned_[i]:=info^.assigned_[i] and thenset[i];
++        end;
++      whilerepeatn:
++        begin
++          { the body and condition may run zero or more times; what they
++            assign does not count afterwards }
++          saved:=copy(info^.assigned_);
++          if lnf_testatbegin in twhilerepeatnode(n).loopflags then
++            begin
++              check_reads_in(info,twhilerepeatnode(n).left);
++              walk(info,twhilerepeatnode(n).right);
++            end
++          else
++            begin
++              walk(info,twhilerepeatnode(n).right);
++              check_reads_in(info,twhilerepeatnode(n).left);
++            end;
++          info^.assigned_:=saved;
++        end;
++      tryexceptn,tryfinallyn:
++        begin
++          saved:=copy(info^.assigned_);
++          walk(info,tbinarynode(n).left);
++          info^.assigned_:=copy(saved);
++          check_reads_in(info,tbinarynode(n).right);
++          if n.nodetype=tryexceptn then
++            check_reads_in(info,ttryexceptnode(n).t1)
++          else
++            check_reads_in(info,ttryfinallynode(n).third);
++          info^.assigned_:=saved;
++        end;
++      raisen,exitn,breakn,continuen,goton:
++        begin
++          check_reads_in(info,n);
++          { the code after a jump is not reached from here: on this path
++            everything counts as assigned (neutral for the if merge) }
++          for i:=0 to high(info^.assigned_) do
++            info^.assigned_[i]:=true;
++        end;
++      else
++        { everything else: every load is a read, nothing counts as assigned }
++        check_reads_in(info,n);
++    end;
++  end;
++
++
++procedure mark_exceptsafe_regvars(code: tnode; pd: tprocdef);
++  var
++    info: texcregvarinfo;
++    unsafe: tboolarray;
++    total: tlongintarray;
++    st: tsymtable;
++    sym: tsym;
++    i,j,k: longint;
++    t: tnode;
++    inloop: boolean;
++  begin
++    info.cands:=TFPList.Create;
++    info.trys:=TFPList.Create;
++    info.loops:=TFPList.Create;
++    info.looptrys:=TFPList.Create;
++    try
++      for k:=0 to 1 do
++        begin
++          if k=0 then
++            st:=pd.parast
++          else
++            st:=pd.localst;
++          if not assigned(st) then
++            continue;
++          for i:=0 to st.SymList.Count-1 do
++            begin
++              sym:=tsym(st.SymList[i]);
++              if sym.typ in [localvarsym,paravarsym] then
++                begin
++                  tabstractnormalvarsym(sym).exceptsafe_regvar:=false;
++                  info.cands.Add(sym);
++                end;
++            end;
++        end;
++      if (info.cands.Count=0) or
++         not(pi_uses_exceptions in current_procinfo.flags) or
++         not(cs_opt_regvar in current_settings.optimizerswitches) or
++         ((current_procinfo.flags*[pi_has_label,pi_has_interproclabel,pi_has_assembler_block])<>[]) then
++        exit;
++
++      setlength(unsafe,info.cands.Count);
++      setlength(total,info.cands.Count);
++      setlength(info.counts,info.cands.Count);
++      setlength(info.written,info.cands.Count);
++      setlength(info.assigned_,info.cands.Count);
++      setlength(info.exposed,info.cands.Count);
++
++      { the function result and self are also read at the end of the procedure }
++      for i:=0 to info.cands.Count-1 do
++        if (tabstractnormalvarsym(info.cands[i]).varoptions*[vo_is_funcret,vo_is_result,vo_is_self])<>[] then
++          total[i]:=1;
++
++      foreachnodestatic(code,@count_refs,@info);
++      for i:=0 to info.cands.Count-1 do
++        inc(total[i],info.counts[i]);
++
++      foreachnodestatic(code,@collect_nodes,@info);
++      for i:=0 to info.loops.Count-1 do
++        begin
++          t:=tnode(info.loops[i]);
++          foreachnodestatic(t,@collect_looptrys,@info);
++        end;
++
++      for j:=0 to info.trys.Count-1 do
++        begin
++          t:=tnode(info.trys[j]);
++          inloop:=info.looptrys.IndexOf(t)>=0;
++          for i:=0 to info.cands.Count-1 do
++            begin
++              info.counts[i]:=0;
++              info.written[i]:=false;
++            end;
++          if assigned(tbinarynode(t).left) then
++            foreachnodestatic(tbinarynode(t).left,@count_refs,@info);
++
++          if inloop then
++            begin
++              for i:=0 to info.cands.Count-1 do
++                begin
++                  info.assigned_[i]:=false;
++                  info.exposed[i]:=false;
++                end;
++              walk(@info,tbinarynode(t).left);
++            end;
++          for i:=0 to info.cands.Count-1 do
++            if info.written[i] and
++               ((total[i]>info.counts[i]) or
++                (inloop and info.exposed[i])) then
++              unsafe[i]:=true;
++        end;
++
++      for i:=0 to info.cands.Count-1 do
++        tabstractnormalvarsym(info.cands[i]).exceptsafe_regvar:=not unsafe[i];
++    finally
++      info.cands.Free;
++      info.trys.Free;
++      info.loops.Free;
++      info.looptrys.Free;
++    end;
++  end;
++
++end.
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index c00093e8..65c8ff90 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -144,6 +144,7 @@ implementation
+        fmodule,
+        { pass 1 }
+        ngenutil,nld,ncal,ncon,nflw,nadd,ncnv,nmem,
++       optexcregvar,
+        pass_1,
+     {$ifdef state_tracking}
+        nstate,
+@@ -2088,6 +2089,9 @@ implementation
+ 
+             { Allocate space in temp/registers for parast and localst }
+             current_filepos:=entrypos;
++{$ifndef wasm32}
++            mark_exceptsafe_regvars(code,procdef);
++{$endif wasm32}
+             gen_alloc_symtable(aktproccode,procdef,procdef.parast);
+             gen_alloc_symtable(aktproccode,procdef,procdef.localst);
+ 
+diff --git a/compiler/symsym.pas b/compiler/symsym.pas
+index 88b7c646..2de84369 100644
+--- a/compiler/symsym.pas
++++ b/compiler/symsym.pas
+@@ -268,6 +268,10 @@ interface
+           { the variable is not living at entry of the scope, so it does not need to be initialized if it is a reg. var
+             (not written to ppu, because not important and would change interface crc) }
+           noregvarinitneeded : boolean;
++          { may be a register variable although the procedure uses exceptions,
++            set by optexcregvar.mark_exceptsafe_regvars for the procedure that
++            owns the symbol (not written to ppu) }
++          exceptsafe_regvar : boolean;
+           { not stored in PPU! }
+           capture_sym : tsym;
+           constructor create(st:tsymtyp;const n : TSymStr;vsp:tvarspez;def:tdef;vopts:tvaroptions);
+@@ -2008,7 +2012,12 @@ implementation
+ {$ifndef wasm32}
+                 { wasm: exceptions are branches (bf) or wasm EH within the same
+                   frame, wasm locals keep their values in the handlers }
+-                not(pi_uses_exceptions in current_procinfo.flags) and
++                (not(pi_uses_exceptions in current_procinfo.flags) or
++                 { see optexcregvar }
++                 ((self is tabstractnormalvarsym) and
++                  tabstractnormalvarsym(self).exceptsafe_regvar and
++                  ((owner=current_procinfo.procdef.localst) or
++                   (owner=current_procinfo.procdef.parast)))) and
+ {$endif wasm32}
+                 not(pi_has_interproclabel in current_procinfo.flags) and
+                 ((refpara and
+diff --git a/tests/test/texcregvar1.pp b/tests/test/texcregvar1.pp
+new file mode 100644
+index 00000000..8a589ff3
+--- /dev/null
++++ b/tests/test/texcregvar1.pp
+@@ -0,0 +1,235 @@
++{ %OPT=-O3 }
++{ register variables in procedures with try..except/finally: values written
++  in the protected block before an exception must be seen by the handler,
++  after the try statement, in the next loop iteration and in the result }
++program texcregvar1;
++
++{$mode objfpc}
++
++uses
++  sysutils;
++
++var
++  errors: longint = 0;
++  zero: longint = 0;
++
++procedure check(got, expected: int64; const what: string);
++begin
++  if got <> expected then
++    begin
++      writeln(what, ': got ', got, ', expected ', expected);
++      inc(errors);
++    end;
++end;
++
++procedure boom(i: longint);
++begin
++  if i >= 0 then
++    raise Exception.Create('boom');
++end;
++
++{ written in the block, read in the handler }
++function inhandler(n: longint): int64;
++var
++  x: int64;
++  i: longint;
++begin
++  x := 1;
++  try
++    for i := 1 to n do
++      x := x * 3 + i;
++    boom(0);
++  except
++    result := x;
++    exit;
++  end;
++  result := -1;
++end;
++
++{ written in the block, read after the try statement }
++function after(n: longint): int64;
++var
++  x: int64;
++  i: longint;
++begin
++  x := 0;
++  try
++    for i := 1 to n do
++      x := x + i;
++    boom(zero);
++    x := -100;
++  except
++  end;
++  result := x;
++end;
++
++{ try in a loop: the block reads the value of the previous run }
++function loopcarried(n: longint): int64;
++var
++  acc, k: int64;
++  i: longint;
++begin
++  acc := 0;
++  k := 0;
++  for i := 1 to n do
++    try
++      acc := acc + k;
++      k := k + i;
++      if i mod 3 = 0 then
++        boom(i);
++      k := k * 2;
++    except
++    end;
++  result := acc * 1000 + k;
++end;
++
++{ the result written in the block }
++function resultinblock(n: longint): int64;
++var
++  i: longint;
++begin
++  result := 0;
++  try
++    for i := 1 to n do
++      result := result + i * i;
++    boom(n);
++    result := -1;
++  except
++  end;
++end;
++
++{ a value parameter written in the block }
++function paraminblock(n: longint): int64;
++begin
++  try
++    n := n * 7;
++    boom(n);
++    n := 0;
++  except
++  end;
++  result := n;
++end;
++
++{ nested try statements }
++function nested(n: longint): int64;
++var
++  a, b: int64;
++begin
++  a := 1;
++  b := 2;
++  try
++    a := a + n;
++    try
++      b := b + a;
++      boom(0);
++      b := 0;
++    except
++      a := a * 10 + b;
++    end;
++    boom(0);
++    a := 0;
++  except
++    a := a + 1;
++  end;
++  result := a * 100 + b;
++end;
++
++{ try..finally: the finally block sees the value }
++function infinally(n: longint): int64;
++var
++  x: int64;
++  seen: int64;
++begin
++  seen := 0;
++  x := 5;
++  try
++    try
++      x := x + n;
++      boom(0);
++      x := 0;
++    finally
++      seen := x;
++    end;
++  except
++  end;
++  result := seen * 10 + x;
++end;
++
++{ only the block uses these and writes them before reading: may be registers }
++function blocklocal(n: longint): int64;
++var
++  i: longint;
++  s, t: int64;
++begin
++  result := 0;
++  for i := 1 to n do
++    try
++      s := i;
++      t := s * s;
++      if t mod 5 = 0 then
++        boom(i);
++      result := result + t;
++    except
++      result := result + 1000;
++    end;
++end;
++
++{ read-only in the block, used after }
++function readonly(n: longint): int64;
++var
++  base: int64;
++  r: int64;
++begin
++  base := n * 11;
++  r := 0;
++  try
++    r := base + 1;
++    boom(0);
++  except
++    r := r + base;
++  end;
++  result := r + base;
++end;
++
++type
++  tpair = record
++    lo, hi: longint;
++  end;
++
++{ a record field written in the block, read in the loop condition }
++function recordfield(n: longint): int64;
++var
++  p: tpair;
++begin
++  p.lo := 0;
++  p.hi := n;
++  result := 0;
++  while p.lo < p.hi do
++    try
++      inc(p.lo);
++      result := result + p.lo;
++      if p.lo mod 4 = 0 then
++        boom(0);
++    except
++      result := result + 100;
++    end;
++end;
++
++begin
++  check(inhandler(5), 422, 'inhandler');
++  check(after(10), 55, 'after');
++  check(loopcarried(10), 1068734, 'loopcarried');
++  check(resultinblock(4), 30, 'resultinblock');
++  check(paraminblock(6), 42, 'paraminblock');
++  check(nested(3), 4706, 'nested');
++  check(infinally(4), 99, 'infinally');
++  check(blocklocal(12), 2525, 'blocklocal');
++  check(readonly(2), 67, 'readonly');
++  check(recordfield(10), 255, 'recordfield');
++  if errors <> 0 then
++    begin
++      writeln(errors, ' errors');
++      halt(1);
++    end;
++  writeln('ok');
++end.

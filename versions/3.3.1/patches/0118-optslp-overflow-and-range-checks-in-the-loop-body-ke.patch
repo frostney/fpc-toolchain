@@ -1,0 +1,135 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 19:22:13 +0000
+Subject: [PATCH 118/118] optslp: overflow and range checks in the loop body
+ keep loads in the loop
+
+A statement compiled with {$Q+} or {$R+} inside a loop raised its
+exception after a load that had moved before the loop, so a nil pointer
+raised EAccessViolation instead of EIntOverflow or ERangeError. Nodes with
+either check switched on now count as raising. tslp3 gains both cases and
+drops a case that the node DFA, and so the hoisting, never reaches (a
+procedure with try).
+---
+ compiler/optslp.pas     |  3 ++
+ tests/test/opt/tslp3.pp | 74 ++++++++++++++++++++++++++++++-----------
+ 2 files changed, 58 insertions(+), 19 deletions(-)
+
+diff --git a/compiler/optslp.pas b/compiler/optslp.pas
+index a6338688..0893a401 100644
+--- a/compiler/optslp.pas
++++ b/compiler/optslp.pas
+@@ -1467,6 +1467,9 @@ function blocks_hoisting(var n: tnode; arg: pointer): foreachnoderesult;
+       else
+         blocks:=true;
+     end;
++    { overflow and range checks switched on inside the loop }
++    if ([cs_check_overflow,cs_check_range]*n.localswitches)<>[] then
++      blocks:=true;
+     if blocks then
+       result:=fen_norecurse_true
+     else
+diff --git a/tests/test/opt/tslp3.pp b/tests/test/opt/tslp3.pp
+index bd3421de..c0cb296f 100644
+--- a/tests/test/opt/tslp3.pp
++++ b/tests/test/opt/tslp3.pp
+@@ -4,7 +4,7 @@
+   (optslp, do_hoist_invariant_loads) only when nothing can tell: not when an
+   inline routine such as include writes them, not when a goto can enter the
+   loop body, and not when the first iteration can raise an exception before
+-  it reaches the load }
++  it reaches the load (a division, an overflow or range check) }
+ program tslp3;
+ 
+ {$mode objfpc}{$goto on}
+@@ -103,27 +103,47 @@ begin
+   result := s + k;
+ end;
+ 
+-{ a guard: the store is done before the first iteration loads p^.x, and the
+-  exception handler reads it }
+-function sumstore(p: PRec; n: longint): longint; noinline;
++{ the overflow check raises before the first iteration loads p^.x }
++function sumovf(p: PRec; n: longint; a: int64): double; noinline;
+ var
+-  i, k: longint;
++  i: longint;
++  k: int64;
+   s: double;
+ begin
++  s := 0;
++  i := 0;
+   k := 0;
++  while i < n do
++    begin
++{$Q+}
++      k := a * (i + 2);
++{$Q-}
++      s := s + p^.x;
++      inc(i);
++    end;
++  result := s + k;
++end;
++
++{ the range check raises before the first iteration loads p^.x }
++function sumrange(p: PRec; n, idx: longint): double; noinline;
++var
++  i, k: longint;
++  s: double;
++  b: byte;
++begin
+   s := 0;
+-  try
+-    i := 0;
+-    while i < n do
+-      begin
+-        k := i + 1;
+-        s := s + p^.x;
+-        inc(i);
+-      end;
+-  except
+-    exit(k);
+-  end;
+-  result := trunc(s);
++  i := 0;
++  k := 0;
++  while i < n do
++    begin
++{$R+}
++      b := idx + i;
++{$R-}
++      k := k + b;
++      s := s + p^.x;
++      inc(i);
++    end;
++  result := s + k;
+ end;
+ 
+ var
+@@ -151,8 +171,24 @@ begin
+   end;
+   check(what = 'EDivByZero', 'div before the load: ' + what);
+   check(sumdiv(@r, 3, 50) = 12, 'div b');
+-  check(sumstore(nil, 3) = 1, 'store before the load');
+-  check(sumstore(@r, 3) = 6, 'store b');
++  what := '';
++  try
++    sumovf(nil, 3, high(int64));
++  except
++    on e: Exception do
++      what := e.ClassName;
++  end;
++  check(what = 'EIntOverflow', 'overflow check before the load: ' + what);
++  check(sumovf(@r, 3, 1) = 10, 'overflow check b');
++  what := '';
++  try
++    sumrange(nil, 3, 1000);
++  except
++    on e: Exception do
++      what := e.ClassName;
++  end;
++  check(what = 'ERangeError', 'range check before the load: ' + what);
++  check(sumrange(@r, 3, 1) = 12, 'range check b');
+   if errors <> 0 then
+     halt(1);
+   writeln('ok');

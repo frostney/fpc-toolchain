@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Thu, 15 Oct 2026 23:08:52 +0100
-Subject: [PATCH 11/79] Do not narrow a right shift of an extended value to the
- narrow size
+Subject: [PATCH 011/118] Do not narrow a right shift of an extended value to
+ the narrow size
 
 i := T(i shr k) (load-modify-store, -O3) and the OptPass1Movx 'var3' fold
 of movzx/movsx + shift + narrowing store (-O1) turned 32-bit right shifts

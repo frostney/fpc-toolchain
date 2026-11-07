@@ -1,0 +1,174 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 01:34:23 +0000
+Subject: [PATCH 088/118] Inlining a routine with try..except/finally keeps its
+ locals and result in memory
+
+CreateInlineInfo copies the procinfo flags before the first pass, which is
+what sets pi_uses_exceptions, so a caller never inherited the flag from an
+inlined routine with an exception frame (optcall), and the routine's locals
+and parameters became register temps; the result temp was regable as well.
+An exception in the inlined protected block restored those registers to
+their values at the setjmp, so the handler and the result saw stale values:
+"x := 1; try x := x + n; raise ... except x := x * 10 end" returned 10 for
+60 at -O2, and a result written in the block was lost even at -O1.
+CreateInlineInfo now records pi_uses_exceptions when the body has an explicit
+exception frame, and the result temp checks it. tests/test/tinltry1.pp.
+---
+ compiler/ncal.pas      |  6 ++-
+ compiler/psub.pas      | 15 +++++++
+ tests/test/tinltry1.pp | 97 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 117 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test/tinltry1.pp
+
+diff --git a/compiler/ncal.pas b/compiler/ncal.pas
+index f7f6a82c..290c91b0 100644
+--- a/compiler/ncal.pas
++++ b/compiler/ncal.pas
+@@ -3711,7 +3711,11 @@ implementation
+               begin
+                 temp:=ctempcreatenode.create(resultdef,resultdef.size,tt_persistent,
+                   (cnf_do_inline in callnodeflags) and
+-                  not(tabstractvarsym(tprocdef(procdefinition).funcretsym).varregable in [vr_none,vr_addr]));
++                  not(tabstractvarsym(tprocdef(procdefinition).funcretsym).varregable in [vr_none,vr_addr]) and
++                  { a result written in the inlined function's protected block
++                    must survive the longjmp to its handler }
++                  not(tprocdef(procdefinition).has_inlininginfo and
++                      (pi_uses_exceptions in tprocdef(procdefinition).inlininginfo^.flags)));
+                 include(temp.flags,nf_is_funcret);
+                 { if a managed type is returned by reference, assigning something
+                   to the result on the caller side will take care of decreasing
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index b35b51c7..60201e06 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -1798,11 +1798,26 @@ implementation
+       end;
+ 
+ 
++     function has_explicit_exception_frame(var n: tnode; arg: pointer): foreachnoderesult;
++       begin
++         result:=fen_false;
++         if (n.nodetype=tryexceptn) or
++            ((n.nodetype=tryfinallyn) and not ttryfinallynode(n).implicitframe) then
++           result:=fen_norecurse_true;
++       end;
++
++
+      procedure TCGProcinfo.CreateInlineInfo;
+        begin
+         new(procdef.inlininginfo);
+         procdef.inlininginfo^.code:=code.getcopy;
+         procdef.inlininginfo^.flags:=flags;
++        { the inline info is created before the first pass, which sets
++          pi_uses_exceptions; a caller inherits the flag (optcall), so that the
++          inlined locals and parameters do not become register temps that a
++          longjmp to the inlined handler would restore }
++        if foreachnodestatic(code,@has_explicit_exception_frame,nil) then
++          include(procdef.inlininginfo^.flags,pi_uses_exceptions);
+         { The blocknode needs to set an exit label }
+         if procdef.inlininginfo^.code.nodetype=blockn then
+           include(procdef.inlininginfo^.code.flags,nf_block_with_exit);
+diff --git a/tests/test/tinltry1.pp b/tests/test/tinltry1.pp
+new file mode 100644
+index 00000000..bdebdb55
+--- /dev/null
++++ b/tests/test/tinltry1.pp
+@@ -0,0 +1,97 @@
++{ %OPT=-O2 }
++{ inlining a routine with try..except/finally: its locals, parameters and
++  result written in the protected block must survive the jump to the handler
++  (they must not become register temps) }
++program tinltry1;
++
++{$mode objfpc}
++
++uses
++  sysutils;
++
++var
++  zero: longint = 0;
++  errors: longint = 0;
++
++function withlocal(n: longint): longint; inline;
++var
++  x: longint;
++begin
++  x := 1;
++  try
++    x := x + n;
++    if zero = 0 then
++      raise Exception.Create('x');
++    x := 100;
++  except
++    x := x * 10;
++  end;
++  result := x;
++end;
++
++function withpara(n: longint): longint; inline;
++begin
++  try
++    n := n * 3;
++    if zero = 0 then
++      raise Exception.Create('x');
++    n := 0;
++  except
++    n := n + 1;
++  end;
++  result := n;
++end;
++
++function withresult(n: longint): longint; inline;
++begin
++  result := 0;
++  try
++    result := n * 7;
++    if zero = 0 then
++      raise Exception.Create('x');
++    result := -1;
++  except
++  end;
++end;
++
++function withfinally(n: longint): longint; inline;
++var
++  x, seen: longint;
++begin
++  x := 2;
++  seen := 0;
++  try
++    try
++      x := x + n;
++      if zero = 0 then
++        raise Exception.Create('x');
++      x := 0;
++    finally
++      seen := x;
++    end;
++  except
++  end;
++  result := seen * 100 + x;
++end;
++
++procedure check(got, expected: longint; const what: string);
++begin
++  if got <> expected then
++    begin
++      writeln(what, ': got ', got, ', expected ', expected);
++      inc(errors);
++    end;
++end;
++
++var
++  r: longint;
++begin
++  check(withlocal(5), 60, 'withlocal');
++  check(withpara(4), 13, 'withpara');
++  r := withresult(6);
++  check(r, 42, 'withresult');
++  check(withfinally(3), 505, 'withfinally');
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.

@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 14:06:03 +0000
+Subject: [PATCH 101/118] x86 peephole: a cvtsi2sd/ss of a just-stored integer
+ reads the register
+
+mov %reg,ref; cvtsi2sX ref,%xmm becomes mov %reg,ref; cvtsi2sX %reg,%xmm,
+so the conversion does not wait for store-to-load forwarding (fasta's
+seed := ...; result := seed / m).
+---
+ compiler/x86/aoptx86.pas   | 19 ++++++++++++++++++
+ tests/test/opt/tcvtfwd1.pp | 41 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 60 insertions(+)
+ create mode 100644 tests/test/opt/tcvtfwd1.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index b6df4550..174cf181 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -3616,6 +3616,25 @@ unit aoptx86;
+         p_TargetReg := NR_NO;
+         hp1 := nil;
+ 
++        { mov %reg,ref; cvtsi2sX ref,%xmm  ->  mov %reg,ref; cvtsi2sX %reg,%xmm
++          (a variable stored and converted at once, e.g. "seed := ...; r := seed / m":
++          the conversion no longer waits for the store to be forwarded) }
++        if MatchOpType(taicpu(p),top_reg,top_ref) and
++           (taicpu(p).opsize in [S_L{$ifdef x86_64},S_Q{$endif x86_64}]) and
++           (taicpu(p).oper[1]^.ref^.volatility=[]) and
++           GetNextInstruction(p,hp1) and
++           MatchInstruction(hp1,[A_CVTSI2SD,A_CVTSI2SS],[taicpu(p).opsize]) and
++           (taicpu(hp1).ops=2) and
++           (taicpu(hp1).oper[0]^.typ=top_ref) and
++           RefsEqual(taicpu(hp1).oper[0]^.ref^,taicpu(p).oper[1]^.ref^) then
++          begin
++            DebugMsg(SPeepholeOptimization + 'MovCvtsi2s2MovCvtsi2s (store forwarded) done',hp1);
++            taicpu(hp1).loadreg(0,taicpu(p).oper[0]^.reg);
++            AllocRegBetween(taicpu(p).oper[0]^.reg,p,hp1,UsedRegs);
++            Result:=true;
++            exit;
++          end;
++
+         if taicpu(p).oper[1]^.typ = top_reg then
+           begin
+             { Saves on a large number of dereferences }
+diff --git a/tests/test/opt/tcvtfwd1.pp b/tests/test/opt/tcvtfwd1.pp
+new file mode 100644
+index 00000000..9fa9d14d
+--- /dev/null
++++ b/tests/test/opt/tcvtfwd1.pp
+@@ -0,0 +1,41 @@
++{ %OPT=-O3 }
++{ x86 peephole: mov %reg,ref; cvtsi2sd ref,%xmm reads %reg instead of ref }
++program tcvtfwd1;
++
++var
++  seed: int64;
++  seedl: longint;
++
++function next64(m: int64): double;
++  begin
++    seed:=(seed*3877+29573) mod 139968;
++    next64:=seed/m;
++  end;
++
++function next32(m: longint): single;
++  begin
++    seedl:=(seedl*3877+29573) mod 139968;
++    next32:=seedl/m;
++  end;
++
++var
++  i: longint;
++  d: double;
++  s: single;
++begin
++  seed:=42;
++  seedl:=42;
++  d:=0;
++  s:=0;
++  for i:=1 to 1000 do
++    begin
++      d:=d+next64(139968);
++      s:=s+next32(139968);
++    end;
++  if (seed<>seedl) or (abs(d-516.0704)>0.001) or (abs(s-516.0709)>0.01) then
++    begin
++      writeln('failed: ',seed,' ',seedl,' ',d:0:4,' ',s:0:4);
++      halt(1);
++    end;
++  writeln('ok');
++end.

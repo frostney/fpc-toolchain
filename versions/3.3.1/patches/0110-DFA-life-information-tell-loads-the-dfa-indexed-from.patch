@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 17:08:37 +0000
+Subject: [PATCH 110/118] DFA life information: tell loads the dfa indexed from
+ nodes that only got optinfo later
+
+get_used_live_regvars (the loop register sync) and optexcregvar take a load
+with optinfo as one the node DFA has seen and read optinfo^.index. But
+CalcExecutionWeights allocates optinfo for every node before code
+generation, so a load created after the DFA (by a pass that does not redo
+it) got index 0 and was judged by the life of whatever variable has index 0:
+the loop sync left out a variable used in every iteration, whose register
+the allocator then reused (found with the SLP vectoriser, whose nodes are
+created after the DFA). toptinfo.dfaindexed is set by TIndexedNodeSet.Add and
+required by both.
+---
+ compiler/ncgutil.pas      | 1 +
+ compiler/optbase.pas      | 4 ++++
+ compiler/optexcregvar.pas | 1 +
+ compiler/optutils.pas     | 1 +
+ 4 files changed, 7 insertions(+)
+
+diff --git a/compiler/ncgutil.pas b/compiler/ncgutil.pas
+index 38f0139a..57c09669 100644
+--- a/compiler/ncgutil.pas
++++ b/compiler/ncgutil.pas
+@@ -1209,6 +1209,7 @@ implementation
+           variable that is not live at the loop head }
+         if (n.nodetype=loadn) and
+            assigned(n.optinfo) and
++           n.optinfo^.dfaindexed and
+            dfa_life_is_register_life(tloadnode(n).symtableentry) and
+            not(DynSetIn(info^.loop.optinfo^.life,n.optinfo^.index)) then
+           result:=fen_true
+diff --git a/compiler/optbase.pas b/compiler/optbase.pas
+index 65f50c07..9cd42592 100644
+--- a/compiler/optbase.pas
++++ b/compiler/optbase.pas
+@@ -52,6 +52,10 @@ unit optbase;
+           (the handler or finally block of the innermost enclosing try
+           statement), nil outside a protected block; set by SetNodeSucessors }
+         excsucc : pointer;
++        { index was assigned by the dfa (TIndexedNodeSet.Add); optinfo is
++          also allocated for nodes the dfa never saw, e.g. by
++          CalcExecutionWeights }
++        dfaindexed : boolean;
+       end;
+ 
+       poptinfo = ^toptinfo;
+diff --git a/compiler/optexcregvar.pas b/compiler/optexcregvar.pas
+index 4e08638a..79f3e20b 100644
+--- a/compiler/optexcregvar.pas
++++ b/compiler/optexcregvar.pas
+@@ -314,6 +314,7 @@ function find_dfaindex(var n: tnode; arg: pointer): foreachnoderesult;
+     result:=fen_false;
+     if (n.nodetype=loadn) and
+        assigned(n.optinfo) and
++       n.optinfo^.dfaindexed and
+        (tloadnode(n).symtableentry.typ in [localvarsym,paravarsym]) then
+       begin
+         i:=info^.cands.IndexOf(tloadnode(n).symtableentry);
+diff --git a/compiler/optutils.pas b/compiler/optutils.pas
+index 18e3bcbb..56907fe1 100644
+--- a/compiler/optutils.pas
++++ b/compiler/optutils.pas
+@@ -76,6 +76,7 @@ unit optutils;
+         p : tnode;
+       begin
+         node.allocoptinfo;
++        node.optinfo^.dfaindexed:=true;
+         p:=Includes(node);
+         if assigned(p) then
+           begin

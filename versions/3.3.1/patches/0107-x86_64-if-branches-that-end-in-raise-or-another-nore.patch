@@ -1,0 +1,433 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 7 Nov 2026 15:37:25 +0000
+Subject: [PATCH 107/118] x86_64: if branches that end in raise or another
+ noreturn call are placed out of line
+
+FPC's register allocator gives a value one live range from its first to its
+last use in code order. A branch like "if bad then raise E.Create(...)" or
+"else raise ..." lies between the hot parts of a routine, so every value
+live around it crosses its calls and needs a callee-saved register (or is
+spilled). tcgifnode now generates such a branch (one whose last statement is
+a call that never returns and that has no exit, break, continue, goto or
+user label) into current_procinfo.coldcode; psub places it after the code
+that loads the return value, behind a jump to the epilogue, and registers
+its register uses again so that live ranges extend to it. Only with the
+setjmp based exception handling (not win64 SEH, not DWARF EH).
+vm2: Op and A in registers (cycles about -6%); tests/test/opt/tcoldraise1.pp.
+---
+ compiler/ncgflw.pas           | 101 ++++++++++++++++++++++-
+ compiler/procinfo.pas         |   5 ++
+ compiler/psub.pas             |  60 ++++++++++++++
+ tests/test/opt/tcoldraise1.pp | 149 ++++++++++++++++++++++++++++++++++
+ 4 files changed, 314 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test/opt/tcoldraise1.pp
+
+diff --git a/compiler/ncgflw.pas b/compiler/ncgflw.pas
+index 586cf5d9..05ebe4d7 100644
+--- a/compiler/ncgflw.pas
++++ b/compiler/ncgflw.pas
+@@ -119,7 +119,7 @@ implementation
+       fmodule,
+       cpubase,
+       tgobj,paramgr,
+-      cgobj,hlcgobj,nutils
++      cgobj,hlcgobj,nutils,ncal,nbas
+ {$ifndef SkipABIEH}
+       ,psabiehpi
+ {$endif}
+@@ -224,11 +224,70 @@ implementation
+                                tcgIFNODE
+ *****************************************************************************}
+ 
++    function cold_forbidden(var n: tnode; arg: pointer): foreachnoderesult;
++      begin
++        { an internal label (the address of a raise statement) is not a
++          jump target from outside }
++        if (n.nodetype in [exitn,breakn,continuen,goton]) or
++           ((n.nodetype=labeln) and not(nf_internal in n.flags)) then
++          result:=fen_norecurse_true
++        else
++          result:=fen_false;
++      end;
++
++
++    { a branch that ends in a call that never returns (raise, halt) and
++      cannot jump elsewhere: it can be placed after the body, so that its
++      code does not lie between the hot parts of the routine (which would
++      lengthen the live ranges of the register allocator across its calls) }
++    function is_cold_branch(n: tnode): boolean;
++      var
++        last: tnode;
++      begin
++        result:=false;
++        if not assigned(n) or
++           not(cs_opt_level2 in current_settings.optimizerswitches) or
++           (cs_opt_size in current_settings.optimizerswitches) then
++          exit;
++{$ifdef x86_64}
++        { exception scopes are address ranges with SEH and DWARF based
++          exception handling; the setjmp based one does not care }
++        if (target_info.system=system_x86_64_win64) or
++           (tf_use_psabieh in target_info.flags) then
++          exit;
++{$else x86_64}
++        exit;
++{$endif x86_64}
++        last:=n;
++        repeat
++          case last.nodetype of
++            blockn:
++              last:=tblocknode(last).left;
++            statementn:
++              begin
++                while assigned(tstatementnode(last).right) do
++                  last:=tstatementnode(last).right;
++                last:=tstatementnode(last).left;
++              end;
++            else
++              break;
++          end;
++        until not assigned(last);
++        if not assigned(last) or
++           (last.nodetype<>calln) or
++           not(cnf_call_never_returns in tcallnode(last).callnodeflags) then
++          exit;
++        result:=not foreachnodestatic(n,@cold_forbidden,nil);
++      end;
++
++
+     procedure tcgifnode.pass_generate_code;
+ 
+       var
+          hl : tasmlabel;
+          oldflowcontrol: tflowcontrol;
++         coldlist,oldlist : TAsmList;
++         coldthen,coldelse : boolean;
+ (*
+          org_regvar_loaded_other,
+          then_regvar_loaded_other,
+@@ -260,6 +319,46 @@ implementation
+ *)
+          hlcg.maketojumpbool(current_asmdata.CurrAsmList,left);
+ 
++         coldthen:=is_cold_branch(right);
++         coldelse:=not coldthen and is_cold_branch(t1);
++         if coldthen or coldelse then
++           begin
++             { the cold branch goes to the end of the routine, the other one
++               falls through }
++             oldlist:=current_asmdata.CurrAsmList;
++             coldlist:=TAsmList.create;
++             current_asmdata.CurrAsmList:=coldlist;
++             if coldthen then
++               begin
++                 hlcg.a_label(current_asmdata.CurrAsmList,left.location.truelabel);
++                 secondpass(right);
++               end
++             else
++               begin
++                 hlcg.a_label(current_asmdata.CurrAsmList,left.location.falselabel);
++                 secondpass(t1);
++               end;
++             current_asmdata.CurrAsmList:=oldlist;
++             if not assigned(current_procinfo.coldcode) then
++               current_procinfo.coldcode:=TAsmList.create;
++             current_procinfo.coldcode.concatlist(coldlist);
++             coldlist.free;
++             if coldthen then
++               begin
++                 hlcg.a_label(current_asmdata.CurrAsmList,left.location.falselabel);
++                 if assigned(t1) then
++                   secondpass(t1);
++               end
++             else
++               begin
++                 hlcg.a_label(current_asmdata.CurrAsmList,left.location.truelabel);
++                 if assigned(right) then
++                   secondpass(right);
++               end;
++             flowcontrol := oldflowcontrol + (flowcontrol - [fc_inflowcontrol]);
++             exit;
++           end;
++
+ (*
+          if cs_opt_regvar in current_settings.optimizerswitches then
+            begin
+diff --git a/compiler/procinfo.pas b/compiler/procinfo.pas
+index 462bf70a..0be5480f 100644
+--- a/compiler/procinfo.pas
++++ b/compiler/procinfo.pas
+@@ -90,6 +90,9 @@ unit procinfo;
+             get_used_live_regvars); the dfa based node transformations
+             (pi_dfaavailable) stay off there }
+           excdfaavailable : boolean;
++          { code of if branches that never return (raise), placed after the
++            body instead of between its hot parts (see tcgifnode) }
++          coldcode : TAsmList;
+ 
+           { register used as frame pointer }
+           framepointer : tregister;
+@@ -275,6 +278,8 @@ implementation
+          aktproccode := nil;
+          aktlocaldata.free;
+          aktlocaldata := nil;
++         coldcode.free;
++         coldcode := nil;
+          localrefsyms.free;
+          localrefsyms := nil;
+          localrefdefs.free;
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index d34da136..15841569 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -172,6 +172,9 @@ implementation
+        optloadmodifystore,
+        optcall,
+        optutils
++{$ifdef x86_64}
++       ,aasmcpu
++{$endif x86_64}
+ {$if defined(arm) or defined(m68k)}
+        ,cpuinfo
+ {$endif defined(arm) or defined(m68k)}
+@@ -1908,6 +1911,47 @@ implementation
+       end;
+ 
+ 
++    { the register allocator takes the live range of a register from the
++      first to the last instruction that used it in the order of code
++      generation; the cold code (generated in the middle of the body) is
++      placed at the end, so its uses are registered again here, which makes
++      them the last ones }
++{$ifdef x86_64}
++    procedure register_cold_code(list: TAsmList);
++      var
++        hp: tai;
++        i: longint;
++        oldweight: longint;
++      begin
++        oldweight:=cg.executionweight;
++        cg.executionweight:=0;
++        hp:=tai(list.first);
++        while assigned(hp) do
++          begin
++            if hp.typ=ait_instruction then
++              for i:=0 to taicpu(hp).ops-1 do
++                with taicpu(hp).oper[i]^ do
++                  case typ of
++                    top_reg:
++                      if reg<>NR_NO then
++                        cg.add_reg_instruction(hp,reg);
++                    top_ref:
++                      begin
++                        if ref^.base<>NR_NO then
++                          cg.add_reg_instruction(hp,ref^.base);
++                        if ref^.index<>NR_NO then
++                          cg.add_reg_instruction(hp,ref^.index);
++                      end;
++                    else
++                      ;
++                  end;
++            hp:=tai(hp.next);
++          end;
++        cg.executionweight:=oldweight;
++      end;
++{$endif x86_64}
++
++
+     procedure tcgprocinfo.generate_code;
+ 
+        procedure check_for_threadvars_in_initfinal;
+@@ -1955,6 +1999,7 @@ implementation
+          end;
+ 
+       var
++        coldskiplabel : tasmlabel;
+         old_current_procinfo : tprocinfo;
+         oldmaxfpuregisters : longint;
+         oldfilepos : tfileposinfo;
+@@ -2193,6 +2238,7 @@ implementation
+             do_secondpass(code);
+             aktproccode.concatlist(current_asmdata.CurrAsmList);
+ 
++
+             { The position of the loadpara_asmnode is now known }
+             aktproccode.insertlistafter(loadpara_asmnode.currenttai,templist);
+ 
+@@ -2276,6 +2322,20 @@ implementation
+             hlcg.gen_load_return_value(templist);
+             aktproccode.concatlist(templist);
+ 
++            { the branches that never return (see tcgifnode), behind all of
++              the routine's code but the epilogue: no value of the routine is
++              live across them }
++            if assigned(coldcode) and not coldcode.empty then
++              begin
++                current_asmdata.getjumplabel(coldskiplabel);
++                cg.a_jmp_always(aktproccode,coldskiplabel);
++{$ifdef x86_64}
++                register_cold_code(coldcode);
++{$endif x86_64}
++                aktproccode.concatlist(coldcode);
++                cg.a_label(aktproccode,coldskiplabel);
++              end;
++
+             { Already reserve all registers for stack checking code and
+               generate the call to the helper function }
+             if not(tf_no_generic_stackcheck in target_info.flags) and
+diff --git a/tests/test/opt/tcoldraise1.pp b/tests/test/opt/tcoldraise1.pp
+new file mode 100644
+index 00000000..9aecaff3
+--- /dev/null
++++ b/tests/test/opt/tcoldraise1.pp
+@@ -0,0 +1,149 @@
++{ %OPT=-O3 }
++{ if branches that end in raise are placed out of line (after the routine's
++  code): values live around them, values used in them, exceptions caught in
++  the same routine, finally blocks, loops }
++program tcoldraise1;
++
++{$mode objfpc}
++
++uses
++  sysutils;
++
++type
++  EMine = class(Exception)
++    v: int64;
++  end;
++
++var
++  errors: longint = 0;
++
++procedure check(got, expected: int64; const what: string);
++begin
++  if got <> expected then
++    begin
++      writeln(what, ': got ', got, ', expected ', expected);
++      inc(errors);
++    end;
++end;
++
++function mine(v: int64): EMine;
++begin
++  result := EMine.Create('mine');
++  result.v := v;
++end;
++
++{ then branch raises, many values live across it }
++function sum(n: longint): int64;
++var
++  i: longint;
++  a, b, c, d: int64;
++begin
++  a := 1; b := 2; c := 3; d := 4;
++  for i := 1 to n do
++    begin
++      if i > 1000000 then
++        raise mine(a + b + c + d);
++      a := a + b; b := b xor i; c := c + a * 3; d := d - c + i;
++    end;
++  result := a + b * 3 + c * 5 + d * 7;
++end;
++
++function sumw(n: longint): int64;
++var
++  i: longint;
++  a, b, c, d: int64;
++begin
++  a := 1; b := 2; c := 3; d := 4;
++  i := 1;
++  while i <= n do
++    begin
++      a := a + b; b := b xor i; c := c + a * 3; d := d - c + i;
++      inc(i);
++    end;
++  result := a + b * 3 + c * 5 + d * 7;
++end;
++
++{ else branch raises, the exception carries values computed in the loop }
++function find(n, stop: longint): int64;
++var
++  i: longint;
++  acc: int64;
++begin
++  acc := 0;
++  result := -1;
++  try
++    for i := 1 to n do
++      begin
++        acc := acc + i * i;
++        if i <> stop then
++          inc(acc)
++        else
++          raise mine(acc * 10 + i);
++      end;
++    result := acc;
++  except
++    on e: EMine do
++      result := e.v;
++  end;
++end;
++
++{ nested: the inner if raises, the outer continues }
++function nested(a, b: longint): longint;
++begin
++  result := 0;
++  if a > 0 then
++    begin
++      if b < 0 then
++        raise mine(a);
++      result := a + b;
++    end
++  else
++    result := -a;
++end;
++
++{ finally runs when the out of line branch raises }
++function withfinally(a: longint; var log: longint): longint;
++begin
++  result := 0;
++  try
++    if a = 3 then
++      raise mine(a);
++    result := a * 2;
++  finally
++    log := log * 10 + a;
++  end;
++end;
++
++var
++  i, log: longint;
++  r: int64;
++begin
++  for i := 0 to 50 do
++    check(sum(i), sumw(i), 'sum');
++  check(find(10, 20), 395, 'find no raise');
++  check(find(10, 4), 33 * 10 + 4, 'find raise');
++  check(nested(3, 4), 7, 'nested');
++  check(nested(-3, 4), 3, 'nested else');
++  r := 0;
++  try
++    nested(5, -1);
++  except
++    on e: EMine do
++      r := e.v;
++  end;
++  check(r, 5, 'nested raise');
++  log := 0;
++  r := 0;
++  for i := 1 to 4 do
++    try
++      r := r + withfinally(i, log);
++    except
++      on e: EMine do
++        r := r + 100 * e.v;
++    end;
++  check(r, 2 + 4 + 300 + 8, 'finally result');
++  check(log, 1234, 'finally log');
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.
