@@ -77,12 +77,40 @@ esac
 tag=$(echo "$ident" | sed 's/+/-b/')
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fpc-toolchain.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT INT TERM
+# an interrupt stops the install (and the EXIT trap cleans up) instead of returning into a retry loop
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# download URL FILE, up to 4 attempts (as install.ps1, with the same HTTP statuses). Retried: HTTP
+# 408/429/500/502/503/504, and a failure without an HTTP error if it is a network one (a host that cannot be
+# resolved or reached, a refused connection, a timeout or a transfer stalled for 60s, a failed TLS handshake,
+# a cut-off transfer). Everything else is final, such as a 404 for a release that does not exist. The status
+# is read from the response rather than the exit code: curl reports an HTTP error as exit 22 over HTTP/1.1
+# but often 56 over HTTP/2, and its own --retry then skips a 5xx, which is why this loop does all the
+# retrying. Sets $http to the status.
+download() {
+  try=1
+  while :; do
+    rc=0
+    http=$(curl -fsSL --connect-timeout 20 --speed-limit 1 --speed-time 60 -w '%{http_code}' -o "$2" "$1") || rc=$?
+    http=${http:-000}
+    if [ "$rc" = 0 ]; then return 0; fi
+    if [ "$http" -ge 400 ]; then
+      case $http in 408|429|500|502|503|504) ;; *) return "$rc" ;; esac
+    else
+      case $rc in 5|6|7|16|18|28|35|52|55|56|92) ;; *) return "$rc" ;; esac
+    fi
+    if [ "$try" -ge 4 ]; then return "$rc"; fi
+    echo "install.sh: download failed (curl exit $rc, HTTP $http), retrying in $((try * 2))s: $1" >&2
+    sleep $((try * 2)); try=$((try + 1))
+  done
+}
 
 assetid=; base=; sums=
 fetch() { # fetch ASSET -> $tmp/ASSET, verified against SHA256SUMS
   [ -f "$tmp/$1" ] && return 0
-  if [ -n "$base" ]; then curl -fsSL --retry 3 -o "$tmp/$1" "$base/$1" || die "download $base/$1 failed"
+  if [ -n "$base" ]; then download "$base/$1" "$tmp/$1" || die "download $base/$1 failed (curl exit $?, HTTP $http)"
   elif [ -f "$srcdir/$1" ]; then cp "$srcdir/$1" "$tmp/$1"
   else die "no $1 next to $from"; fi
   if [ -n "$sums" ]; then
@@ -97,7 +125,11 @@ if [ -z "$from" ] && [ -z "$fromdir" ]; then
   [ -n "$repo" ] || repo=frostney/fpc-toolchain
   assetid="fpc-$tag"
   base="https://github.com/$repo/releases/download/$tag"
-  curl -fsSL --retry 3 -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || die "no SHA256SUMS in release $ident of $repo"
+  download "$base/SHA256SUMS" "$tmp/SHA256SUMS" || {
+    rc=$?
+    [ "$http" != 404 ] || die "no SHA256SUMS at $base (HTTP 404): is $tag a release of $repo?"
+    die "download $base/SHA256SUMS failed (curl exit $rc, HTTP $http)"
+  }
   if [ -n "$sumsha" ]; then [ "$(sha256 "$tmp/SHA256SUMS")" = "$sumsha" ] || die "SHA256SUMS of $ident does not match the pinned sha256sums"; fi
   sums=$tmp/SHA256SUMS
   echo "downloading $base/$assetid-$host.tar.xz" >&2
