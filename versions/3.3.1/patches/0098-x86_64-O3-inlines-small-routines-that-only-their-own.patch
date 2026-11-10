@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 10:44:00 +0000
-Subject: [PATCH 098/118] x86_64: -O3 inlines small routines that only their
+Subject: [PATCH 098/119] x86_64: -O3 inlines small routines that only their
  own unit or program can call
 
 A C compiler inlines small static functions at -O2; FPC inlined only what

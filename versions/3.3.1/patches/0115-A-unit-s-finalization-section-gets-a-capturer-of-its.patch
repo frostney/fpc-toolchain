@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 17:43:50 +0000
-Subject: [PATCH 115/118] A unit's finalization section gets a capturer of its
+Subject: [PATCH 115/119] A unit's finalization section gets a capturer of its
  own
 
 The capturers of the initialization and finalization sections of a unit

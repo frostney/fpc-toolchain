@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Tue, 10 Nov 2026 21:53:13 +0000
+Subject: [PATCH 119/119] Node DFA with exception edges: the if node's life is
+ a copy before the condition's definitions are removed
+
+CreateInfo took l:=node.optinfo^.life for an if node, which shares the
+dynamic array with the node's life, and then removed the definitions of the
+condition from l, so from the node's life in place. updatelifeinfo of a node
+in a protected block adds the life at the exception successor to l, which
+puts a variable that the condition defines and the handler reads (a result
+passed as an out parameter in a try..finally) back into the life, and the
+next pass removed it again in place: every pass reported a change and the
+solver did not finish (-O2 -OoDFA, -O3, -O4). l is a copy now.
+tests/test/opt/tdfaexc1.pp.
+---
+ compiler/optdfa.pas        |  8 ++++++--
+ tests/test/opt/tdfaexc1.pp | 35 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 41 insertions(+), 2 deletions(-)
+ create mode 100644 tests/test/opt/tdfaexc1.pp
+
+diff --git a/compiler/optdfa.pas b/compiler/optdfa.pas
+index 5e53f0f3..37bfdfad 100644
+--- a/compiler/optdfa.pas
++++ b/compiler/optdfa.pas
+@@ -466,8 +466,12 @@ unit optdfa;
+                 CreateInfo(tifnode(node).right);
+                 CreateInfo(tifnode(node).t1);
+ 
+-                { ensure that we don't remove life info }
+-                l:=node.optinfo^.life;
++                { ensure that we don't remove life info; a copy, because the
++                  definitions of the condition are removed from l below and
++                  must not be removed from the node's life in place:
++                  updatelifeinfo adds the life at the exception successor
++                  back, and the solver then never sees a fixed point }
++                l:=copy(node.optinfo^.life);
+ 
+                 { get life info from then branch }
+                 if assigned(tifnode(node).right) then
+diff --git a/tests/test/opt/tdfaexc1.pp b/tests/test/opt/tdfaexc1.pp
+new file mode 100644
+index 00000000..cf645bee
+--- /dev/null
++++ b/tests/test/opt/tdfaexc1.pp
+@@ -0,0 +1,35 @@
++{ %OPT=-O2 -OoDFA }
++{ node DFA with exception edges: the life information of a procedure with
++  try..finally must reach a fixed point when the function result is passed
++  as an out parameter in the protected block (the compiler did not finish) }
++program tdfaexc1;
++
++{$mode objfpc}
++
++var
++  g: pointer;
++
++function get(out o: pointer): boolean;
++  begin
++    o:=nil;
++    result:=true;
++  end;
++
++function f: pointer;
++  begin
++    try
++      if get(result) then
++        result:=nil;
++    finally
++      g:=nil;
++    end;
++  end;
++
++begin
++  g:=@g;
++  if f<>nil then
++    halt(1);
++  if g<>nil then
++    halt(2);
++  writeln('ok');
++end.

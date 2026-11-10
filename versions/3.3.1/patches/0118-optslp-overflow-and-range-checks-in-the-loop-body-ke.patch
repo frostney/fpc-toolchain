@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 19:22:13 +0000
-Subject: [PATCH 118/118] optslp: overflow and range checks in the loop body
+Subject: [PATCH 118/119] optslp: overflow and range checks in the loop body
  keep loads in the loop
 
 A statement compiled with {$Q+} or {$R+} inside a loop raised its
