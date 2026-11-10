@@ -70,9 +70,30 @@ function ReadSums([string]$file) {
     if ($p.Count -ge 2) { $script:sums[$p[1].TrimStart('*')] = $p[0].ToLower() }
   }
 }
+# Invoke-WebRequest with retries (Windows PowerShell 5.1 has none), up to 4 attempts as in install.sh's
+# download: a failure without an HTTP response (a connection that is refused, unreachable or cut off) and
+# HTTP 408/429/500/502/503/504 (install.sh retries the same statuses) are retried; any other HTTP error
+# (e.g. 404 for a release that does not exist) fails at once. Sets $script:httpCode to the last HTTP status
+# (0: no response).
+function Download([string]$uri, [string]$dst) {
+  for ($try = 1; ; $try++) {
+    $script:httpCode = 0
+    try { Invoke-WebRequest -Uri $uri -OutFile $dst; return }
+    catch {
+      $response = $_.Exception.Response
+      $code = if ($response) { [int]$response.StatusCode } else { 0 }
+      $script:httpCode = $code
+      if (($code -notin @(0, 408, 429, 500, 502, 503, 504)) -or $try -ge 4) {
+        throw "download $uri failed (HTTP $code): $($_.Exception.Message)"
+      }
+      Write-Warning "download failed ($($_.Exception.Message)), retrying in $($try * 2)s: $uri"
+      Start-Sleep -Seconds ($try * 2)
+    }
+  }
+}
 function Fetch([string]$asset) {
   $dst = Join-Path $tmp $asset
-  if ($script:base) { Invoke-WebRequest -Uri "$($script:base)/$asset" -OutFile $dst }
+  if ($script:base) { Download "$($script:base)/$asset" $dst }
   elseif (Test-Path (Join-Path $script:srcDir $asset)) { Copy-Item (Join-Path $script:srcDir $asset) $dst }
   else { throw "no $asset next to $From" }
   if ($script:sums.Count -gt 0) {
@@ -91,7 +112,11 @@ try {
     $assetId = "fpc-$Tag"
     $script:base = "https://github.com/$Repo/releases/download/$Tag"
     $sumsFile = Join-Path $tmp 'SHA256SUMS'
-    Invoke-WebRequest -Uri "$($script:base)/SHA256SUMS" -OutFile $sumsFile
+    try { Download "$($script:base)/SHA256SUMS" $sumsFile }
+    catch {
+      if ($script:httpCode -eq 404) { throw "no SHA256SUMS at $($script:base) (HTTP 404): is $Tag a release of ${Repo}?" }
+      throw
+    }
     if ($SumsSha256 -and ((Get-FileHash -Algorithm SHA256 $sumsFile).Hash.ToLower() -ne $SumsSha256.ToLower())) {
       throw "SHA256SUMS of $Identity does not match the pinned sha256sums"
     }
