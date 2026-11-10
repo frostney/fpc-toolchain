@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 14:43:19 +0000
-Subject: [PATCH 103/119] Node DFA life information with exception edges for
+Subject: [PATCH 103/121] Node DFA life information with exception edges for
  the register variables of procedures with try
 
 Procedures with exception handling (pi_uses_exceptions) got no node DFA, so

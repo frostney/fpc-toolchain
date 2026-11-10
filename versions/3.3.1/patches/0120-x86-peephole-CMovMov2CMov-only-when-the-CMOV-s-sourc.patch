@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Tue, 10 Nov 2026 23:23:58 +0000
+Subject: [PATCH 120/121] x86 peephole CMovMov2CMov: only when the CMOV's
+ source register is unused up to the MOV
+
+OptPass1CMOVcc turns "cmov(c) %reg1,%reg2 ... mov %reg2,%reg1" into
+"cmov(~c) %reg2,%reg1" and removes the MOV. At -O3,
+GetNextInstructionUsingReg finds the MOV past instructions that do not use
+%reg2, so instructions in between could read or write %reg1, and the CMOV
+now wrote %reg1 too early: "L := Max(a, b)" for a register variable L
+followed by other statements left L in a register those statements
+overwrote, and later reads of L got their value. %reg1 must not be used
+between the two instructions now.
+tests/test/opt/tcmovmov1.pp.
+---
+ compiler/x86/aoptx86.pas    |  7 ++++-
+ tests/test/opt/tcmovmov1.pp | 53 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 59 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test/opt/tcmovmov1.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 89addf1a..b8600db6 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -2506,12 +2506,17 @@ unit aoptx86;
+ 
+           To:
+             cmov(~c) %reg2,%reg1
++
++          The CMOV then writes %reg1 where it stands, so %reg1 must not be
++          read or written between it and the MOV (at -O3,
++          GetNextInstructionUsingReg skips instructions that do not use %reg2).
+         }
+         if (taicpu(p).oper[0]^.typ = top_reg) then
+           while GetNextInstructionUsingReg(p, hp1, taicpu(p).oper[1]^.reg) and
+             MatchInstruction(hp1, A_MOV, [taicpu(p).opsize]) and
+             MatchOperand(taicpu(hp1).oper[0]^, taicpu(p).oper[1]^.reg) and
+-            MatchOperand(taicpu(hp1).oper[1]^, taicpu(p).oper[0]^.reg) do
++            MatchOperand(taicpu(hp1).oper[1]^, taicpu(p).oper[0]^.reg) and
++            not RegUsedBetween(taicpu(p).oper[0]^.reg, p, hp1) do
+             begin
+               TransferUsedRegs(TmpUsedRegs);
+               UpdateUsedRegsBetween(TmpUsedRegs, p, hp1);
+diff --git a/tests/test/opt/tcmovmov1.pp b/tests/test/opt/tcmovmov1.pp
+new file mode 100644
+index 00000000..93009e34
+--- /dev/null
++++ b/tests/test/opt/tcmovmov1.pp
+@@ -0,0 +1,53 @@
++{ %OPT=-O3 }
++{ x86 peephole optimizer (CMovMov2CMov): "cmov(c) %reg1,%reg2 ... mov %reg2,%reg1"
++  must not become "cmov(~c) %reg2,%reg1" when %reg1 is used in between; at -O3
++  the MOV is searched past instructions that do not use %reg2, and the inlined
++  Max/Min results were all left in one register }
++program tcmovmov1;
++
++{$mode objfpc}{$R+}
++uses
++  Math;
++type
++  TBox = class
++    Left, Top, Right, Bottom: Integer;
++    Mask: array of Byte;
++    function Coverage(const X, Y: Integer): Integer;
++  end;
++function TBox.Coverage(const X, Y: Integer): Integer;
++  begin
++    if (X < Left) or (Y < Top) or (X >= Right) or (Y >= Bottom) then
++      Exit(0);
++    Exit(255);
++  end;
++function Box(L, T, R, B: Integer): TBox;
++  begin
++    Result := TBox.Create;
++    Result.Left := L; Result.Top := T; Result.Right := R; Result.Bottom := B;
++  end;
++function Intersect(const A, B: TBox): TBox;
++  var
++    L, T, R, Bt, X, Y, W: Integer;
++  begin
++    L := Max(A.Left, B.Left);
++    T := Max(A.Top, B.Top);
++    R := Min(A.Right, B.Right);
++    Bt := Min(A.Bottom, B.Bottom);
++    Result := Box(L, T, R, Bt);
++    W := R - L;
++    SetLength(Result.Mask, W * (Bt - T));
++    for Y := T to Bt - 1 do
++      for X := L to R - 1 do
++        Result.Mask[(Y - T) * W + (X - L)] := A.Coverage(X, Y) * B.Coverage(X, Y) div 255;
++  end;
++var
++  c: TBox;
++begin
++  c := Intersect(Box(0, 0, 10, 10), Box(5, 5, 20, 20));
++  if (c.Left <> 5) or (c.Top <> 5) or (c.Right <> 10) or (c.Bottom <> 10) or (Length(c.Mask) <> 25) then
++    begin
++      writeln('wrong: ', c.Left, ' ', c.Top, ' ', c.Right, ' ', c.Bottom, ' ', Length(c.Mask));
++      halt(1);
++    end;
++  writeln('ok');
++end.
