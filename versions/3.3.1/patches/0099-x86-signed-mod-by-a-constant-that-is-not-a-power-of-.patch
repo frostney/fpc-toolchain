@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 00:32:48 +0000
-Subject: [PATCH 099/121] x86: signed mod by a constant that is not a power of
+Subject: [PATCH 099/122] x86: signed mod by a constant that is not a power of
  2 multiplies by the magic number
 
 The signed divn by such a constant already uses calc_divconst_magic_signed;

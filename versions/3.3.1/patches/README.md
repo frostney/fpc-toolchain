@@ -30,7 +30,10 @@ hung the compiler at `-O2 -OoDFA`, `-O3` and `-O4`), and a set that grows is alw
 of trunk itself, not reported upstream yet: 0120 (`CMovMov2CMov` at `-O3`: a CMOV wrote its source register while
 instructions before the MOV it replaced still used it; 0089 made it reachable in procedures with exception
 handling) and 0121 (`LeaOp2Op` at `-O1` dropped the `@tpoff` relocation of a threadvar, which only the section
-threadvars of this build reach). `toolchain.conf` pins the resulting tree
+threadvars of this build reach). 0122 fixes 0107: a register that a branch placed out of line used first (the
+counter of a loop in a raise or halt branch near the start of a routine, which a later loop uses again) had its
+live range start in that code, after the routine's end, so the register allocator gave its register to other values
+everywhere before (wrong code at `-O2` and above). `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
 To take a new series from a branch built on the same base:
