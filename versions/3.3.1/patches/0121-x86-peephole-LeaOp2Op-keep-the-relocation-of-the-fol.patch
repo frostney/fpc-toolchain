@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Tue, 10 Nov 2026 23:57:07 +0000
+Subject: [PATCH 121/121] x86 peephole LeaOp2Op: keep the relocation of the
+ folded LEA's symbol
+
+LeaOp2Op folds "lea <ref1>,reg1; <op> ...<ref with reg1>..." into
+"<op> ...<ref1 merged in>...". It moved base, index, symbol, relsymbol,
+scale factor and offset, but not refaddr, so "lea sym@tpoff(%rax),%rax;
+lea 8(%rax),%rdx" became "lea sym+8(%rax),%rdx": the absolute address of
+sym was added to the thread pointer instead of its TLS offset. With
+section threadvars (an x86_64-linux compiler built with -dtls_threadvars)
+a store to a field of a threadvar record at -O1 then wrote to a wild
+address. The fold now carries refaddr over, and is not done when both
+references have one.
+tests/test/opt/tpeeptls1.pp.
+---
+ compiler/x86/aoptx86.pas    |  4 +++
+ tests/test/opt/tpeeptls1.pp | 51 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 55 insertions(+)
+ create mode 100644 tests/test/opt/tpeeptls1.pp
+
+diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
+index 30886acb..63c1db8f 100644
+--- a/compiler/x86/aoptx86.pas
++++ b/compiler/x86/aoptx86.pas
+@@ -7202,6 +7202,8 @@ unit aoptx86;
+                   ((taicpu(p).oper[0]^.ref^.index=NR_NO) or (taicpu(hp1).oper[ref]^.ref^.index=NR_NO)) and
+                   ((taicpu(p).oper[0]^.ref^.symbol=nil) or (taicpu(hp1).oper[ref]^.ref^.symbol=nil)) and
+                   ((taicpu(p).oper[0]^.ref^.relsymbol=nil) or (taicpu(hp1).oper[ref]^.ref^.relsymbol=nil)) and
++                  { the relocation of the symbol (@tpoff, @ntpoff) goes with it }
++                  ((taicpu(p).oper[0]^.ref^.refaddr=addr_no) or (taicpu(hp1).oper[ref]^.ref^.refaddr=addr_no)) and
+                   ((taicpu(p).oper[0]^.ref^.scalefactor <= 1) or (taicpu(hp1).oper[ref]^.ref^.scalefactor <= 1)) and
+                   (taicpu(p).oper[0]^.ref^.segment=NR_NO) and (taicpu(hp1).oper[ref]^.ref^.segment=NR_NO)
+ {$ifdef x86_64}
+@@ -7229,6 +7231,8 @@ unit aoptx86;
+                               taicpu(hp1).oper[ref]^.ref^.symbol:=taicpu(p).oper[0]^.ref^.symbol;
+                             if taicpu(p).oper[0]^.ref^.relsymbol<>nil then
+                               taicpu(hp1).oper[ref]^.ref^.relsymbol:=taicpu(p).oper[0]^.ref^.relsymbol;
++                            if taicpu(p).oper[0]^.ref^.refaddr<>addr_no then
++                              taicpu(hp1).oper[ref]^.ref^.refaddr:=taicpu(p).oper[0]^.ref^.refaddr;
+                             if taicpu(p).oper[0]^.ref^.scalefactor > 1 then
+                               taicpu(hp1).oper[ref]^.ref^.scalefactor:=taicpu(p).oper[0]^.ref^.scalefactor;
+                             inc(taicpu(hp1).oper[ref]^.ref^.offset,taicpu(p).oper[0]^.ref^.offset);
+diff --git a/tests/test/opt/tpeeptls1.pp b/tests/test/opt/tpeeptls1.pp
+new file mode 100644
+index 00000000..9c02ddb9
+--- /dev/null
++++ b/tests/test/opt/tpeeptls1.pp
+@@ -0,0 +1,51 @@
++{ %OPT=-O1 }
++{ x86 peephole optimizer (LeaOp2Op): folding "lea sym@tpoff(%reg1),%reg2"
++  into the reference of the next instruction must keep the @tpoff (on i386
++  @ntpoff) relocation. Without it, the store to R.B went to the thread
++  pointer plus the absolute address of R. Only compilers that keep threadvars in ELF TLS
++  sections (built with -dtls_threadvars) generate such a LEA; elsewhere the
++  test passes trivially. }
++program tpeeptls1;
++
++type
++  TRec = packed record
++    A: Pointer;
++    B: Pointer;
++    case Boolean of
++      False: (F1, F2, F3, F4: Boolean);
++      True: (Any: UInt32);
++  end;
++  TState = record
++    Deadline: Int64;
++    Mask: Integer;
++  end;
++  PState = ^TState;
++
++threadvar
++  R: TRec;
++  S: TState;
++
++procedure Store;
++var
++  p: PState;
++begin
++  p := @S;
++  p^.Deadline := 0;
++  if p^.Deadline = 0 then
++    p^.Mask := 1
++  else
++    p^.Mask := 0;
++  R.B := p;
++  R.F1 := p^.Deadline <> 0;
++end;
++
++begin
++  Store;
++  if R.B <> @S then
++    halt(1);
++  if R.F1 then
++    halt(2);
++  if S.Mask <> 1 then
++    halt(3);
++  writeln('ok');
++end.

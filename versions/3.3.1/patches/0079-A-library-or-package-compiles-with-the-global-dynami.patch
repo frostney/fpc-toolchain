@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 6 Nov 2026 14:58:13 +0000
-Subject: [PATCH 079/119] A library or package compiles with the global-dynamic
+Subject: [PATCH 079/121] A library or package compiles with the global-dynamic
  TLS model
 
 With section threadvars (Linux x86_64, i386 and arm when the compiler is

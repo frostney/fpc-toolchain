@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 15:40:36 +0000
-Subject: [PATCH 108/119] Signed div/mod by powers of 2 of a non-negative
+Subject: [PATCH 108/121] Signed div/mod by powers of 2 of a non-negative
  dividend become shr/and
 
 A signed x div 2^k needs a correction for negative x before the shift (and

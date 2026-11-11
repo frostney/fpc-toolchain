@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 18:33:44 +0000
-Subject: [PATCH 116/119] compiler: review fixes for the 2026 optimisations
+Subject: [PATCH 116/121] compiler: review fixes for the 2026 optimisations
 
 Restrict SLP pointer provenance to locals whose pointee is provably the
 same object, hoist only unconditionally evaluated loads, keep the negated

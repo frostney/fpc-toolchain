@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 00:53:46 +0000
-Subject: [PATCH 084/119] Register variables in procedures with
+Subject: [PATCH 084/121] Register variables in procedures with
  try..except/try..finally where it is safe
 
 A procedure with an explicit exception frame got no register variables at
