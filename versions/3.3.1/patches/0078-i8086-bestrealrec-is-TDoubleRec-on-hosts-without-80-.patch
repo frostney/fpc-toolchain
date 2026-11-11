@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Fri, 23 Oct 2026 10:57:19 +0100
-Subject: [PATCH 078/118] i8086: bestrealrec is TDoubleRec on hosts without
+Subject: [PATCH 078/119] i8086: bestrealrec is TDoubleRec on hosts without
  80-bit Extended
 
 compiler/i8086/cpuinfo.pas declares bestrealrec = TExtended80Rec

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 01:34:23 +0000
-Subject: [PATCH 088/118] Inlining a routine with try..except/finally keeps its
+Subject: [PATCH 088/119] Inlining a routine with try..except/finally keeps its
  locals and result in memory
 
 CreateInlineInfo copies the procinfo flags before the first pass, which is

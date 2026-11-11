@@ -23,7 +23,10 @@ functions nested in anonymous functions of the main block or of initialization/f
 #40316) and anonymous functions in both sections of a unit. 0116-0118 complete 0080-0113 after review: SLP pointer
 provenance, the target gating above, and loads that move before a loop only when nothing can tell (not past an
 inline routine that writes them, a label, or a statement of the first iteration that can raise an exception first,
-such as a division or a statement with overflow or range checks). `toolchain.conf` pins the resulting tree
+such as a division or a statement with overflow or range checks). 0119 lets the node DFA of 0103 finish: life sets
+are computed in copies, never in a node's own set, so a variable that an `if` condition defines and an exception
+handler reads no longer changes on every pass (a function result passed as an `out` parameter in a `try..finally`
+hung the compiler at `-O2 -OoDFA`, `-O3` and `-O4`), and a set that grows is always seen as a change. `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
 To take a new series from a branch built on the same base:

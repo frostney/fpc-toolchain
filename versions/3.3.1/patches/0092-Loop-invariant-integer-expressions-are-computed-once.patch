@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 07:56:46 +0000
-Subject: [PATCH 092/118] Loop invariant integer expressions are computed once
+Subject: [PATCH 092/119] Loop invariant integer expressions are computed once
  before the loop
 
 optloop.optimize_loop_invariants (-O3, with the store promotion's loop

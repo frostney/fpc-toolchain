@@ -1,0 +1,183 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Tue, 10 Nov 2026 22:16:11 +0000
+Subject: [PATCH 119/119] Node DFA with exception edges: compute life sets in
+ copies, never in a node's own set
+
+CreateInfo took l:=node.optinfo^.life (and the use set or the loop body's
+life) for if, block, case, exit and while nodes and calclife, which shares
+the dynamic array, and then changed l: so it changed the node's own set in
+place. updatelifeinfo then compared the node's set with itself. For an if
+node, the definitions of the condition were removed in place; updatelifeinfo
+of a node in a protected block adds the life at the exception successor,
+which put a variable that the condition defines and the handler reads (a
+result or local passed as an out parameter, in try..finally or try..except)
+back, and the next pass removed it again: every pass reported a change and
+the solver did not finish (-O2 -OoDFA, -O3, -O4). Where l only grew, the
+growth was not reported as a change, so the solver could stop before the
+fixed point that the register variable rule of procedures with exception
+handling relies on. l is a copy everywhere now.
+tests/test/opt/tdfaexc1.pp.
+---
+ compiler/optdfa.pas        | 18 +++++---
+ tests/test/opt/tdfaexc1.pp | 87 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 98 insertions(+), 7 deletions(-)
+ create mode 100644 tests/test/opt/tdfaexc1.pp
+
+diff --git a/compiler/optdfa.pas b/compiler/optdfa.pas
+index 5e53f0f3..37d18ac8 100644
+--- a/compiler/optdfa.pas
++++ b/compiler/optdfa.pas
+@@ -233,7 +233,7 @@ unit optdfa;
+               end
+             else
+               begin
+-                l:=n.optinfo^.use;
++                l:=copy(n.optinfo^.use);
+                 DynSetIncludeSet(l,n.optinfo^.life);
+               end;
+             updatelifeinfo(n,l);
+@@ -308,7 +308,7 @@ unit optdfa;
+                 node.optinfo^.life:=save;
+ 
+                 { for while loops, node use set is included at the beginning of loop }
+-                l:=twhilerepeatnode(node).right.optinfo^.life;
++                l:=copy(twhilerepeatnode(node).right.optinfo^.life);
+                 if lnf_testatbegin in twhilerepeatnode(node).loopflags then
+                   begin
+                     DynSetIncludeSet(l,node.optinfo^.use);
+@@ -444,7 +444,7 @@ unit optdfa;
+               begin
+                 CreateInfo(tblocknode(node).statements);
+                 { ensure that we don't remove life info }
+-                l:=node.optinfo^.life;
++                l:=copy(node.optinfo^.life);
+                 if assigned(node.successor) then
+                   DynSetIncludeSet(l,node.successor.optinfo^.life);
+                 UpdateLifeInfo(node,l);
+@@ -466,8 +466,12 @@ unit optdfa;
+                 CreateInfo(tifnode(node).right);
+                 CreateInfo(tifnode(node).t1);
+ 
+-                { ensure that we don't remove life info }
+-                l:=node.optinfo^.life;
++                { ensure that we don't remove life info; a copy, because the
++                  definitions of the condition are removed from l below and
++                  must not be removed from the node's life in place:
++                  updatelifeinfo adds the life at the exception successor
++                  back, and the solver then never sees a fixed point }
++                l:=copy(node.optinfo^.life);
+ 
+                 { get life info from then branch }
+                 if assigned(tifnode(node).right) then
+@@ -510,7 +514,7 @@ unit optdfa;
+                 CreateInfo(tcasenode(node).elseblock);
+ 
+                 { ensure that we don't remove life info }
+-                l:=node.optinfo^.life;
++                l:=copy(node.optinfo^.life);
+ 
+                 { get life info from case branches }
+                 for i:=0 to tcasenode(node).blocks.count-1 do
+@@ -544,7 +548,7 @@ unit optdfa;
+                   use the faked resultnode }
+                 if assigned(node.successor) then
+                   begin
+-                    l:=node.optinfo^.life;
++                    l:=copy(node.optinfo^.life);
+                     DynSetIncludeSet(l,node.successor.optinfo^.life);
+                     UpdateLifeInfo(node,l);
+                   end
+diff --git a/tests/test/opt/tdfaexc1.pp b/tests/test/opt/tdfaexc1.pp
+new file mode 100644
+index 00000000..ba338e38
+--- /dev/null
++++ b/tests/test/opt/tdfaexc1.pp
+@@ -0,0 +1,87 @@
++{ %OPT=-O2 -OoDFA }
++{ node DFA with exception edges: the life information of a procedure with
++  try..finally or try..except must reach a fixed point when a variable that
++  an if condition defines (here through an out parameter) is read where an
++  exception continues (the compiler did not finish) }
++program tdfaexc1;
++
++{$mode objfpc}
++
++var
++  g: pointer;
++
++function get(out o: pointer): boolean;
++  begin
++    o:=nil;
++    result:=true;
++  end;
++
++{ the result, try..finally }
++function f1: pointer;
++  begin
++    try
++      if get(result) then
++        result:=nil;
++    finally
++      g:=nil;
++    end;
++  end;
++
++{ the result, try..except }
++function f2: pointer;
++  begin
++    try
++      if get(result) then
++        result:=nil;
++    except
++      g:=result;
++    end;
++  end;
++
++{ a local variable read in the finally block }
++function f3: pointer;
++  var
++    p: pointer;
++  begin
++    p:=@g;
++    try
++      if get(p) then
++        result:=p
++      else
++        result:=@p;
++    finally
++      g:=p;
++    end;
++  end;
++
++{ exit from the protected block }
++function f4: pointer;
++  var
++    p: pointer;
++  begin
++    p:=@g;
++    try
++      if get(p) and get(result) then
++        exit(p);
++      result:=@g;
++    finally
++      g:=p;
++    end;
++  end;
++
++begin
++  g:=@g;
++  if f1<>nil then
++    halt(1);
++  if g<>nil then
++    halt(2);
++  if f2<>nil then
++    halt(3);
++  g:=@g;
++  if (f3<>nil) or (g<>nil) then
++    halt(4);
++  g:=@g;
++  if (f4<>nil) or (g<>nil) then
++    halt(5);
++  writeln('ok');
++end.
