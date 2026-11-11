@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
-Date: Tue, 10 Nov 2026 23:23:58 +0000
+Date: Tue, 10 Nov 2026 23:57:07 +0000
 Subject: [PATCH 120/121] x86 peephole CMovMov2CMov: only when the CMOV's
  source register is unused up to the MOV
 
@@ -11,16 +11,17 @@ GetNextInstructionUsingReg finds the MOV past instructions that do not use
 now wrote %reg1 too early: "L := Max(a, b)" for a register variable L
 followed by other statements left L in a register those statements
 overwrote, and later reads of L got their value. %reg1 must not be used
-between the two instructions now.
+between the two instructions now, and it stays allocated from the CMOV to
+where the MOV was.
 tests/test/opt/tcmovmov1.pp.
 ---
- compiler/x86/aoptx86.pas    |  7 ++++-
+ compiler/x86/aoptx86.pas    | 11 +++++++-
  tests/test/opt/tcmovmov1.pp | 53 +++++++++++++++++++++++++++++++++++++
- 2 files changed, 59 insertions(+), 1 deletion(-)
+ 2 files changed, 63 insertions(+), 1 deletion(-)
  create mode 100644 tests/test/opt/tcmovmov1.pp
 
 diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
-index 89addf1a..b8600db6 100644
+index 89addf1a..30886acb 100644
 --- a/compiler/x86/aoptx86.pas
 +++ b/compiler/x86/aoptx86.pas
 @@ -2506,12 +2506,17 @@ unit aoptx86;
@@ -42,6 +43,17 @@ index 89addf1a..b8600db6 100644
              begin
                TransferUsedRegs(TmpUsedRegs);
                UpdateUsedRegsBetween(TmpUsedRegs, p, hp1);
+@@ -2527,6 +2532,10 @@ unit aoptx86;
+ 
+                   taicpu(p).condition := inverse_cond(taicpu(p).condition);
+ 
++                  { %reg1 is now written at p: keep it allocated up to the MOV }
++                  TransferUsedRegs(TmpUsedRegs);
++                  AllocRegBetween(taicpu(p).oper[1]^.reg, p, hp1, TmpUsedRegs);
++
+                   RemoveInstruction(hp1);
+ 
+                   { It's still a CMOV, so we can look further ahead }
 diff --git a/tests/test/opt/tcmovmov1.pp b/tests/test/opt/tcmovmov1.pp
 new file mode 100644
 index 00000000..93009e34

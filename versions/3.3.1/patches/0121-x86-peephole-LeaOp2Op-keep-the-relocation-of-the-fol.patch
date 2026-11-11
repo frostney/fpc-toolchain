@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
-Date: Tue, 10 Nov 2026 23:45:37 +0000
+Date: Tue, 10 Nov 2026 23:57:07 +0000
 Subject: [PATCH 121/121] x86 peephole LeaOp2Op: keep the relocation of the
  folded LEA's symbol
 
@@ -21,10 +21,10 @@ tests/test/opt/tpeeptls1.pp.
  create mode 100644 tests/test/opt/tpeeptls1.pp
 
 diff --git a/compiler/x86/aoptx86.pas b/compiler/x86/aoptx86.pas
-index b8600db6..7b579d75 100644
+index 30886acb..63c1db8f 100644
 --- a/compiler/x86/aoptx86.pas
 +++ b/compiler/x86/aoptx86.pas
-@@ -7198,6 +7198,8 @@ unit aoptx86;
+@@ -7202,6 +7202,8 @@ unit aoptx86;
                    ((taicpu(p).oper[0]^.ref^.index=NR_NO) or (taicpu(hp1).oper[ref]^.ref^.index=NR_NO)) and
                    ((taicpu(p).oper[0]^.ref^.symbol=nil) or (taicpu(hp1).oper[ref]^.ref^.symbol=nil)) and
                    ((taicpu(p).oper[0]^.ref^.relsymbol=nil) or (taicpu(hp1).oper[ref]^.ref^.relsymbol=nil)) and
@@ -33,7 +33,7 @@ index b8600db6..7b579d75 100644
                    ((taicpu(p).oper[0]^.ref^.scalefactor <= 1) or (taicpu(hp1).oper[ref]^.ref^.scalefactor <= 1)) and
                    (taicpu(p).oper[0]^.ref^.segment=NR_NO) and (taicpu(hp1).oper[ref]^.ref^.segment=NR_NO)
  {$ifdef x86_64}
-@@ -7225,6 +7227,8 @@ unit aoptx86;
+@@ -7229,6 +7231,8 @@ unit aoptx86;
                                taicpu(hp1).oper[ref]^.ref^.symbol:=taicpu(p).oper[0]^.ref^.symbol;
                              if taicpu(p).oper[0]^.ref^.relsymbol<>nil then
                                taicpu(hp1).oper[ref]^.ref^.relsymbol:=taicpu(p).oper[0]^.ref^.relsymbol;
@@ -44,15 +44,15 @@ index b8600db6..7b579d75 100644
                              inc(taicpu(hp1).oper[ref]^.ref^.offset,taicpu(p).oper[0]^.ref^.offset);
 diff --git a/tests/test/opt/tpeeptls1.pp b/tests/test/opt/tpeeptls1.pp
 new file mode 100644
-index 00000000..6ea7510c
+index 00000000..9c02ddb9
 --- /dev/null
 +++ b/tests/test/opt/tpeeptls1.pp
 @@ -0,0 +1,51 @@
 +{ %OPT=-O1 }
 +{ x86 peephole optimizer (LeaOp2Op): folding "lea sym@tpoff(%reg1),%reg2"
 +  into the reference of the next instruction must keep the @tpoff (on i386
-+  @ntpoff) relocation. Without it, the store to R.B went to the absolute
-+  address of R's TLS offset. Only compilers that keep threadvars in ELF TLS
++  @ntpoff) relocation. Without it, the store to R.B went to the thread
++  pointer plus the absolute address of R. Only compilers that keep threadvars in ELF TLS
 +  sections (built with -dtls_threadvars) generate such a LEA; elsewhere the
 +  test passes trivially. }
 +program tpeeptls1;
