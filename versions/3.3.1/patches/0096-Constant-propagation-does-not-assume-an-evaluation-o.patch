@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 12:12:32 +0000
-Subject: [PATCH 096/121] Constant propagation does not assume an evaluation
+Subject: [PATCH 096/122] Constant propagation does not assume an evaluation
  order inside an assignment
 
 replaceBasicAssign propagated a known value into both sides of an assignment

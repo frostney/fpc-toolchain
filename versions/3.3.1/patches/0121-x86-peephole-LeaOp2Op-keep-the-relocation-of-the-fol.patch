@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Tue, 10 Nov 2026 23:57:07 +0000
-Subject: [PATCH 121/121] x86 peephole LeaOp2Op: keep the relocation of the
+Subject: [PATCH 121/122] x86 peephole LeaOp2Op: keep the relocation of the
  folded LEA's symbol
 
 LeaOp2Op folds "lea <ref1>,reg1; <op> ...<ref with reg1>..." into

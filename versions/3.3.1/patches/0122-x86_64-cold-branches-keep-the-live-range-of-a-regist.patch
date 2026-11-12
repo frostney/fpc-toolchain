@@ -1,0 +1,225 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Wed, 11 Nov 2026 14:08:45 +0000
+Subject: [PATCH 122/122] x86_64 cold branches: keep the live range of a
+ register the cold code uses first
+
+Patch 0107 generates an if branch that ends in raise or another call that
+never returns into current_procinfo.coldcode and places it after the
+routine's code; register_cold_code registers the register uses of that
+code again so that their live ranges extend to it. The register allocator
+takes a register's live range from the first to the last instruction that
+used it in the order of code generation, and inserts its allocation before
+the first. A register that the cold code used first (the counter of a loop
+in a raise or halt branch near the start of the routine, which a loop
+further down uses again) kept its live range start in the cold code, now at
+the end of the routine: the allocator saw it free everywhere before and gave
+its register to other values there. At -O2, "for i := 0 to d.Count - 1 do
+if last.Values[d.Names[i]] <> d.ValueFromIndex[i] then ..." loaded the
+string ValueFromIndex returned into i's register and passed that as the
+index to the next call ("List index (1619053936) out of bounds").
+register_cold_code now moves the live range start of such a register back
+to its first use in the rest of the routine; a register only the cold code
+uses keeps its short range.
+tests/test/opt/tcoldraise2.pp.
+---
+ compiler/psub.pas             | 104 ++++++++++++++++++++++++++++++++--
+ tests/test/opt/tcoldraise2.pp |  62 ++++++++++++++++++++
+ 2 files changed, 162 insertions(+), 4 deletions(-)
+ create mode 100644 tests/test/opt/tcoldraise2.pp
+
+diff --git a/compiler/psub.pas b/compiler/psub.pas
+index da7df8e3..63a04506 100644
+--- a/compiler/psub.pas
++++ b/compiler/psub.pas
+@@ -1936,14 +1936,110 @@ implementation
+       first to the last instruction that used it in the order of code
+       generation; the cold code (generated in the middle of the body) is
+       placed at the end, so its uses are registered again here, which makes
+-      them the last ones }
++      them the last ones.
++      A register that the cold code used first in that order (the counter
++      of a loop in a raise branch near the start of the routine, used again
++      by a loop further down) also had its live range start in the cold
++      code, now at the end of the routine: the allocator saw it free
++      everywhere before and gave its register to other values there. Its
++      start goes back to its first use in the rest of the code (hot). }
+ {$ifdef x86_64}
+-    procedure register_cold_code(list: TAsmList);
++    procedure register_cold_code(list,hot: TAsmList);
+       var
+         hp: tai;
+-        i: longint;
++        i,k: longint;
+         oldweight: longint;
++        regs,firsthot,coldinstrs: TFPList;
++        r: tregister;
++        start: tai;
++
++      function key(reg: tregister): pointer;
++        begin
++          result:=pointer(ptruint(newreg(getregtype(reg),getsupreg(reg),R_SUBWHOLE)));
++        end;
++
++      procedure addcold(reg: tregister);
++        begin
++          if (reg<>NR_NO) and (regs.IndexOf(key(reg))<0) then
++            begin
++              regs.Add(key(reg));
++              firsthot.Add(nil);
++            end;
++        end;
++
++      procedure notehot(reg: tregister; instr: tai);
++        var
++          j: longint;
++        begin
++          if reg=NR_NO then
++            exit;
++          j:=regs.IndexOf(key(reg));
++          if (j>=0) and not assigned(firsthot[j]) then
++            firsthot[j]:=instr;
++        end;
++
+       begin
++        regs:=TFPList.Create;
++        firsthot:=TFPList.Create;
++        coldinstrs:=TFPList.Create;
++        hp:=tai(list.first);
++        while assigned(hp) do
++          begin
++            if hp.typ=ait_instruction then
++              begin
++                coldinstrs.Add(hp);
++                for i:=0 to taicpu(hp).ops-1 do
++                  with taicpu(hp).oper[i]^ do
++                    case typ of
++                      top_reg:
++                        addcold(reg);
++                      top_ref:
++                        begin
++                          addcold(ref^.base);
++                          addcold(ref^.index);
++                        end;
++                      else
++                        ;
++                    end;
++              end;
++            hp:=tai(hp.next);
++          end;
++        if regs.Count>0 then
++          begin
++            hp:=tai(hot.first);
++            while assigned(hp) do
++              begin
++                if hp.typ=ait_instruction then
++                  for i:=0 to taicpu(hp).ops-1 do
++                    with taicpu(hp).oper[i]^ do
++                      case typ of
++                        top_reg:
++                          notehot(reg,hp);
++                        top_ref:
++                          begin
++                            notehot(ref^.base,hp);
++                            notehot(ref^.index,hp);
++                          end;
++                        else
++                          ;
++                      end;
++                hp:=tai(hp.next);
++              end;
++            for k:=0 to regs.Count-1 do
++              if assigned(firsthot[k]) then
++                begin
++                  r:=tregister(ptruint(regs[k]));
++                  if not assigned(cg.rg[getregtype(r)]) then
++                    continue;
++                  { only imaginary registers have a live range }
++                  start:=cg.rg[getregtype(r)].live_start[getsupreg(r)];
++                  if assigned(start) and (coldinstrs.IndexOf(start)>=0) then
++                    cg.rg[getregtype(r)].live_start[getsupreg(r)]:=tai(firsthot[k]);
++                end;
++          end;
++        regs.Free;
++        firsthot.Free;
++        coldinstrs.Free;
+         oldweight:=cg.executionweight;
+         cg.executionweight:=0;
+         hp:=tai(list.first);
+@@ -2351,7 +2447,7 @@ implementation
+                 current_asmdata.getjumplabel(coldskiplabel);
+                 cg.a_jmp_always(aktproccode,coldskiplabel);
+ {$ifdef x86_64}
+-                register_cold_code(coldcode);
++                register_cold_code(coldcode,aktproccode);
+ {$endif x86_64}
+                 aktproccode.concatlist(coldcode);
+                 cg.a_label(aktproccode,coldskiplabel);
+diff --git a/tests/test/opt/tcoldraise2.pp b/tests/test/opt/tcoldraise2.pp
+new file mode 100644
+index 00000000..6b5f89bc
+--- /dev/null
++++ b/tests/test/opt/tcoldraise2.pp
+@@ -0,0 +1,62 @@
++{ %OPT=-O2 }
++{ a register that a branch placed out of line uses first (here the counter
++  of a loop in a raise branch near the start of the routine) stays live over
++  the rest of the routine: a later loop that uses the same counter keeps it
++  in its register across the calls of its body }
++program tcoldraise2;
++
++{$mode objfpc}{$H+}
++
++uses
++  sysutils, classes;
++
++function count_changed(ok: boolean; d, last, msgs: TStringList): longint;
++var
++  i: longint;
++  changed: TStringList;
++begin
++  if not ok then
++    begin
++      for i := 0 to msgs.Count - 1 do
++        writeln(msgs[i]);
++      raise Exception.Create('not ok');
++    end;
++  changed := TStringList.Create;
++  for i := 0 to d.Count - 1 do
++    if last.Values[d.Names[i]] <> d.ValueFromIndex[i] then
++      changed.Add(d.Names[i]);
++  result := changed.Count;
++  changed.Free;
++end;
++
++var
++  d, last, msgs: TStringList;
++  k, n: longint;
++begin
++  d := TStringList.Create;
++  last := TStringList.Create;
++  msgs := TStringList.Create;
++  for k := 0 to 40 do
++    begin
++      d.Add('/src/unit' + IntToStr(k) + '.pas=' + IntToHex(k * 7919, 16));
++      last.Add('/src/unit' + IntToStr(k) + '.pas=' + IntToHex(k * 7919 + Ord(k = 3), 16));
++    end;
++  try
++    n := count_changed(true, d, last, msgs);
++  except
++    on e: Exception do
++      begin
++        writeln('failed: ', e.ClassName, ': ', e.Message);
++        halt(1);
++      end;
++  end;
++  if n <> 1 then
++    begin
++      writeln('changed: got ', n, ', expected 1');
++      halt(1);
++    end;
++  d.Free;
++  last.Free;
++  msgs.Free;
++  writeln('ok');
++end.

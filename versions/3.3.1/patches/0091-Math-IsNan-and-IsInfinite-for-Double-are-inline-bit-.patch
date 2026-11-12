@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 7 Nov 2026 07:47:00 +0000
-Subject: [PATCH 091/121] Math: IsNan and IsInfinite for Double are inline bit
+Subject: [PATCH 091/122] Math: IsNan and IsInfinite for Double are inline bit
  tests
 
 They were calls that took the parameter apart through a record cast. Code

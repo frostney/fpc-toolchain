@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Tue, 10 Nov 2026 22:16:11 +0000
-Subject: [PATCH 119/121] Node DFA with exception edges: compute life sets in
+Subject: [PATCH 119/122] Node DFA with exception edges: compute life sets in
  copies, never in a node's own set
 
 CreateInfo took l:=node.optinfo^.life (and the use set or the loop body's
