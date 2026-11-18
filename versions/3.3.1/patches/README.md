@@ -33,7 +33,11 @@ handling) and 0121 (`LeaOp2Op` at `-O1` dropped the `@tpoff` relocation of a thr
 threadvars of this build reach). 0122 fixes 0107: a register that a branch placed out of line used first (the
 counter of a loop in a raise or halt branch near the start of a routine, which a later loop uses again) had its
 live range start in that code, after the routine's end, so the register allocator gave its register to other values
-everywhere before (wrong code at `-O2` and above). `toolchain.conf` pins the resulting tree
+everywhere before (wrong code at `-O2` and above). 0123 fixes trunk's internal x86 assembler: it took an
+instruction's segment override only from `segprefix`, which `loadref` sets, and an optimisation that puts a reference
+in place without it (MovLea2Add folds `mov %fs:B@tpoff,%edx; lea (%edx,%eax),%eax` into an `add`) lost the `%fs` of
+a section threadvar, so adding two threadvars at `-O1` read the second at an absolute address (runtime error 216).
+`toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
 To take a new series from a branch built on the same base:

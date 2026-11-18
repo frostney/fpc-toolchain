@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Wed, 18 Nov 2026 22:44:36 +0000
+Subject: [PATCH 123/123] x86 internal assembler: take a reference's segment
+ override when loadref did not set it
+
+loadref sets segprefix from a reference's segment. MovLea2Add folds
+"mov %fs:B@tpoff,%edx; lea (%edx,%eax),%eax" into "add %fs:B@tpoff,%eax"
+by moving the reference pointer to the ADD without loadref, so segprefix
+stayed NR_NO and the internal assembler wrote the ADD without its %fs
+prefix: the thread variable's TLS offset was read as an absolute address
+(runtime error 216). With section threadvars (an x86_64-linux compiler
+built with -dtls_threadvars) adding two threadvars at -O1 failed this way.
+The GNU and Intel writers print the segment from the reference and were
+not affected. taicpu.Pass1 now takes the segment override from the
+instruction's reference when segprefix is unset, as loadref would have
+(string instructions and XLAT keep their own rule).
+tests/test/opt/tpeeptls2.pp.
+---
+ compiler/x86/aasmcpu.pas    | 16 ++++++++++++++++
+ tests/test/opt/tpeeptls2.pp | 28 ++++++++++++++++++++++++++++
+ 2 files changed, 44 insertions(+)
+ create mode 100644 tests/test/opt/tpeeptls2.pp
+
+diff --git a/compiler/x86/aasmcpu.pas b/compiler/x86/aasmcpu.pas
+index 7b4e9075..f261532d 100644
+--- a/compiler/x86/aasmcpu.pas
++++ b/compiler/x86/aasmcpu.pas
+@@ -2326,6 +2326,8 @@ implementation
+ 
+ 
+     function taicpu.Pass1(objdata:TObjData):longint;
++      var
++        i : longint;
+       begin
+         Pass1:=0;
+         { Save the old offset and set the new offset }
+@@ -2333,6 +2335,20 @@ implementation
+         { Error? }
+         if (Insentry=nil) and (InsSize=-1) then
+           exit;
++        { loadref sets segprefix from a reference's segment. An optimisation that
++          puts a reference in place without it (MovLea2Add moves the reference
++          pointer itself) leaves segprefix unset, and the instruction would lose
++          its segment override, e.g. the %fs of a section threadvar's @tpoff.
++          Take it from the reference, as the assembler writers do. }
++        if (segprefix=NR_NO) and (opcode<>A_XLAT) and
++           not is_x86_parameterized_string_op(opcode) then
++          for i:=0 to ops-1 do
++            if (oper[i]^.typ=top_ref) and (oper[i]^.ref^.segment<>NR_NO) and
++               (oper[i]^.ref^.segment<>get_default_segment_of_ref(oper[i]^.ref^)) then
++              begin
++                segprefix:=oper[i]^.ref^.segment;
++                break;
++              end;
+         { set the file position }
+         current_filepos:=fileinfo;
+         { Get InsEntry }
+diff --git a/tests/test/opt/tpeeptls2.pp b/tests/test/opt/tpeeptls2.pp
+new file mode 100644
+index 00000000..39017091
+--- /dev/null
++++ b/tests/test/opt/tpeeptls2.pp
+@@ -0,0 +1,28 @@
++{ %OPT=-O1 }
++{ x86 internal assembler: "mov %fs:B@tpoff,%edx; lea (%edx,%eax),%eax"
++  becomes "add %fs:B@tpoff,%eax" (MovLea2Add). The optimisation moves the
++  reference pointer to the ADD without loadref, which sets the segment
++  override, so the internal assembler wrote the ADD without its %fs prefix
++  and read the thread variable's TLS offset as an absolute address (runtime
++  error 216). Only compilers that keep threadvars in ELF TLS sections (built
++  with -dtls_threadvars) generate such a reference; elsewhere the test passes
++  trivially. }
++program tpeeptls2;
++
++{$mode objfpc}
++
++threadvar
++  CountA, CountB: Integer;
++
++function Sum: Integer; noinline;
++begin
++  Result := CountA + CountB;
++end;
++
++begin
++  CountA := 1;
++  CountB := 3;
++  if Sum <> 4 then
++    halt(1);
++  writeln('ok');
++end.
