@@ -46,6 +46,10 @@ for class helpers: the alias procsym a class helper's implementation makes for e
 so it has no dereference data, and the second dereference 0124 runs stopped with internal error 200611031; such an
 alias now only clears its list, which the helper's implementation dereference fills again
 (`tests/tppu/reloadhelper`).
+0127 makes the rest of that second dereference leave what one leaves: a generic constraint's interface list is
+rebuilt instead of appended to, a copied enum, record or object def and an overriding indexed property keep their
+counted reference to the shared symtable instead of taking another each time, and a class helper's alias gets each
+method once (`tests/tppu/reloadcopy`).
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
