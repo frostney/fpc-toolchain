@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Wed, 18 Nov 2026 22:44:36 +0000
-Subject: [PATCH 123/127] x86 internal assembler: take a reference's segment
+Subject: [PATCH 123/128] x86 internal assembler: take a reference's segment
  override when loadref did not set it
 
 loadref sets segprefix from a reference's segment. MovLea2Add folds

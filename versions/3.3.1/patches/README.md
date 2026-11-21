@@ -50,6 +50,9 @@ alias now only clears its list, which the helper's implementation dereference fi
 rebuilt instead of appended to, a copied enum, record or object def and an overriding indexed property keep their
 counted reference to the shared symtable instead of taking another each time, and a class helper's alias gets each
 method once (`tests/tppu/reloadcopy`).
+0128 limits that second dereference to the defs and syms the table had when it got its dereference data: one the
+first dereference added (the array type of a constant's data, such as `#$0100#$0101`) has none, and dereferencing
+it stopped with internal error 200306067.
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
