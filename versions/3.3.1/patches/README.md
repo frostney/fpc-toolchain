@@ -37,6 +37,10 @@ everywhere before (wrong code at `-O2` and above). 0123 fixes trunk's internal x
 instruction's segment override only from `segprefix`, which `loadref` sets, and an optimisation that puts a reference
 in place without it (MovLea2Add folds `mov %fs:B@tpoff,%edx; lea (%edx,%eax),%eax` into an `add`) lost the `%fs` of
 a section threadvar, so adding two threadvars at `-O1` read the second at an absolute address (runtime error 216).
+0124 is upstream's a7b0e8a265 (trunk #41970, after this base): when an incremental compile recompiles a used unit,
+the symbol tables already loaded from `.ppu` files are dereferenced again instead of keeping pointers into the
+freed old definitions, which made such a compile fail with "Compilation raised exception internally" or a type
+error between unrelated types. The two test programs the upstream commit adds as built binaries are left out.
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
