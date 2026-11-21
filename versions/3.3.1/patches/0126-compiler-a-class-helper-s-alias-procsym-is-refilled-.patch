@@ -1,0 +1,240 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 21 Nov 2026 22:52:25 +0000
+Subject: [PATCH 126/128] compiler: a class helper's alias procsym is refilled,
+ not dereferenced, when its symtable resolves again
+
+Re-resolving the symbol tables loaded from a ppu when a used unit is recompiled (a7b0e8a265)
+runs the interface dereference again. A class helper's alias procsym (CH$<name>,
+create_class_helper_for_procdef) is made when the helper's implementation is dereferenced
+and is not stored, so it has no dereference data, and tprocsym.deref stopped with internal
+error 200611031. Such an alias now only clears its procdef list; the helper's derefimpl fills
+it again.
+
+Test: tests/tppu/reloadhelper (TTestRecompile.TestReloadClassHelper), a loaded unit's class
+helper after control's new CRC recompiles base.
+---
+ compiler/symsym.pas                           | 11 +++++++-
+ tests/tppu/reloadhelper/ppus/.gitignore       |  1 +
+ tests/tppu/reloadhelper/reloadhelper_base.pas | 16 +++++++++++
+ .../tppu/reloadhelper/reloadhelper_child.pas  | 28 +++++++++++++++++++
+ tests/tppu/reloadhelper/reloadhelper_prg.pas  | 15 ++++++++++
+ .../src1/reloadhelper_control.pas             | 22 +++++++++++++++
+ .../src2/reloadhelper_control.pas             | 22 +++++++++++++++
+ tests/tppu/tcrecompile.pas                    | 28 +++++++++++++++++++
+ 8 files changed, 142 insertions(+), 1 deletion(-)
+ create mode 100644 tests/tppu/reloadhelper/ppus/.gitignore
+ create mode 100644 tests/tppu/reloadhelper/reloadhelper_base.pas
+ create mode 100644 tests/tppu/reloadhelper/reloadhelper_child.pas
+ create mode 100644 tests/tppu/reloadhelper/reloadhelper_prg.pas
+ create mode 100644 tests/tppu/reloadhelper/src1/reloadhelper_control.pas
+ create mode 100644 tests/tppu/reloadhelper/src2/reloadhelper_control.pas
+
+diff --git a/compiler/symsym.pas b/compiler/symsym.pas
+index b46cb69d..4de3dc15 100644
+--- a/compiler/symsym.pas
++++ b/compiler/symsym.pas
+@@ -1157,7 +1157,16 @@ implementation
+         { Clear all procdefs }
+         ProcdefList.Clear;
+         if not assigned(FProcdefDerefList) then
+-          internalerror(200611031);
++          begin
++            { a class helper's alias (create_class_helper_for_procdef) is made
++              when the helper's implementation is dereferenced and is not
++              stored, so it has no dereference data: when a recompiled unit
++              makes its symtable resolve again, the helper's derefimpl fills
++              it again }
++            if copy(name,1,length(class_helper_prefix))=class_helper_prefix then
++              exit;
++            internalerror(200611031);
++          end;
+         ProcdefList.capacity:=FProcdefDerefList.count;
+         for i:=0 to FProcdefDerefList.Count-1 do
+           begin
+diff --git a/tests/tppu/reloadhelper/ppus/.gitignore b/tests/tppu/reloadhelper/ppus/.gitignore
+new file mode 100644
+index 00000000..69cba048
+--- /dev/null
++++ b/tests/tppu/reloadhelper/ppus/.gitignore
+@@ -0,0 +1 @@
++reloadhelper_prg
+diff --git a/tests/tppu/reloadhelper/reloadhelper_base.pas b/tests/tppu/reloadhelper/reloadhelper_base.pas
+new file mode 100644
+index 00000000..b04d43e7
+--- /dev/null
++++ b/tests/tppu/reloadhelper/reloadhelper_base.pas
+@@ -0,0 +1,16 @@
++unit reloadhelper_base;
++
++{$mode objfpc}
++
++interface
++
++type
++  TBase = class
++    Value: LongInt;
++  end;
++
++implementation
++
++uses reloadhelper_control;
++
++end.
+diff --git a/tests/tppu/reloadhelper/reloadhelper_child.pas b/tests/tppu/reloadhelper/reloadhelper_child.pas
+new file mode 100644
+index 00000000..29172656
+--- /dev/null
++++ b/tests/tppu/reloadhelper/reloadhelper_child.pas
+@@ -0,0 +1,28 @@
++unit reloadhelper_child;
++
++{$mode objfpc}
++
++interface
++
++uses reloadhelper_base;
++
++type
++  TBaseHelper = class helper for TBase
++    function Twice: LongInt;
++  end;
++
++procedure Accept(Value: TBase);
++
++implementation
++
++function TBaseHelper.Twice: LongInt;
++begin
++  Result:=Value*2;
++end;
++
++procedure Accept(Value: TBase);
++begin
++  Value.Value:=42;
++end;
++
++end.
+diff --git a/tests/tppu/reloadhelper/reloadhelper_prg.pas b/tests/tppu/reloadhelper/reloadhelper_prg.pas
+new file mode 100644
+index 00000000..3e52134a
+--- /dev/null
++++ b/tests/tppu/reloadhelper/reloadhelper_prg.pas
+@@ -0,0 +1,15 @@
++program reloadhelper_prg;
++
++{$mode objfpc}
++
++uses reloadhelper_child, reloadhelper_control, reloadhelper_base;
++
++var
++  Value: TBase;
++begin
++  Value:=TBase.Create;
++  Test(Value);
++  if Value.Twice<>84 then
++    Halt(2);
++  Value.Free;
++end.
+diff --git a/tests/tppu/reloadhelper/src1/reloadhelper_control.pas b/tests/tppu/reloadhelper/src1/reloadhelper_control.pas
+new file mode 100644
+index 00000000..7d5bc7f9
+--- /dev/null
++++ b/tests/tppu/reloadhelper/src1/reloadhelper_control.pas
+@@ -0,0 +1,22 @@
++unit reloadhelper_control;
++
++{$mode objfpc}
++
++interface
++
++uses reloadhelper_base, reloadhelper_child;
++
++const Factor = 1;
++
++procedure Test(Value: TBase);
++
++implementation
++
++procedure Test(Value: TBase);
++begin
++  Accept(Value);
++  if Value.Twice<>84 then
++    Halt(1);
++end;
++
++end.
+diff --git a/tests/tppu/reloadhelper/src2/reloadhelper_control.pas b/tests/tppu/reloadhelper/src2/reloadhelper_control.pas
+new file mode 100644
+index 00000000..105d4bb7
+--- /dev/null
++++ b/tests/tppu/reloadhelper/src2/reloadhelper_control.pas
+@@ -0,0 +1,22 @@
++unit reloadhelper_control;
++
++{$mode objfpc}
++
++interface
++
++uses reloadhelper_base, reloadhelper_child;
++
++const Factor = 2; // changes the interface CRC, forcing base to be recompiled
++
++procedure Test(Value: TBase);
++
++implementation
++
++procedure Test(Value: TBase);
++begin
++  Accept(Value);
++  if Value.Twice<>84 then
++    Halt(1);
++end;
++
++end.
+diff --git a/tests/tppu/tcrecompile.pas b/tests/tppu/tcrecompile.pas
+index 9c179c98..15001c31 100644
+--- a/tests/tppu/tcrecompile.pas
++++ b/tests/tppu/tcrecompile.pas
+@@ -64,6 +64,7 @@ type
+     procedure TestPrgNameClash1; // prg name clash with unit
+     procedure TestReloadClass; // loaded class parameters and inline bodies after dependency reload
+     procedure TestReloadClassIs; // "is" on a loaded subclass after its parent unit is recompiled
++    procedure TestReloadClassHelper; // a loaded unit's class helper after a dependency reload
+ 
+     // -Ur Generate release unit files (never automatically recompile ppu)
+     procedure TestUr_ignoreinclude1; // ant->bird, change bird.inc
+@@ -636,6 +637,33 @@ begin
+   CheckCompiled(['reloadclass_prg.pas','reloadclass_base.pas','reloadclass_control.pas']);
+ end;
+ 
++procedure TTestRecompile.TestReloadClassHelper;
++// child defines a class helper for TBase and stays loaded while control's new
++// CRC recompiles base: the helper's synthesized alias procsym has no stored
++// dereference data and must be refilled, not dereferenced
++var
++  Dir: String;
++begin
++  Dir:='reloadhelper';
++  UnitPath:=Dir+';'+Dir+PathDelim+'src1';
++  OutDir:=Dir+PathDelim+'ppus';
++  MainSrc:=Dir+PathDelim+'reloadhelper_prg.pas';
++  MakeDateDiffer(
++    Dir+PathDelim+'src1'+PathDelim+'reloadhelper_control.pas',
++    Dir+PathDelim+'src2'+PathDelim+'reloadhelper_control.pas');
++
++  Step:='First compile';
++  CleanOutputDir;
++  Compile;
++  CheckCompiled(['reloadhelper_prg.pas','reloadhelper_base.pas',
++    'reloadhelper_child.pas','reloadhelper_control.pas']);
++
++  Step:='Second compile';
++  UnitPath:=Dir+';'+Dir+PathDelim+'src2';
++  Compile;
++  CheckCompiled(['reloadhelper_prg.pas','reloadhelper_base.pas','reloadhelper_control.pas']);
++end;
++
+ procedure TTestRecompile.TestReloadClassIs;
+ // child defines TChild = class(TBase). Changing control recompiles base.
+ // child.ppu stays loaded, so "Value is TChild" must see the new TBase.

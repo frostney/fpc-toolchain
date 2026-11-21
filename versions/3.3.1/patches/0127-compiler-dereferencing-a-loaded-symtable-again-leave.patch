@@ -1,0 +1,403 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 21 Nov 2026 23:02:37 +0000
+Subject: [PATCH 127/128] compiler: dereferencing a loaded symtable again
+ leaves what one dereference leaves
+
+Re-resolving the symbol tables loaded from a ppu when a used unit is recompiled (a7b0e8a265)
+dereferences them a second time. Three places assumed they run once:
+- tgenericconstraintdata.deref appended the constraint interfaces to the existing list, so a
+  constraint such as T: class, IFoo held duplicates and the old definition of IFoo;
+- a copied enum, record or object def and an overriding indexed property took another counted
+  reference to the shared symtable (getcopy) on every dereference and never gave the old one
+  back (replace_copied_symtable keeps the reference for the same table, gives one for another
+  table back, and leaves a table the def made for itself as it is);
+- create_class_helper_for_procdef added a class helper method to its alias procsym again on
+  every derefimpl.
+
+Test: tests/tppu/reloadcopy (TTestRecompile.TestReloadCopy), a loaded unit with copied types, a
+constrained generic and an overriding indexed property after control's new CRC recompiles base.
+---
+ compiler/symbase.pas                          | 19 ++++++
+ compiler/symdef.pas                           | 17 ++++--
+ compiler/symsym.pas                           |  2 +-
+ tests/tppu/reloadcopy/ppus/.gitignore         |  1 +
+ tests/tppu/reloadcopy/reloadcopy_base.pas     | 16 +++++
+ tests/tppu/reloadcopy/reloadcopy_child.pas    | 60 +++++++++++++++++++
+ tests/tppu/reloadcopy/reloadcopy_prg.pas      | 23 +++++++
+ .../reloadcopy/src1/reloadcopy_control.pas    | 38 ++++++++++++
+ .../reloadcopy/src2/reloadcopy_control.pas    | 38 ++++++++++++
+ tests/tppu/tcrecompile.pas                    | 29 +++++++++
+ 10 files changed, 236 insertions(+), 7 deletions(-)
+ create mode 100644 tests/tppu/reloadcopy/ppus/.gitignore
+ create mode 100644 tests/tppu/reloadcopy/reloadcopy_base.pas
+ create mode 100644 tests/tppu/reloadcopy/reloadcopy_child.pas
+ create mode 100644 tests/tppu/reloadcopy/reloadcopy_prg.pas
+ create mode 100644 tests/tppu/reloadcopy/src1/reloadcopy_control.pas
+ create mode 100644 tests/tppu/reloadcopy/src2/reloadcopy_control.pas
+
+diff --git a/compiler/symbase.pas b/compiler/symbase.pas
+index 219baa8f..19865c58 100644
+--- a/compiler/symbase.pas
++++ b/compiler/symbase.pas
+@@ -164,6 +164,14 @@ interface
+ {$endif MEMDEBUG}
+ 
+ 
++
++    { st takes a counted reference to source, the symtable a copied def or an
++      overriding property shares (getcopy). Dereferencing such a def again
++      (when a used unit is recompiled) keeps the reference it holds for the
++      same table and gives back one it holds for another; a table that owner
++      made for itself is left as it is }
++    procedure replace_copied_symtable(var st:TSymtable;source:TSymtable;owner:TDefEntry);
++
+ implementation
+ 
+     uses
+@@ -295,6 +303,17 @@ implementation
+       end;
+ 
+ 
++    procedure replace_copied_symtable(var st:TSymtable;source:TSymtable;owner:TDefEntry);
++      begin
++        if st=source then
++          exit;
++        if assigned(st) and
++           (not assigned(owner) or (st.defowner<>owner)) then
++          st.free;
++        st:=source.getcopy;
++      end;
++
++
+     function TSymtable.getcopy:TSymtable;
+       begin
+         inc(refcount);
+diff --git a/compiler/symdef.pas b/compiler/symdef.pas
+index 2e4fe9e3..5faeee3f 100644
+--- a/compiler/symdef.pas
++++ b/compiler/symdef.pas
+@@ -2034,7 +2034,10 @@ implementation
+       var
+         i : longint;
+       begin
+-        interfaces.capacity:=interfaces.count+interfacesderef.count;
++        { a loaded symtable can be dereferenced again (when a used unit is
++          recompiled): the list is rebuilt, not appended to }
++        interfaces.clear;
++        interfaces.capacity:=interfacesderef.count;
+         for i:=0 to interfacesderef.count-1 do
+           interfaces.add(pderef(interfacesderef[i])^.resolve);
+       end;
+@@ -3241,7 +3244,7 @@ implementation
+         if df_copied_def in defoptions then
+           begin
+             basedef:=tenumdef(basedefderef.resolve);
+-            symtable:=basedef.symtable.getcopy;
++            replace_copied_symtable(symtable,basedef.symtable,self);
+           end
+         else
+           tenumsymtable(symtable).deref(false);
+@@ -5610,7 +5613,7 @@ implementation
+          if df_copied_def in defoptions then
+            begin
+              cloneddef:=trecorddef(cloneddefderef.resolve);
+-             symtable:=cloneddef.symtable.getcopy;
++             replace_copied_symtable(symtable,cloneddef.symtable,self);
+            end
+          else
+            tstoredsymtable(symtable).deref(false);
+@@ -8285,7 +8288,7 @@ implementation
+          if df_copied_def in defoptions then
+            begin
+              cloneddef:=tobjectdef(cloneddefderef.resolve);
+-             symtable:=cloneddef.symtable.getcopy;
++             replace_copied_symtable(symtable,cloneddef.symtable,self);
+            end
+          else
+            tstoredsymtable(symtable).deref(false);
+@@ -8339,8 +8342,10 @@ implementation
+           end
+         else if (psym.typ<>procsym) then
+           internalerror(2009111501);
+-        { add ourselves to this special procsym }
+-        tprocsym(psym).procdeflist.add(def);
++        { add ourselves to this special procsym, once: the helper's derefimpl
++          runs again when its symtable is dereferenced again }
++        if tprocsym(psym).procdeflist.indexof(def)<0 then
++          tprocsym(psym).procdeflist.add(def);
+       end;
+ 
+ 
+diff --git a/compiler/symsym.pas b/compiler/symsym.pas
+index 4de3dc15..e4ef9b8b 100644
+--- a/compiler/symsym.pas
++++ b/compiler/symsym.pas
+@@ -1736,7 +1736,7 @@ implementation
+           begin
+             overriddenpropsym:=tpropertysym(overriddenpropsymderef.resolve);
+             if ppo_hasparameters in propoptions then
+-              parast:=overriddenpropsym.parast.getcopy;
++              replace_copied_symtable(parast,overriddenpropsym.parast,nil);
+           end
+         else
+         if ppo_hasparameters in propoptions then
+diff --git a/tests/tppu/reloadcopy/ppus/.gitignore b/tests/tppu/reloadcopy/ppus/.gitignore
+new file mode 100644
+index 00000000..e2eab31f
+--- /dev/null
++++ b/tests/tppu/reloadcopy/ppus/.gitignore
+@@ -0,0 +1 @@
++reloadcopy_prg
+diff --git a/tests/tppu/reloadcopy/reloadcopy_base.pas b/tests/tppu/reloadcopy/reloadcopy_base.pas
+new file mode 100644
+index 00000000..a08e83d7
+--- /dev/null
++++ b/tests/tppu/reloadcopy/reloadcopy_base.pas
+@@ -0,0 +1,16 @@
++unit reloadcopy_base;
++
++{$mode objfpc}
++
++interface
++
++type
++  TBase = class
++    Value: LongInt;
++  end;
++
++implementation
++
++uses reloadcopy_control;
++
++end.
+diff --git a/tests/tppu/reloadcopy/reloadcopy_child.pas b/tests/tppu/reloadcopy/reloadcopy_child.pas
+new file mode 100644
+index 00000000..4121bcd9
+--- /dev/null
++++ b/tests/tppu/reloadcopy/reloadcopy_child.pas
+@@ -0,0 +1,60 @@
++unit reloadcopy_child;
++
++{$mode objfpc}
++
++interface
++
++uses reloadcopy_base;
++
++type
++  TColor = (cRed, cGreen, cBlue);
++  TWarm = cRed..cGreen;
++  TOther = type TBase;
++  TRec = record
++    A: LongInt;
++  end;
++  TRecCopy = type TRec;
++  IFoo = interface
++    ['{4E5A7F0C-8D1B-4C2E-9A3F-6B7C8D9E0F11}']
++    function Foo: LongInt;
++  end;
++  TFoo = class(TInterfacedObject, IFoo)
++    function Foo: LongInt;
++  end;
++  generic TBox<T: class, IFoo> = class
++    function Get(Item: T): LongInt;
++  end;
++  TList0 = class
++    function GetItem(Index: LongInt): LongInt;
++    property Items[Index: LongInt]: LongInt read GetItem; default;
++  end;
++  TList1 = class(TList0)
++  public
++    property Items; default;
++  end;
++
++function Warm: TWarm;
++
++implementation
++
++function TFoo.Foo: LongInt;
++begin
++  Result:=7;
++end;
++
++function TBox.Get(Item: T): LongInt;
++begin
++  Result:=(Item as IFoo).Foo;
++end;
++
++function TList0.GetItem(Index: LongInt): LongInt;
++begin
++  Result:=Index*3;
++end;
++
++function Warm: TWarm;
++begin
++  Result:=cGreen;
++end;
++
++end.
+diff --git a/tests/tppu/reloadcopy/reloadcopy_prg.pas b/tests/tppu/reloadcopy/reloadcopy_prg.pas
+new file mode 100644
+index 00000000..fa985f39
+--- /dev/null
++++ b/tests/tppu/reloadcopy/reloadcopy_prg.pas
+@@ -0,0 +1,23 @@
++program reloadcopy_prg;
++
++{$mode objfpc}
++
++uses reloadcopy_child, reloadcopy_control, reloadcopy_base;
++
++type
++  TFooBox = specialize TBox<TFoo>;
++
++var
++  Foo: TFoo;
++  Keep: IFoo;
++  Box: TFooBox;
++begin
++  if Check<>0 then
++    Halt(Check);
++  Foo:=TFoo.Create;
++  Keep:=Foo;
++  Box:=TFooBox.Create;
++  if Box.Get(Foo)<>7 then
++    Halt(4);
++  Box.Free;
++end.
+diff --git a/tests/tppu/reloadcopy/src1/reloadcopy_control.pas b/tests/tppu/reloadcopy/src1/reloadcopy_control.pas
+new file mode 100644
+index 00000000..f88f7f22
+--- /dev/null
++++ b/tests/tppu/reloadcopy/src1/reloadcopy_control.pas
+@@ -0,0 +1,38 @@
++unit reloadcopy_control;
++
++{$mode objfpc}
++
++interface
++
++uses reloadcopy_base, reloadcopy_child;
++
++const Factor = 1;
++
++function Check: LongInt;
++
++implementation
++
++function Check: LongInt;
++var
++  Other: TOther;
++  R: TRecCopy;
++  L: TList1;
++begin
++  Result:=0;
++  if Warm<>cGreen then
++    Exit(1);
++  Other:=TOther.Create;
++  Other.Value:=5;
++  if Other.Value<>5 then
++    Exit(2);
++  Other.Free;
++  R.A:=9;
++  if R.A<>9 then
++    Exit(3);
++  L:=TList1.Create;
++  if L[4]<>12 then
++    Exit(5);
++  L.Free;
++end;
++
++end.
+diff --git a/tests/tppu/reloadcopy/src2/reloadcopy_control.pas b/tests/tppu/reloadcopy/src2/reloadcopy_control.pas
+new file mode 100644
+index 00000000..bd1e7042
+--- /dev/null
++++ b/tests/tppu/reloadcopy/src2/reloadcopy_control.pas
+@@ -0,0 +1,38 @@
++unit reloadcopy_control;
++
++{$mode objfpc}
++
++interface
++
++uses reloadcopy_base, reloadcopy_child;
++
++const Factor = 2; // changes the interface CRC, forcing base to be recompiled
++
++function Check: LongInt;
++
++implementation
++
++function Check: LongInt;
++var
++  Other: TOther;
++  R: TRecCopy;
++  L: TList1;
++begin
++  Result:=0;
++  if Warm<>cGreen then
++    Exit(1);
++  Other:=TOther.Create;
++  Other.Value:=5;
++  if Other.Value<>5 then
++    Exit(2);
++  Other.Free;
++  R.A:=9;
++  if R.A<>9 then
++    Exit(3);
++  L:=TList1.Create;
++  if L[4]<>12 then
++    Exit(5);
++  L.Free;
++end;
++
++end.
+diff --git a/tests/tppu/tcrecompile.pas b/tests/tppu/tcrecompile.pas
+index 15001c31..de541157 100644
+--- a/tests/tppu/tcrecompile.pas
++++ b/tests/tppu/tcrecompile.pas
+@@ -65,6 +65,7 @@ type
+     procedure TestReloadClass; // loaded class parameters and inline bodies after dependency reload
+     procedure TestReloadClassIs; // "is" on a loaded subclass after its parent unit is recompiled
+     procedure TestReloadClassHelper; // a loaded unit's class helper after a dependency reload
++    procedure TestReloadCopy; // a loaded unit's copied types, constrained generic and overriding property after a dependency reload
+ 
+     // -Ur Generate release unit files (never automatically recompile ppu)
+     procedure TestUr_ignoreinclude1; // ant->bird, change bird.inc
+@@ -664,6 +665,34 @@ begin
+   CheckCompiled(['reloadhelper_prg.pas','reloadhelper_base.pas','reloadhelper_control.pas']);
+ end;
+ 
++procedure TTestRecompile.TestReloadCopy;
++// child (copied enum, object and record types, a generic with an interface
++// constraint, an overriding indexed property) stays loaded while control's
++// new CRC recompiles base: dereferencing child's symtable again must leave
++// what one dereference leaves
++var
++  Dir: String;
++begin
++  Dir:='reloadcopy';
++  UnitPath:=Dir+';'+Dir+PathDelim+'src1';
++  OutDir:=Dir+PathDelim+'ppus';
++  MainSrc:=Dir+PathDelim+'reloadcopy_prg.pas';
++  MakeDateDiffer(
++    Dir+PathDelim+'src1'+PathDelim+'reloadcopy_control.pas',
++    Dir+PathDelim+'src2'+PathDelim+'reloadcopy_control.pas');
++
++  Step:='First compile';
++  CleanOutputDir;
++  Compile;
++  CheckCompiled(['reloadcopy_prg.pas','reloadcopy_base.pas',
++    'reloadcopy_child.pas','reloadcopy_control.pas']);
++
++  Step:='Second compile';
++  UnitPath:=Dir+';'+Dir+PathDelim+'src2';
++  Compile;
++  CheckCompiled(['reloadcopy_prg.pas','reloadcopy_base.pas','reloadcopy_control.pas']);
++end;
++
+ procedure TTestRecompile.TestReloadClassIs;
+ // child defines TChild = class(TBase). Changing control recompiles base.
+ // child.ppu stays loaded, so "Value is TChild" must see the new TBase.

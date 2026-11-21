@@ -1,0 +1,405 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mattias <nc-gaertnma@netcologne.de>
+Date: Sat, 31 Oct 2026 09:43:02 +0100
+Subject: [PATCH 124/128] compiler: Re-resolve loaded symbol tables when a used
+ unit is recompiled, patch from Pascal Riekenberg, issue #41970
+
+(cherry picked from commit a7b0e8a2652184f4e19af2063076ca416e256f20, without the two
+test programs the upstream commit added as built binaries under tests/tppu/*/ppus)
+---
+ compiler/symtable.pas                         | 10 ++++
+ tests/tppu/reloadclass/reloadclass_base.pas   | 16 ++++++
+ tests/tppu/reloadclass/reloadclass_child.pas  | 31 +++++++++++
+ tests/tppu/reloadclass/reloadclass_prg.pas    | 15 ++++++
+ .../reloadclass/src1/reloadclass_control.pas  | 23 ++++++++
+ .../reloadclass/src2/reloadclass_control.pas  | 23 ++++++++
+ tests/tppu/reloadclassis/isbase.pas           | 16 ++++++
+ tests/tppu/reloadclassis/ischild.pas          | 15 ++++++
+ tests/tppu/reloadclassis/isprg.pas            | 17 ++++++
+ tests/tppu/reloadclassis/src1/iscontrol.pas   | 22 ++++++++
+ tests/tppu/reloadclassis/src2/iscontrol.pas   | 22 ++++++++
+ tests/tppu/tcrecompile.pas                    | 54 +++++++++++++++++++
+ 12 files changed, 264 insertions(+)
+ create mode 100644 tests/tppu/reloadclass/reloadclass_base.pas
+ create mode 100644 tests/tppu/reloadclass/reloadclass_child.pas
+ create mode 100644 tests/tppu/reloadclass/reloadclass_prg.pas
+ create mode 100644 tests/tppu/reloadclass/src1/reloadclass_control.pas
+ create mode 100644 tests/tppu/reloadclass/src2/reloadclass_control.pas
+ create mode 100644 tests/tppu/reloadclassis/isbase.pas
+ create mode 100644 tests/tppu/reloadclassis/ischild.pas
+ create mode 100644 tests/tppu/reloadclassis/isprg.pas
+ create mode 100644 tests/tppu/reloadclassis/src1/iscontrol.pas
+ create mode 100644 tests/tppu/reloadclassis/src2/iscontrol.pas
+
+diff --git a/compiler/symtable.pas b/compiler/symtable.pas
+index 5d5d7bc7..99e921ef 100644
+--- a/compiler/symtable.pas
++++ b/compiler/symtable.pas
+@@ -830,6 +830,9 @@ implementation
+         until not changed and
+           (defidmax=current_module.deflist.count) and
+           (symidmax=current_module.symlist.count);
++        { Re-resolving a local symtable visits only registered entries. }
++        deref_built:=true;
++        derefimpl_built:=true;
+       end;
+ 
+ 
+@@ -868,6 +871,10 @@ implementation
+                (sym.typ<>typesym) then
+               sym.deref;
+           end;
++        { PPU-loaded tables already contain dereference data, without going
++          through buildderef. Keep them eligible for re-resolving when a used
++          unit is recompiled and its old definitions are freed. }
++        deref_built:=true;
+       end;
+ 
+ 
+@@ -884,6 +891,9 @@ implementation
+                def.is_registered then
+               def.derefimpl;
+           end;
++        { The implementation references become usable only after its used
++          units have been loaded and this first dereference has completed. }
++        derefimpl_built:=true;
+       end;
+ 
+ 
+diff --git a/tests/tppu/reloadclass/reloadclass_base.pas b/tests/tppu/reloadclass/reloadclass_base.pas
+new file mode 100644
+index 00000000..7da0ef30
+--- /dev/null
++++ b/tests/tppu/reloadclass/reloadclass_base.pas
+@@ -0,0 +1,16 @@
++unit reloadclass_base;
++
++{$mode objfpc}
++
++interface
++
++type
++  TBase = class
++    Value: LongInt;
++  end;
++
++implementation
++
++uses reloadclass_control;
++
++end.
+\ No newline at end of file
+diff --git a/tests/tppu/reloadclass/reloadclass_child.pas b/tests/tppu/reloadclass/reloadclass_child.pas
+new file mode 100644
+index 00000000..1d086c03
+--- /dev/null
++++ b/tests/tppu/reloadclass/reloadclass_child.pas
+@@ -0,0 +1,31 @@
++unit reloadclass_child;
++
++{$mode objfpc}
++{$inline on}
++
++interface
++
++uses reloadclass_base;
++
++procedure Accept(Value: TBase);
++function Inlined(Value: TBase): TBase; inline;
++
++implementation
++
++function Identity(Value: TBase): TBase;
++begin
++  Result:=Value;
++end;
++
++procedure Accept(Value: TBase);
++begin
++  Value.Value:=42;
++end;
++
++function Inlined(Value: TBase): TBase;
++begin
++  Result:=Identity(Value);
++  Accept(Result);
++end;
++
++end.
+\ No newline at end of file
+diff --git a/tests/tppu/reloadclass/reloadclass_prg.pas b/tests/tppu/reloadclass/reloadclass_prg.pas
+new file mode 100644
+index 00000000..be1f5f97
+--- /dev/null
++++ b/tests/tppu/reloadclass/reloadclass_prg.pas
+@@ -0,0 +1,15 @@
++program reloadclass_prg;
++
++{$mode objfpc}
++
++uses reloadclass_child, reloadclass_control, reloadclass_base;
++
++var
++  Value: TBase;
++begin
++  Value:=TBase.Create;
++  Test(Value);
++  if Value.Value<>42 then
++    Halt(2);
++  Value.Free;
++end.
+\ No newline at end of file
+diff --git a/tests/tppu/reloadclass/src1/reloadclass_control.pas b/tests/tppu/reloadclass/src1/reloadclass_control.pas
+new file mode 100644
+index 00000000..04768749
+--- /dev/null
++++ b/tests/tppu/reloadclass/src1/reloadclass_control.pas
+@@ -0,0 +1,23 @@
++unit reloadclass_control;
++
++{$mode objfpc}
++{$inline on}
++
++interface
++
++uses reloadclass_base, reloadclass_child;
++
++const Factor = 1;
++
++procedure Test(Value: TBase);
++
++implementation
++
++procedure Test(Value: TBase);
++begin
++  Accept(Value);
++  if Inlined(Value)<>Value then
++    Halt(1);
++end;
++
++end.
+\ No newline at end of file
+diff --git a/tests/tppu/reloadclass/src2/reloadclass_control.pas b/tests/tppu/reloadclass/src2/reloadclass_control.pas
+new file mode 100644
+index 00000000..51af53a8
+--- /dev/null
++++ b/tests/tppu/reloadclass/src2/reloadclass_control.pas
+@@ -0,0 +1,23 @@
++unit reloadclass_control;
++
++{$mode objfpc}
++{$inline on}
++
++interface
++
++uses reloadclass_base, reloadclass_child;
++
++const Factor = 2; // changes the interface CRC, forcing base to be recompiled
++
++procedure Test(Value: TBase);
++
++implementation
++
++procedure Test(Value: TBase);
++begin
++  Accept(Value);
++  if Inlined(Value)<>Value then
++    Halt(1);
++end;
++
++end.
+\ No newline at end of file
+diff --git a/tests/tppu/reloadclassis/isbase.pas b/tests/tppu/reloadclassis/isbase.pas
+new file mode 100644
+index 00000000..5c7a52b4
+--- /dev/null
++++ b/tests/tppu/reloadclassis/isbase.pas
+@@ -0,0 +1,16 @@
++unit isbase;
++
++{$mode objfpc}
++
++interface
++
++type
++  TBase = class
++    Value: LongInt;
++  end;
++
++implementation
++
++uses iscontrol;
++
++end.
+diff --git a/tests/tppu/reloadclassis/ischild.pas b/tests/tppu/reloadclassis/ischild.pas
+new file mode 100644
+index 00000000..96f77325
+--- /dev/null
++++ b/tests/tppu/reloadclassis/ischild.pas
+@@ -0,0 +1,15 @@
++unit ischild;
++
++{$mode objfpc}
++
++interface
++
++uses isbase;
++
++type
++  TChild = class(TBase)
++  end;
++
++implementation
++
++end.
+diff --git a/tests/tppu/reloadclassis/isprg.pas b/tests/tppu/reloadclassis/isprg.pas
+new file mode 100644
+index 00000000..8f8e5a84
+--- /dev/null
++++ b/tests/tppu/reloadclassis/isprg.pas
+@@ -0,0 +1,17 @@
++program isprg;
++
++{$mode objfpc}
++
++uses ischild, iscontrol, isbase;
++
++var
++  Value: TBase;
++begin
++  Value:=TChild.Create;
++  Test(Value);
++  if not (Value is TChild) then
++    Halt(3);
++  if Value.Value<>42 then
++    Halt(2);
++  Value.Free;
++end.
+diff --git a/tests/tppu/reloadclassis/src1/iscontrol.pas b/tests/tppu/reloadclassis/src1/iscontrol.pas
+new file mode 100644
+index 00000000..6771eaff
+--- /dev/null
++++ b/tests/tppu/reloadclassis/src1/iscontrol.pas
+@@ -0,0 +1,22 @@
++unit iscontrol;
++
++{$mode objfpc}
++
++interface
++
++uses isbase, ischild;
++
++const Factor = 1;
++
++procedure Test(Value: TBase);
++
++implementation
++
++procedure Test(Value: TBase);
++begin
++  if not (Value is TChild) then
++    Halt(1);
++  Value.Value:=42;
++end;
++
++end.
+diff --git a/tests/tppu/reloadclassis/src2/iscontrol.pas b/tests/tppu/reloadclassis/src2/iscontrol.pas
+new file mode 100644
+index 00000000..ff1915ea
+--- /dev/null
++++ b/tests/tppu/reloadclassis/src2/iscontrol.pas
+@@ -0,0 +1,22 @@
++unit iscontrol;
++
++{$mode objfpc}
++
++interface
++
++uses isbase, ischild;
++
++const Factor = 2;
++
++procedure Test(Value: TBase);
++
++implementation
++
++procedure Test(Value: TBase);
++begin
++  if not (Value is TChild) then
++    Halt(1);
++  Value.Value:=42;
++end;
++
++end.
+diff --git a/tests/tppu/tcrecompile.pas b/tests/tppu/tcrecompile.pas
+index 525e03d4..9c179c98 100644
+--- a/tests/tppu/tcrecompile.pas
++++ b/tests/tppu/tcrecompile.pas
+@@ -62,6 +62,8 @@ type
+     procedure TestCycle32_ChangeC_CRC; // prog->ant->bird->cat, bird.impl->ant, cat.impl->bird+ant, change cat crc
+     procedure TestBug41457; // two cycles of size 2 and 3
+     procedure TestPrgNameClash1; // prg name clash with unit
++    procedure TestReloadClass; // loaded class parameters and inline bodies after dependency reload
++    procedure TestReloadClassIs; // "is" on a loaded subclass after its parent unit is recompiled
+ 
+     // -Ur Generate release unit files (never automatically recompile ppu)
+     procedure TestUr_ignoreinclude1; // ant->bird, change bird.inc
+@@ -607,6 +609,58 @@ begin
+   CheckCompiled(['cycle2_changeb_prg.pas','cycle2_changeb_bird.pas']);
+ end;
+ 
++procedure TTestRecompile.TestReloadClass;
++// child->base, base.impl->control, control->base+child. Changing control's
++// interface recompiles base after child.ppu has already resolved TBase.
++var
++  Dir: String;
++begin
++  Dir:='reloadclass';
++  UnitPath:=Dir+';'+Dir+PathDelim+'src1';
++  OutDir:=Dir+PathDelim+'ppus';
++  MainSrc:=Dir+PathDelim+'reloadclass_prg.pas';
++  MakeDateDiffer(
++    Dir+PathDelim+'src1'+PathDelim+'reloadclass_control.pas',
++    Dir+PathDelim+'src2'+PathDelim+'reloadclass_control.pas');
++
++  Step:='First compile';
++  CleanOutputDir;
++  Compile;
++  CheckCompiled(['reloadclass_prg.pas','reloadclass_base.pas',
++    'reloadclass_child.pas','reloadclass_control.pas']);
++
++  Step:='Second compile';
++  UnitPath:=Dir+';'+Dir+PathDelim+'src2';
++  Compile;
++  // child's own CRC is unchanged, so reload its references without recompiling.
++  CheckCompiled(['reloadclass_prg.pas','reloadclass_base.pas','reloadclass_control.pas']);
++end;
++
++procedure TTestRecompile.TestReloadClassIs;
++// child defines TChild = class(TBase). Changing control recompiles base.
++// child.ppu stays loaded, so "Value is TChild" must see the new TBase.
++var
++  Dir: String;
++begin
++  Dir:='reloadclassis';
++  UnitPath:=Dir+';'+Dir+PathDelim+'src1';
++  OutDir:=Dir+PathDelim+'ppus';
++  MainSrc:=Dir+PathDelim+'isprg.pas';
++  MakeDateDiffer(
++    Dir+PathDelim+'src1'+PathDelim+'iscontrol.pas',
++    Dir+PathDelim+'src2'+PathDelim+'iscontrol.pas');
++
++  Step:='First compile';
++  CleanOutputDir;
++  Compile;
++  CheckCompiled(['isprg.pas','isbase.pas','ischild.pas','iscontrol.pas']);
++
++  Step:='Second compile';
++  UnitPath:=Dir+';'+Dir+PathDelim+'src2';
++  Compile;
++  CheckCompiled(['isprg.pas','isbase.pas','iscontrol.pas']);
++end;
++
+ procedure TTestRecompile.TestCycle3_ChangeC;
+ // prog->ant->bird->cat, cat.impl->ant, change cat same crc
+ var

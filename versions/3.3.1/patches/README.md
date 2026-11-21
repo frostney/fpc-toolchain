@@ -37,6 +37,22 @@ everywhere before (wrong code at `-O2` and above). 0123 fixes trunk's internal x
 instruction's segment override only from `segprefix`, which `loadref` sets, and an optimisation that puts a reference
 in place without it (MovLea2Add folds `mov %fs:B@tpoff,%edx; lea (%edx,%eax),%eax` into an `add`) lost the `%fs` of
 a section threadvar, so adding two threadvars at `-O1` read the second at an absolute address (runtime error 216).
+0124 is upstream's a7b0e8a265 (trunk #41970, after this base): when an incremental compile recompiles a used unit,
+the symbol tables already loaded from `.ppu` files are dereferenced again instead of keeping pointers into the
+freed old definitions, which made such a compile fail with "Compilation raised exception internally" or a type
+error between unrelated types. The two test programs the upstream commit adds as built binaries are left out.
+0125 is upstream's follow-up 82b9e12b93, which ignores those programs in the test directories. 0126 completes 0124
+for class helpers: the alias procsym a class helper's implementation makes for each of its methods is not stored,
+so it has no dereference data, and the second dereference 0124 runs stopped with internal error 200611031; such an
+alias now only clears its list, which the helper's implementation dereference fills again
+(`tests/tppu/reloadhelper`).
+0127 makes the rest of that second dereference leave what one leaves: a generic constraint's interface list is
+rebuilt instead of appended to, a copied enum, record or object def and an overriding indexed property keep their
+counted reference to the shared symtable instead of taking another each time, and a class helper's alias gets each
+method once (`tests/tppu/reloadcopy`).
+0128 limits that second dereference to the defs and syms the table had when it got its dereference data: one the
+first dereference added (the array type of a constant's data, such as `#$0100#$0101`) has none, and dereferencing
+it stopped with internal error 200306067.
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 

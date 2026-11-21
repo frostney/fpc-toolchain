@@ -1,0 +1,150 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Sat, 21 Nov 2026 23:10:46 +0000
+Subject: [PATCH 128/128] compiler: dereferencing a loaded symtable again skips
+ what the first dereference added
+
+Dereferencing a symtable can add to it: the array type of a constant's data (const Marker =
+#$0100#$0101) is made while the table is dereferenced the first time, and has no dereference
+data. Re-resolving the table when a used unit is recompiled (a7b0e8a265) dereferenced every
+def again and stopped on such a def with internal error 200306067. tstoredsymtable records
+how many defs and syms it had when it got dereference data (buildderef, buildderef_registered,
+buildderefimpl, or the first deref and derefimpl of a table loaded from a ppu) and dereferences
+no more than those again.
+
+Test: tests/tppu/reloadcopy now has such a constant in its retained unit.
+---
+ compiler/symtable.pas                      | 50 +++++++++++++++++++---
+ tests/tppu/reloadcopy/reloadcopy_child.pas |  3 ++
+ 2 files changed, 48 insertions(+), 5 deletions(-)
+
+diff --git a/compiler/symtable.pas b/compiler/symtable.pas
+index 99e921ef..d6d7f45e 100644
+--- a/compiler/symtable.pas
++++ b/compiler/symtable.pas
+@@ -44,6 +44,14 @@ interface
+           init_final_check_done : boolean;
+           deref_built : boolean;
+           derefimpl_built : boolean;
++          { how many defs and syms the table had when it got dereference data
++            (buildderef, or the first deref of a table loaded from a ppu): a
++            def or sym added later (such as the array type a constant's data
++            gets while it is dereferenced) has none, so dereferencing the
++            table again (a used unit was recompiled) visits these only }
++          deref_defcount,
++          deref_symcount,
++          derefimpl_defcount : longint;
+           procedure _needs_init_final(sym:TObject;arg:pointer);
+           procedure do_init_final_check;
+           procedure check_forward(sym:TObject;arg:pointer);
+@@ -736,6 +744,8 @@ implementation
+             sym:=tstoredsym(SymList[i]);
+             sym.buildderef;
+           end;
++        deref_defcount:=DefList.Count;
++        deref_symcount:=SymList.Count;
+         deref_built:=True;
+       end;
+ 
+@@ -751,6 +761,7 @@ implementation
+             def:=tstoreddef(DefList[i]);
+             def.buildderefimpl;
+           end;
++        derefimpl_defcount:=DefList.Count;
+         derefimpl_built:=True;
+       end;
+ 
+@@ -831,6 +842,9 @@ implementation
+           (defidmax=current_module.deflist.count) and
+           (symidmax=current_module.symlist.count);
+         { Re-resolving a local symtable visits only registered entries. }
++        deref_defcount:=DefList.Count;
++        deref_symcount:=SymList.Count;
++        derefimpl_defcount:=DefList.Count;
+         deref_built:=true;
+         derefimpl_built:=true;
+       end;
+@@ -841,12 +855,21 @@ implementation
+         i   : longint;
+         def : tstoreddef;
+         sym : tstoredsym;
++        count : longint;
++        again : boolean;
+       begin
++        { dereferencing the table again (a used unit was recompiled) visits
++          only the defs and syms the first dereference (or buildderef) had:
++          one added since has no dereference data }
++        again:=deref_built;
+         { first deref the interface ttype symbols. This needs
+           to be done before the interface defs are derefed, because
+           the interface defs can contain references to the type symbols
+           which then already need to contain a resolved typedef field (PFV) }
+-        for i:=0 to SymList.Count-1 do
++        count:=SymList.Count;
++        if again then
++          count:=min(count,deref_symcount);
++        for i:=0 to count-1 do
+           begin
+             sym:=tstoredsym(SymList[i]);
+             if (sym.typ=typesym) and
+@@ -855,7 +878,12 @@ implementation
+               sym.deref;
+           end;
+         { interface definitions }
+-        for i:=0 to DefList.Count-1 do
++        count:=DefList.Count;
++        if again then
++          count:=min(count,deref_defcount)
++        else
++          deref_defcount:=count;
++        for i:=0 to count-1 do
+           begin
+             def:=tstoreddef(DefList[i]);
+             if not only_registered or
+@@ -863,7 +891,12 @@ implementation
+               def.deref;
+           end;
+         { interface symbols }
+-        for i:=0 to SymList.Count-1 do
++        count:=SymList.Count;
++        if again then
++          count:=min(count,deref_symcount)
++        else
++          deref_symcount:=count;
++        for i:=0 to count-1 do
+           begin
+             sym:=tstoredsym(SymList[i]);
+             if (not only_registered or
+@@ -882,9 +915,16 @@ implementation
+       var
+         i   : longint;
+         def : tstoreddef;
++        count : longint;
+       begin
+-        { implementation definitions }
+-        for i:=0 to DefList.Count-1 do
++        { implementation definitions; dereferencing them again visits only
++          those the first time (or buildderefimpl) had, as deref does }
++        count:=DefList.Count;
++        if derefimpl_built then
++          count:=min(count,derefimpl_defcount)
++        else
++          derefimpl_defcount:=count;
++        for i:=0 to count-1 do
+           begin
+             def:=tstoreddef(DefList[i]);
+             if not only_registered or
+diff --git a/tests/tppu/reloadcopy/reloadcopy_child.pas b/tests/tppu/reloadcopy/reloadcopy_child.pas
+index 4121bcd9..148348d1 100644
+--- a/tests/tppu/reloadcopy/reloadcopy_child.pas
++++ b/tests/tppu/reloadcopy/reloadcopy_child.pas
+@@ -33,6 +33,9 @@ type
+     property Items; default;
+   end;
+ 
++const
++  Marker = #$0100#$0101;
++
+ function Warm: TWarm;
+ 
+ implementation
