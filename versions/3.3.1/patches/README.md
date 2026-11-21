@@ -41,6 +41,11 @@ a section threadvar, so adding two threadvars at `-O1` read the second at an abs
 the symbol tables already loaded from `.ppu` files are dereferenced again instead of keeping pointers into the
 freed old definitions, which made such a compile fail with "Compilation raised exception internally" or a type
 error between unrelated types. The two test programs the upstream commit adds as built binaries are left out.
+0125 is upstream's follow-up 82b9e12b93, which ignores those programs in the test directories. 0126 completes 0124
+for class helpers: the alias procsym a class helper's implementation makes for each of its methods is not stored,
+so it has no dereference data, and the second dereference 0124 runs stopped with internal error 200611031; such an
+alias now only clears its list, which the helper's implementation dereference fills again
+(`tests/tppu/reloadhelper`).
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
