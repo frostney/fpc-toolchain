@@ -60,6 +60,11 @@ that is an array or a record went into a temp of its declared size, and the loop
 variable-length idiom (a last field declared `array[0..0]`, indexed past it) read the stack beyond the temp
 (`tests/test/opt/tslp4.pp`). 0130 makes that test's record case fail on its own when only record fields are
 moved again (it accumulated into the function result, a store that kept every load in the loop).
+0131 is for aarch64 only: the peephole optimizer turns a test of one bit (`tst`, or `and` plus `cmp`) and a
+`b.eq` or `b.ne` into `tbz` or `tbnz`, which reach only +-32 KiB, without knowing how far the label is, so in a
+larger procedure the assembler refused one ("conditional branch out of range"). After the optimizer, each one whose
+label is more than 7000 instructions away becomes the opposite test over an unconditional `b`, which reaches +-128
+MiB (`tests/test/opt/ttbz1.pp`).
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
