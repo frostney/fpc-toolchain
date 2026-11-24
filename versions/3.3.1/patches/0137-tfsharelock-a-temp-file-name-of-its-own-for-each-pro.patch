@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Tue, 24 Nov 2026 21:16:07 +0000
+Subject: [PATCH 137/137] tfsharelock: a temp file name of its own for each
+ process
+
+GetTempFileName returns the first <prefix>NNNNN.tmp that does not exist yet
+and reserves nothing, so two runs of tfsharelock that start together could
+take the same file, hold each other's lock and delete each other's file. The
+prefix now carries the process id.
+---
+ tests/test/units/classes/tfsharelock.pp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/tests/test/units/classes/tfsharelock.pp b/tests/test/units/classes/tfsharelock.pp
+index 6f27bfb2..9b1d846d 100644
+--- a/tests/test/units/classes/tfsharelock.pp
++++ b/tests/test/units/classes/tfsharelock.pp
+@@ -32,7 +32,9 @@ end;
+ var
+   First: TFileStream;
+ begin
+-  FileName := GetTempFileName(GetTempDir, 'tfsharelock');
++  { GetTempFileName reserves nothing: the process id keeps runs that start
++    together off each other's file }
++  FileName := GetTempFileName(GetTempDir, 'tfsharelock' + IntToStr(GetProcessID) + '-');
+   TFileStream.Create(FileName, fmCreate).Free;
+   try
+     First := TFileStream.Create(FileName, fmOpenRead or fmShareExclusive);
