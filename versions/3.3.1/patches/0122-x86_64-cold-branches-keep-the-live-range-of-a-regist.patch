@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Wed, 11 Nov 2026 14:08:45 +0000
-Subject: [PATCH 122/134] x86_64 cold branches: keep the live range of a
+Subject: [PATCH 122/135] x86_64 cold branches: keep the live range of a
  register the cold code uses first
 
 Patch 0107 generates an if branch that ends in raise or another call that
