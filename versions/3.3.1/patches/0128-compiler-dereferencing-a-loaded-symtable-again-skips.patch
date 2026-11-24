@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 21 Nov 2026 23:10:46 +0000
-Subject: [PATCH 128/130] compiler: dereferencing a loaded symtable again skips
+Subject: [PATCH 128/134] compiler: dereferencing a loaded symtable again skips
  what the first dereference added
 
 Dereferencing a symtable can add to it: the array type of a constant's data (const Marker =

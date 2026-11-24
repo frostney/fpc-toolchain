@@ -1,0 +1,360 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Tue, 24 Nov 2026 06:08:28 +0000
+Subject: [PATCH 134/134] aarch64: leave a procedure that assembles as it is,
+ and numeric targets, unchanged
+
+The relaxation counted every alignment as its full size, so a branch in
+reach could be rewritten, and the b it adds could move a numeric target
+(b.eq #8 in inline assembler), or an adr, a literal ldr or a b.al at the edge
+of its +-1 MiB reach.
+
+Positions now carry a least value and a slack: an alignment no larger than
+the procedure's own (getprocalign, which record_generated_code_for_procdef
+starts it with) at a position known exactly adds its exact padding, anything
+else adds what it can to the slack, and a branch is rewritten only when its
+distance can be out of reach. Code the compiler generates is laid out
+exactly, so a procedure that assembles as it is stays unchanged. A
+procedure with a numeric pc-relative target is left as it is. b.al and b.nv,
+which use the 19-bit encoding, become a plain b when out of reach. Labels
+are keyed by their symbol, as names can be longer than a key.
+
+ttbz2.pp adds a b.al across 1100000 bytes.
+---
+ compiler/aarch64/cpupi.pas | 205 ++++++++++++++++++++++++++-----------
+ tests/test/opt/ttbz2.pp    |  15 ++-
+ 2 files changed, 157 insertions(+), 63 deletions(-)
+
+diff --git a/compiler/aarch64/cpupi.pas b/compiler/aarch64/cpupi.pas
+index 850cc571..5b9acd11 100644
+--- a/compiler/aarch64/cpupi.pas
++++ b/compiler/aarch64/cpupi.pas
+@@ -58,7 +58,8 @@ implementation
+     tgobj,
+     cpubase,
+     aasmtai,aasmcpu,
+-    cgbase,cgutils;
++    cgbase,cgutils,
++    ncgutil;
+ 
+   const
+     SCOPE_FINALLY=0;
+@@ -94,29 +95,57 @@ implementation
+       TB_MAX = 32764;
+       CB_MIN = -1048576;
+       CB_MAX = 1048572;
++    type
++      { where an item starts: at least lo bytes into the procedure, and at most slack bytes later, slack being
++        what the items before it can add beyond their least size }
++      tlayout = record
++        lo, slack: longint;
++      end;
+     var
+       positions: TFPHashList;
++      labels: array of tlayout;
++      nlabels: longint;
+ 
+-    { the bytes hp can emit at most; at least what it emits, so a distance counted with it is never too short }
+-    function size_of(hp: tai): longint;
++    { true when hp has a numeric pc-relative target, such as b.eq #8 in inline assembler: code inserted between
++      it and its target would change where it goes }
++    function has_numeric_target(hp: tai): boolean;
++      begin
++        result:=(hp.typ=ait_instruction) and
++          (taicpu(hp).opcode in [A_B,A_BL,A_CBZ,A_CBNZ,A_TBZ,A_TBNZ,A_ADR,A_ADRP,A_LDR,A_PRFM]) and
++          (taicpu(hp).ops>0) and
++          (taicpu(hp).oper[taicpu(hp).ops-1]^.typ=top_const);
++      end;
++
++    { advances pos past hp: by exactly what it emits where that is known, else by its least size, adding to
++      pos.slack what it can emit beyond that. base is the alignment the procedure starts at. }
++    procedure advance(hp: tai; var pos: tlayout; base: longint);
++      var
++        a: longint;
+       begin
+         case hp.typ of
+           ait_instruction:
+-            result:=4;
++            inc(pos.lo,4);
+           ait_const:
+-            result:=tai_const(hp).size;
++            inc(pos.lo,tai_const(hp).size);
+           ait_realconst:
+-            result:=tai_realconst(hp).savesize;
++            inc(pos.lo,tai_realconst(hp).savesize);
+           ait_string:
+-            result:=tai_string(hp).len;
++            inc(pos.lo,tai_string(hp).len);
+           ait_datablock:
+-            { inline .lcomm and .comm; written in place as .zero on some targets }
+-            result:=tai_datablock(hp).size;
++            { inline .lcomm and .comm: written in place as .zero on some targets, elsewhere on others }
++            inc(pos.slack,tai_datablock(hp).size);
+           ait_align:
+-            { the padding is less than the alignment }
+-            result:=tai_align(hp).aligntype;
++            begin
++              a:=tai_align(hp).aligntype;
++              { the padding is exact when the procedure's own alignment fixes it: a plain alignment no larger
++                than that, at a position known exactly; else it is anything below the alignment }
++              if (a>1) and (a<=base) and (pos.slack=0) and (tai_align(hp).maxbytes=a) then
++                inc(pos.lo,(a-pos.lo mod a) mod a)
++              else if a>1 then
++                inc(pos.slack,a-1);
++            end;
+           else
+-            result:=0;
++            ;
+         end;
+       end;
+ 
+@@ -141,7 +170,8 @@ implementation
+             end;
+           A_B:
+             begin
+-              if taicpu(hp).condition in [C_None,C_AL,C_NV] then
++              { b.al and b.nv branch always, but with the 19-bit encoding of b.cond }
++              if taicpu(hp).condition=C_None then
+                 exit;
+               opidx:=0;
+               lo:=CB_MIN;
+@@ -155,89 +185,137 @@ implementation
+           assigned(taicpu(hp).oper[opidx]^.ref^.symbol);
+       end;
+ 
+-    { records the offset of every label and symbol defined in the code, plus one so that offset 0 is not nil;
+-      false when the code has no conditional branch, or is too small for one to be out of reach }
++    { the key of a label or symbol: the object, as asmsymbol names can be longer than a key }
++    function key_of(sym: tasmsymbol): shortstring;
++      begin
++        result:=hexstr(ptruint(sym),sizeof(ptruint)*2);
++      end;
++
++    procedure add_label(sym: tasmsymbol; const pos: tlayout);
++      begin
++        if nlabels>=length(labels) then
++          setlength(labels,2*nlabels+16);
++        labels[nlabels]:=pos;
++        inc(nlabels);
++        { stored plus one, so that the first label is not nil }
++        positions.add(key_of(sym),pointer(ptruint(nlabels)));
++      end;
++
++    { records where every label and symbol defined in the code starts; false when the code has no conditional
++      branch, is too small for one to be out of reach, or has a numeric pc-relative target }
+     function find_labels: boolean;
+       var
+         hp: tai;
+-        pos, opidx, lo, hi: longint;
++        pos: tlayout;
++        base, opidx, lo, hi: longint;
+         anybranch: boolean;
+       begin
++        result:=false;
+         positions.clear;
+-        pos:=0;
++        nlabels:=0;
++        pos.lo:=0;
++        pos.slack:=0;
++        { the procedure starts at this alignment (record_generated_code_for_procdef) }
++        base:=max(1,getprocalign);
+         anybranch:=false;
+         hp:=tai(aktproccode.first);
+         while assigned(hp) do
+           begin
++            if has_numeric_target(hp) then
++              exit;
+             if hp.typ=ait_label then
+-              positions.add(tai_label(hp).labsym.name,pointer(ptruint(pos+1)))
++              add_label(tai_label(hp).labsym,pos)
+             else if hp.typ=ait_symbol then
+-              positions.add(tai_symbol(hp).sym.name,pointer(ptruint(pos+1)))
++              add_label(tai_symbol(hp).sym,pos)
+             else if is_cond_branch(hp,opidx,lo,hi) then
+-              anybranch:=true;
+-            inc(pos,size_of(hp));
++              anybranch:=true
++            else if (hp.typ=ait_align) and (pos.lo=0) and (pos.slack=0) then
++              { an alignment before the first byte sets where the procedure starts }
++              base:=max(base,tai_align(hp).aligntype);
++            advance(hp,pos,base);
+             hp:=tai(hp.next);
+           end;
+-        result:=anybranch and (pos>TB_MAX);
++        result:=anybranch and (pos.lo+pos.slack>TB_MAX);
+       end;
+ 
+-    { rewrites every conditional branch whose label is out of reach in the layout find_labels counted; true
+-      when it rewrote any. The code it adds is not counted, so that both ends of every distance come from that
++    { rewrites every conditional branch that can be out of reach in the layout find_labels counted; true when
++      it inserted code. The code it inserts is not counted, so that both ends of every distance come from that
+       layout; it moves the code after it, so the caller counts again. }
+     function relax: boolean;
+       var
+         hp: tai;
+-        pos, dist, opidx, lo, hi: longint;
++        pos: tlayout;
++        base, dmin, dmax, opidx, lo, hi: longint;
+         p: pointer;
++        lab: tlayout;
+         sym: tasmsymbol;
+         near: tasmlabel;
+         jump: taicpu;
+-        lab: tai_label;
++        nearlab: tai_label;
+         ref: treference;
+       begin
+         result:=false;
+-        pos:=0;
++        pos.lo:=0;
++        pos.slack:=0;
++        base:=max(1,getprocalign);
+         hp:=tai(aktproccode.first);
+         while assigned(hp) do
+           begin
+-            inc(pos,size_of(hp));
++            if (hp.typ=ait_align) and (pos.lo=0) and (pos.slack=0) then
++              base:=max(base,tai_align(hp).aligntype);
+             if is_cond_branch(hp,opidx,lo,hi) then
+               begin
+                 sym:=taicpu(hp).oper[opidx]^.ref^.symbol;
+-                p:=positions.find(sym.name);
+-                { the label's offset less the branch's own, which is pos-4 }
+-                dist:=longint(ptruint(p))-1-(pos-4);
+-                if assigned(p) and ((dist<lo) or (dist>hi)) then
++                p:=positions.find(key_of(sym));
++                if assigned(p) then
+                   begin
+-                    { tbz reg,#bit,far  ->  tbnz reg,#bit,near; b far; near:  (likewise cbz, cbnz and b.cond) }
+-                    case taicpu(hp).opcode of
+-                      A_TBZ:
+-                        taicpu(hp).opcode:=A_TBNZ;
+-                      A_TBNZ:
+-                        taicpu(hp).opcode:=A_TBZ;
+-                      A_CBZ:
+-                        taicpu(hp).opcode:=A_CBNZ;
+-                      A_CBNZ:
+-                        taicpu(hp).opcode:=A_CBZ;
+-                      else
+-                        taicpu(hp).condition:=inverse_cond(taicpu(hp).condition);
+-                    end;
+-                    current_asmdata.getjumplabel(near);
+-                    reference_reset_symbol(ref,near,0,0,[]);
+-                    ref.refaddr:=addr_full;
+-                    { loadref counts the reference to near; the b takes over the one to far }
+-                    taicpu(hp).loadref(opidx,ref);
+-                    sym.decrefs;
+-                    jump:=taicpu.op_sym(A_B,sym);
+-                    jump.is_jmp:=true;
+-                    jump.fileinfo:=taicpu(hp).fileinfo;
+-                    lab:=tai_label.create(near);
+-                    aktproccode.insertafter(lab,hp);
+-                    aktproccode.insertafter(jump,hp);
+-                    hp:=lab;
+-                    result:=true;
++                    lab:=labels[ptruint(p)-1];
++                    { the distance from the branch to its label lies between dmin and dmax: only the slack
++                      between the two can add to it }
++                    dmin:=lab.lo-pos.lo+min(0,lab.slack-pos.slack);
++                    dmax:=lab.lo-pos.lo+max(0,lab.slack-pos.slack);
++                    if (dmin<lo) or (dmax>hi) then
++                      begin
++                        if (taicpu(hp).opcode=A_B) and (taicpu(hp).condition in [C_AL,C_NV]) then
++                          { it branches always: a b reaches +-128 MiB in its place }
++                          taicpu(hp).condition:=C_None
++                        else
++                          begin
++                            { tbz reg,#bit,far  ->  tbnz reg,#bit,near; b far; near:
++                              (likewise cbz, cbnz and b.cond) }
++                            case taicpu(hp).opcode of
++                              A_TBZ:
++                                taicpu(hp).opcode:=A_TBNZ;
++                              A_TBNZ:
++                                taicpu(hp).opcode:=A_TBZ;
++                              A_CBZ:
++                                taicpu(hp).opcode:=A_CBNZ;
++                              A_CBNZ:
++                                taicpu(hp).opcode:=A_CBZ;
++                              else
++                                taicpu(hp).condition:=inverse_cond(taicpu(hp).condition);
++                            end;
++                            current_asmdata.getjumplabel(near);
++                            reference_reset_symbol(ref,near,0,0,[]);
++                            ref.refaddr:=addr_full;
++                            { loadref counts the reference to near; the b takes over the one to far }
++                            taicpu(hp).loadref(opidx,ref);
++                            sym.decrefs;
++                            jump:=taicpu.op_sym(A_B,sym);
++                            jump.is_jmp:=true;
++                            jump.fileinfo:=taicpu(hp).fileinfo;
++                            nearlab:=tai_label.create(near);
++                            aktproccode.insertafter(nearlab,hp);
++                            aktproccode.insertafter(jump,hp);
++                            advance(hp,pos,base);
++                            hp:=tai(nearlab.next);
++                            result:=true;
++                            continue;
++                          end;
++                      end;
+                   end;
+               end;
++            advance(hp,pos,base);
+             hp:=tai(hp.next);
+           end;
+       end;
+@@ -246,10 +324,13 @@ implementation
+       inherited postprocess_code;
+       { tbz and tbnz reach +-32 KiB, cbz, cbnz and b.cond +-1 MiB. The peephole optimizer forms tbz and tbnz from
+         tst (or and plus cmp) and b.eq or b.ne without knowing how far the label is, so in a large procedure one
+-        can point past its reach, which the assembler refuses. A conditional branch whose label is out of reach
+-        becomes the opposite test over an unconditional branch, which reaches +-128 MiB. Each rewrite moves the
+-        code after it, which can put another branch out of reach, so the pass repeats until none is. }
++        can point past its reach, which the assembler refuses. A conditional branch whose label can be out of
++        reach becomes the opposite test over an unconditional branch, which reaches +-128 MiB. Each rewrite
++        moves the code after it, which can put another branch out of reach, so the pass repeats until none
++        is. Where the layout is exact, a procedure that assembles as it is stays unchanged. }
+       positions:=TFPHashList.create;
++      labels:=nil;
++      nlabels:=0;
+       try
+         while find_labels and relax do
+           ;
+diff --git a/tests/test/opt/ttbz2.pp b/tests/test/opt/ttbz2.pp
+index 3d8464f5..c6f59bd6 100644
+--- a/tests/test/opt/ttbz2.pp
++++ b/tests/test/opt/ttbz2.pp
+@@ -1,7 +1,7 @@
+ { %OPT=-O2 }
+ { %CPU=aarch64 }
+ 
+-{ tbz and tbnz reach -32768 to +32764 bytes, cbz, cbnz and b.cond -1 MiB to +1 MiB - 4. A conditional branch
++{ tbz and tbnz reach -32768 to +32764 bytes, cbz, cbnz and b.cond (b.al too) -1 MiB to +1 MiB - 4. A conditional branch
+   whose label is further away becomes the opposite test over a b: across data in the code, backwards to the start
+   of a procedure, by its label and by its name, for a second branch whose ends both move when the first one is
+   rewritten, and for a branch in reach that a rewrite puts out of reach. The data is never executed; .lcomm is
+@@ -267,6 +267,17 @@ asm
+   mov w0,#3
+ end;
+ 
++{ b.al branches always, but with the reach of b.cond: 2 }
++function far_always: longint; assembler; nostackframe;
++asm
++  b.al .Lthere
++  mov w0,#1
++  ret
++  .lcomm ttbz2_pad4,1100000
++.Lthere:
++  mov w0,#2
++end;
++
+ var
+   i: longint;
+ begin
+@@ -293,5 +304,7 @@ begin
+     halt(12);
+   if (far_cond(0)<>2) or (far_cond(8)<>3) or (far_cond(5)<>1) then
+     halt(13);
++  if far_always<>2 then
++    halt(14);
+   writeln('ok');
+ end.

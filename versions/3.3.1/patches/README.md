@@ -60,6 +60,18 @@ that is an array or a record went into a temp of its declared size, and the loop
 variable-length idiom (a last field declared `array[0..0]`, indexed past it) read the stack beyond the temp
 (`tests/test/opt/tslp4.pp`). 0130 makes that test's record case fail on its own when only record fields are
 moved again (it accumulated into the function result, a store that kept every load in the loop).
+0131-0134 are for aarch64 only: the peephole optimizer turns a test of one bit (`tst`, or `and` plus `cmp`) and
+a `b.eq` or `b.ne` into `tbz` or `tbnz`, which reach only -32768 to +32764 bytes, without knowing how far the
+label is, so in a larger procedure the assembler refused one ("conditional branch out of range"). After the
+optimizer, every conditional branch whose label in the same procedure can be out of its reach (`tbz` and `tbnz`
++-32 KiB; `cbz`, `cbnz` and `b.cond`, `b.al` included, +-1 MiB) becomes the opposite test over an unconditional
+`b`, which reaches +-128 MiB (a `b.al` becomes a `b`). Each rewrite moves the code after it, so the pass repeats
+until no branch can be out of reach (`tests/test/opt/ttbz1.pp`, `ttbz2.pp`). Distances are counted in bytes;
+alignments no larger than the procedure's own are counted exactly, so with the default alignments a procedure
+that assembles as it is stays unchanged. A larger alignment or inline `.lcomm` makes the count a range, and a
+branch whose range reaches past its reach is rewritten. A procedure with a numeric pc-relative target in inline
+assembler (`b.eq #8`) is left as it is. 0132-0134 correct and extend 0131, which counted instructions with a
+margin, gave inline data no size and handled only `tbz` and `tbnz`.
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
