@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Sat, 21 Nov 2026 22:52:25 +0000
-Subject: [PATCH 126/128] compiler: a class helper's alias procsym is refilled,
+Subject: [PATCH 126/129] compiler: a class helper's alias procsym is refilled,
  not dereferenced, when its symtable resolves again
 
 Re-resolving the symbol tables loaded from a ppu when a used unit is recompiled (a7b0e8a265)

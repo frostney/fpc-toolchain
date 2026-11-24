@@ -1,0 +1,141 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Tue, 24 Nov 2026 02:03:27 +0000
+Subject: [PATCH 129/129] optslp: loads of an array or a record stay in the
+ loop
+
+do_hoist_invariant_loads moved a field load that is an array or a record
+before the loop into a temp, and the loop then indexed or selected in the
+temp. A temp holds only the field's declared size, so the variable-length
+idiom, a last field declared array[0..0] and indexed past it, read the
+temp's neighbours on the stack: P^.Data[I] for I > 0 compared against
+saved registers. Only values that are loaded whole move now: ordinals,
+floats, pointers, enumerations, class references, procedure variables,
+class instances and SSE vectors.
+
+tests/test/opt/tslp4.pp: a scan of such an array and of one inside a
+record, at -O4.
+---
+ compiler/optslp.pas     | 14 ++++++-
+ tests/test/opt/tslp4.pp | 87 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 100 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test/opt/tslp4.pp
+
+diff --git a/compiler/optslp.pas b/compiler/optslp.pas
+index 0893a401..a96bc7e1 100644
+--- a/compiler/optslp.pas
++++ b/compiler/optslp.pas
+@@ -1294,7 +1294,19 @@ function load_access(n: tnode; out acc: taccess): boolean;
+         acc.size:=n.resultdef.size;
+       end
+     else if n.nodetype=subscriptn then
+-      acc:=get_access(n)
++      begin
++        { only a value that is loaded whole: a field that is an array or a
++          record is indexed or selected after the load, and a copy holds only
++          its declared size, so the variable-length idiom (a last field
++          declared array[0..0] and indexed past it) would read the copy's
++          neighbours }
++        if not (n.resultdef.typ in [orddef,floatdef,pointerdef,enumdef,
++                                    classrefdef,procvardef]) and
++           not is_implicit_pointer_object_type(n.resultdef) and
++           not is_vector(n.resultdef) then
++          exit;
++        acc:=get_access(n);
++      end
+     else
+       exit;
+     result:=acc.valid and (acc.base.nodetype=derefn);
+diff --git a/tests/test/opt/tslp4.pp b/tests/test/opt/tslp4.pp
+new file mode 100644
+index 00000000..8c6068d6
+--- /dev/null
++++ b/tests/test/opt/tslp4.pp
+@@ -0,0 +1,87 @@
++{ %CPU=x86_64 }
++{ %OPT=-O4 }
++{ a load that is an array or a record is not moved before a loop
++  (optslp, do_hoist_invariant_loads): the loop indexes or selects in it
++  after the load, and a copy holds only the declared size, so the
++  variable-length idiom (a last field declared array[0..0] and indexed past
++  it) read the copy's neighbours on the stack }
++program tslp4;
++
++{$mode objfpc}
++{$R-}
++
++type
++  PVarLen = ^TVarLen;
++  TVarLen = packed record
++    Hdr: QWord;
++    Cap, Len: LongWord;
++    Data: array[0..0] of QWord;
++  end;
++
++  TInner = record
++    Count: LongInt;
++    Items: array[0..0] of LongInt;
++  end;
++  POuter = ^TOuter;
++  TOuter = record
++    Tag: LongInt;
++    Inner: TInner;
++  end;
++
++var
++  errors: longint = 0;
++  V: PVarLen;
++  O: POuter;
++
++function Contains(P: PVarLen; X: QWord): Boolean;
++var
++  I: LongInt;
++begin
++  for I := 0 to LongInt(P^.Len) - 1 do
++    if P^.Data[I] = X then
++      exit(true);
++  result := false;
++end;
++
++function Sum(P: POuter): LongInt;
++var
++  I: LongInt;
++begin
++  result := 0;
++  for I := 0 to P^.Inner.Count - 1 do
++    inc(result, P^.Inner.Items[I]);
++end;
++
++procedure check(ok: boolean; const what: string);
++begin
++  if not ok then
++    begin
++      writeln('error: ', what);
++      inc(errors);
++    end;
++end;
++
++var
++  I: LongInt;
++begin
++  GetMem(V, SizeOf(TVarLen) + 16 * SizeOf(QWord));
++  V^.Len := 10;
++  for I := 0 to 9 do
++    V^.Data[I] := 1000 + I;
++  check(Contains(V, 1000), 'first element');
++  check(Contains(V, 1005), 'middle element');
++  check(Contains(V, 1009), 'last element');
++  check(not Contains(V, 42), 'missing element');
++
++  GetMem(O, SizeOf(TOuter) + 16 * SizeOf(LongInt));
++  O^.Inner.Count := 8;
++  for I := 0 to 7 do
++    O^.Inner.Items[I] := I + 1;
++  check(Sum(O) = 36, 'sum of a record''s variable-length array');
++
++  FreeMem(V);
++  FreeMem(O);
++  if errors <> 0 then
++    halt(1);
++  writeln('ok');
++end.
