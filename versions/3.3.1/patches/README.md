@@ -53,6 +53,13 @@ method once (`tests/tppu/reloadcopy`).
 0128 limits that second dereference to the defs and syms the table had when it got its dereference data: one the
 first dereference added (the array type of a constant's data, such as `#$0100#$0101`) has none, and dereferencing
 it stopped with internal error 200306067.
+0129 narrows 0112's hoisting of loop-invariant loads (`-O4`, under `SLP`) to values loaded whole: ordinals,
+floats, pointers, enumerations, class references, procedure variables, implicit-pointer object types (classes and
+interfaces, COM, CORBA and dispatch) and SSE vectors. A field
+that is an array or a record went into a temp of its declared size, and the loop then indexed the temp, so the
+variable-length idiom (a last field declared `array[0..0]`, indexed past it) read the stack beyond the temp
+(`tests/test/opt/tslp4.pp`). 0130 makes that test's record case fail on its own when only record fields are
+moved again (it accumulated into the function result, a store that kept every load in the loop).
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
