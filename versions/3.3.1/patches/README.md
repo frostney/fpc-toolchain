@@ -72,14 +72,14 @@ that assembles as it is stays unchanged. A larger alignment or inline `.lcomm` m
 branch whose range reaches past its reach is rewritten. A procedure with a numeric pc-relative target in inline
 assembler (`b.eq #8`) is left as it is. 0132-0134 correct and extend 0131, which counted instructions with a
 margin, gave inline data no size and handled only `tbz` and `tbnz`.
-0135-0137 fix the retry loop that upstream's 6c342d7e (FPC #41783, in this base) gave `DoFileLocking`
+0135-0138 fix the retry loop that upstream's 6c342d7e (FPC #41783, in this base) gave `DoFileLocking`
 (`rtl/unix/sysutils.pp`): a lock that fails with `EAGAIN` is retried after `Sleep(1)` up to 30 times, and the loop
 read `fpgeterrno` again after that `Sleep`. On Darwin, `nanosleep` returns 0 and leaves `errno` at `ETIMEDOUT`, so the
 loop stopped after the first `Sleep`, before retrying, took the error for a system without working locks and kept the
 handle: a file open with `fmShareExclusive` could be opened again in the same process with `fmShareDenyWrite` or
 `fmShareExclusive`. The loop now keeps the `errno` of each `fpflock` call (`tests/test/units/classes/tfsharelock.pp`,
-on Linux, Darwin, FreeBSD, OpenBSD and NetBSD; `tests/test/units/sysutils/tfile2.pp` failed on Darwin too). 0136-0137
-limit that test to those targets and give each run a temporary file of its own.
+on Linux, Darwin, FreeBSD, OpenBSD and NetBSD; `tests/test/units/sysutils/tfile2.pp` failed on Darwin too). 0136-0138
+limit that test to those targets and give each run a temporary file of its own, created with `O_EXCL`.
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
