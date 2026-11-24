@@ -58,7 +58,8 @@ floats, pointers, enumerations, class references, procedure variables, implicit-
 interfaces, COM, CORBA and dispatch) and SSE vectors. A field
 that is an array or a record went into a temp of its declared size, and the loop then indexed the temp, so the
 variable-length idiom (a last field declared `array[0..0]`, indexed past it) read the stack beyond the temp
-(`tests/test/opt/tslp4.pp`).
+(`tests/test/opt/tslp4.pp`). 0130 makes that test's record case fail on its own when only record fields are
+moved again (it accumulated into the function result, a store that kept every load in the loop).
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
