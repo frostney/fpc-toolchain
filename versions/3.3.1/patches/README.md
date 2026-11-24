@@ -54,7 +54,8 @@ method once (`tests/tppu/reloadcopy`).
 first dereference added (the array type of a constant's data, such as `#$0100#$0101`) has none, and dereferencing
 it stopped with internal error 200306067.
 0129 narrows 0112's hoisting of loop-invariant loads (`-O4`, under `SLP`) to values loaded whole: ordinals,
-floats, pointers, enumerations, class references, procedure variables, class instances and SSE vectors. A field
+floats, pointers, enumerations, class references, procedure variables, implicit-pointer object types (classes and
+interfaces, COM, CORBA and dispatch) and SSE vectors. A field
 that is an array or a record went into a temp of its declared size, and the loop then indexed the temp, so the
 variable-length idiom (a last field declared `array[0..0]`, indexed past it) read the stack beyond the temp
 (`tests/test/opt/tslp4.pp`).
