@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Tue, 24 Nov 2026 21:10:32 +0000
+Subject: [PATCH 136/136] tfsharelock: run only where flock locks conflict, on
+ a file of its own
+
+tfsharelock ran on every target, but WASI's FileOpen takes no lock and AIX's
+flock, built on fcntl, gives no exclusive lock on a file open for reading,
+so there the second open succeeds whatever DoFileLocking does. It now runs
+on linux, darwin, freebsd, openbsd and netbsd, which share DoFileLocking's
+flock path. It also wrote and deleted tfsharelock.dat in the current
+directory, whatever was there; it now uses a file from GetTempFileName and
+deletes it in a finally block.
+
+0135's message says the loop stopped after the first retry: it stopped after
+the first Sleep, before retrying.
+---
+ tests/test/units/classes/tfsharelock.pp | 27 +++++++++++++++----------
+ 1 file changed, 16 insertions(+), 11 deletions(-)
+
+diff --git a/tests/test/units/classes/tfsharelock.pp b/tests/test/units/classes/tfsharelock.pp
+index 95f2af03..6f27bfb2 100644
+--- a/tests/test/units/classes/tfsharelock.pp
++++ b/tests/test/units/classes/tfsharelock.pp
+@@ -1,3 +1,4 @@
++{ %target=linux,darwin,freebsd,openbsd,netbsd }
+ { A TFileStream on a file another one holds with fmShareExclusive raises
+   EFOpenError. On Unix, DoFileLocking retries a lock that fails with EAGAIN
+   after a Sleep(1); on Darwin that Sleep returned with errno at ETIMEDOUT,
+@@ -10,8 +11,8 @@ program tfsharelock;
+ uses
+   SysUtils, Classes;
+ 
+-const
+-  FileName = 'tfsharelock.dat';
++var
++  FileName: string;
+ 
+ procedure CheckRefused(Mode: Word; const What: string);
+ var
+@@ -31,19 +32,23 @@ end;
+ var
+   First: TFileStream;
+ begin
++  FileName := GetTempFileName(GetTempDir, 'tfsharelock');
+   TFileStream.Create(FileName, fmCreate).Free;
+-  First := TFileStream.Create(FileName, fmOpenRead or fmShareExclusive);
+   try
+-    CheckRefused(fmOpenRead or fmShareDenyWrite,
+-      'opening with fmShareDenyWrite a file open with fmShareExclusive');
+-    CheckRefused(fmOpenRead or fmShareExclusive,
+-      'opening with fmShareExclusive a file open with fmShareExclusive');
++    First := TFileStream.Create(FileName, fmOpenRead or fmShareExclusive);
++    try
++      CheckRefused(fmOpenRead or fmShareDenyWrite,
++        'opening with fmShareDenyWrite a file open with fmShareExclusive');
++      CheckRefused(fmOpenRead or fmShareExclusive,
++        'opening with fmShareExclusive a file open with fmShareExclusive');
++    finally
++      First.Free;
++    end;
++    { the lock goes with the stream that held it }
++    TFileStream.Create(FileName, fmOpenRead or fmShareDenyWrite).Free;
+   finally
+-    First.Free;
++    DeleteFile(FileName);
+   end;
+-  { the lock goes with the stream that held it }
+-  TFileStream.Create(FileName, fmOpenRead or fmShareDenyWrite).Free;
+-  DeleteFile(FileName);
+   if ExitCode = 0 then
+     WriteLn('ok');
+ end.
