@@ -60,14 +60,16 @@ that is an array or a record went into a temp of its declared size, and the loop
 variable-length idiom (a last field declared `array[0..0]`, indexed past it) read the stack beyond the temp
 (`tests/test/opt/tslp4.pp`). 0130 makes that test's record case fail on its own when only record fields are
 moved again (it accumulated into the function result, a store that kept every load in the loop).
-0131 and 0132 are for aarch64 only: the peephole optimizer turns a test of one bit (`tst`, or `and` plus `cmp`)
-and a `b.eq` or `b.ne` into `tbz` or `tbnz`, which reach only -32768 to +32764 bytes, without knowing how far the
+0131-0133 are for aarch64 only: the peephole optimizer turns a test of one bit (`tst`, or `and` plus `cmp`) and
+a `b.eq` or `b.ne` into `tbz` or `tbnz`, which reach only -32768 to +32764 bytes, without knowing how far the
 label is, so in a larger procedure the assembler refused one ("conditional branch out of range"). After the
-optimizer, each one whose label in the same procedure is out of that reach becomes the opposite test over an
-unconditional `b`, which reaches +-128 MiB. The distance is counted in bytes from instructions, constants, strings
-and the most padding an alignment can add, so it is never shorter than the real one; one in reach is left as it
-is (`tests/test/opt/ttbz1.pp`, `ttbz2.pp`). 0132 corrects 0131, which counted instructions with a margin and gave
-inline data no size.
+optimizer, every conditional branch whose label in the same procedure is out of its reach (`tbz` and `tbnz` +-32
+KiB; `cbz`, `cbnz` and `b.cond` +-1 MiB) becomes the opposite test over an unconditional `b`, which reaches +-128
+MiB. Distances are counted in bytes from instructions, constants, strings, inline `.lcomm` and the most padding
+an alignment can add, so they are never shorter than the real ones; a branch in reach is left as it is unless
+padding is counted that the assembler does not add. Each rewrite moves the code after it, so the pass repeats
+until no branch is out of reach (`tests/test/opt/ttbz1.pp`, `ttbz2.pp`). 0132 and 0133 correct and extend
+0131, which counted instructions with a margin, gave inline data no size and handled only `tbz` and `tbnz`.
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 
