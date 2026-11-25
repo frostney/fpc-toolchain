@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Tue, 24 Nov 2026 05:51:44 +0000
-Subject: [PATCH 132/134] aarch64: count a far tbz or tbnz in bytes, with the
+Subject: [PATCH 132/138] aarch64: count a far tbz or tbnz in bytes, with the
  exact reach
 
 The tbz and tbnz relaxation (patch 0131) counted the code in instructions

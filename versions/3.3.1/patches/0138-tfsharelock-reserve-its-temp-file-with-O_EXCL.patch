@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Tue, 24 Nov 2026 21:28:34 +0000
+Subject: [PATCH 138/138] tfsharelock: reserve its temp file with O_EXCL
+
+A process id in the name keeps runs in one process namespace apart, but two
+runners in separate PID namespaces that share a temp directory can have the
+same id and still take the same file. The test now creates its file with
+FpOpen(O_CREAT or O_EXCL), takes the next name while one is taken, and
+deletes only the file it created. It runs on Unix targets only, so BaseUnix
+is available.
+---
+ tests/test/units/classes/tfsharelock.pp | 28 ++++++++++++++++++++-----
+ 1 file changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/tests/test/units/classes/tfsharelock.pp b/tests/test/units/classes/tfsharelock.pp
+index 9b1d846d..2889b522 100644
+--- a/tests/test/units/classes/tfsharelock.pp
++++ b/tests/test/units/classes/tfsharelock.pp
+@@ -9,7 +9,7 @@ program tfsharelock;
+ {$mode objfpc}{$h+}
+ 
+ uses
+-  SysUtils, Classes;
++  BaseUnix, SysUtils, Classes;
+ 
+ var
+   FileName: string;
+@@ -29,13 +29,31 @@ begin
+   ExitCode := 1;
+ end;
+ 
++{ Creates a file no other run has: O_EXCL fails if the name is taken, by a
++  run in this or any other process }
++function ReserveTempFile: string;
++var
++  I: Integer;
++  Fd: cint;
++begin
++  I := 0;
++  repeat
++    Result := Format('%stfsharelock%.5d.tmp', [GetTempDir, I]);
++    Fd := FpOpen(Result, O_WRONLY or O_CREAT or O_EXCL, &600);
++    Inc(I);
++  until (Fd >= 0) or (fpgeterrno <> ESysEEXIST);
++  if Fd < 0 then
++    begin
++      WriteLn('error: cannot create ', Result);
++      Halt(1);
++    end;
++  FpClose(Fd);
++end;
++
+ var
+   First: TFileStream;
+ begin
+-  { GetTempFileName reserves nothing: the process id keeps runs that start
+-    together off each other's file }
+-  FileName := GetTempFileName(GetTempDir, 'tfsharelock' + IntToStr(GetProcessID) + '-');
+-  TFileStream.Create(FileName, fmCreate).Free;
++  FileName := ReserveTempFile;
+   try
+     First := TFileStream.Create(FileName, fmOpenRead or fmShareExclusive);
+     try

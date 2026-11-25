@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Tue, 24 Nov 2026 20:51:46 +0000
+Subject: [PATCH 135/138] rtl: unix: DoFileLocking keeps fpflock's errno across
+ the Sleep of its retry loop
+
+DoFileLocking retries a lock that fails with EAGAIN after Sleep(1), and
+read fpgeterrno again in the loop's until and in its final test. On Darwin,
+Sleep (nanosleep) returns 0 but leaves errno at ETIMEDOUT, so after the first
+retry the loop stopped on errno 60, took it for a system without working
+locks and kept the handle: a file open with fmShareExclusive could be opened
+again in the same process, with fmShareDenyWrite or fmShareExclusive.
+
+lockerr now keeps fpflock's errno, read right after each call, for the until
+and the final test. tests/test/units/classes/tfsharelock.pp holds a file with
+fmShareExclusive and checks that a second TFileStream on it raises
+EFOpenError, with fmShareDenyWrite and with fmShareExclusive. With 3.3.1+7 it
+fails on aarch64-darwin and x86_64-darwin, as does
+tests/test/units/sysutils/tfile2.pp; with the series both pass.
+---
+ rtl/unix/sysutils.pp                    |  8 ++--
+ tests/test/units/classes/tfsharelock.pp | 49 +++++++++++++++++++++++++
+ 2 files changed, 54 insertions(+), 3 deletions(-)
+ create mode 100644 tests/test/units/classes/tfsharelock.pp
+
+diff --git a/rtl/unix/sysutils.pp b/rtl/unix/sysutils.pp
+index de7a901e..e8e0403d 100644
+--- a/rtl/unix/sysutils.pp
++++ b/rtl/unix/sysutils.pp
+@@ -421,8 +421,11 @@ begin
+       TryCount:=0;
+       repeat
+         lockres:=fpflock(Handle,lockop);
++        { Keep fpflock's errno: Sleep can change it (on Darwin, nanosleep
++          returns 0 and leaves errno at ETIMEDOUT) }
++        lockerr:=fpgeterrno;
+         // On EAGAIN, do not try indefinitely
+-        if (lockres<>0) and (fpgeterrno=ESysEAGAIN) then
++        if (lockres<>0) and (lockerr=ESysEAGAIN) then
+           begin
+           Inc(TryCount);
+           if TryCount > 30 then
+@@ -431,8 +434,7 @@ begin
+             Sleep(1);
+           end;
+       until (lockres=0) or
+-            ((fpgeterrno<>ESysEIntr) and (fpgeterrno<>ESysEAGAIN));
+-      lockerr:=fpgeterrno;
++            ((lockerr<>ESysEIntr) and (lockerr<>ESysEAGAIN));
+       { Only return an error if locks are working and the file was already
+         locked. Not if locks are simply unsupported (e.g., on Angstrom Linux
+         you always get ESysNOLCK in the default configuration) }
+diff --git a/tests/test/units/classes/tfsharelock.pp b/tests/test/units/classes/tfsharelock.pp
+new file mode 100644
+index 00000000..95f2af03
+--- /dev/null
++++ b/tests/test/units/classes/tfsharelock.pp
+@@ -0,0 +1,49 @@
++{ A TFileStream on a file another one holds with fmShareExclusive raises
++  EFOpenError. On Unix, DoFileLocking retries a lock that fails with EAGAIN
++  after a Sleep(1); on Darwin that Sleep returned with errno at ETIMEDOUT,
++  the retry loop took it for a system without locks and the second open
++  succeeded }
++program tfsharelock;
++
++{$mode objfpc}{$h+}
++
++uses
++  SysUtils, Classes;
++
++const
++  FileName = 'tfsharelock.dat';
++
++procedure CheckRefused(Mode: Word; const What: string);
++var
++  S: TFileStream;
++begin
++  try
++    S := TFileStream.Create(FileName, Mode);
++  except
++    on EFOpenError do
++      Exit;
++  end;
++  S.Free;
++  WriteLn('error: ', What, ' succeeded');
++  ExitCode := 1;
++end;
++
++var
++  First: TFileStream;
++begin
++  TFileStream.Create(FileName, fmCreate).Free;
++  First := TFileStream.Create(FileName, fmOpenRead or fmShareExclusive);
++  try
++    CheckRefused(fmOpenRead or fmShareDenyWrite,
++      'opening with fmShareDenyWrite a file open with fmShareExclusive');
++    CheckRefused(fmOpenRead or fmShareExclusive,
++      'opening with fmShareExclusive a file open with fmShareExclusive');
++  finally
++    First.Free;
++  end;
++  { the lock goes with the stream that held it }
++  TFileStream.Create(FileName, fmOpenRead or fmShareDenyWrite).Free;
++  DeleteFile(FileName);
++  if ExitCode = 0 then
++    WriteLn('ok');
++end.

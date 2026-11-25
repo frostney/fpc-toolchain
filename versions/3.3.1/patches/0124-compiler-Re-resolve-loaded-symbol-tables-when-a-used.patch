@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: mattias <nc-gaertnma@netcologne.de>
 Date: Sat, 31 Oct 2026 09:43:02 +0100
-Subject: [PATCH 124/134] compiler: Re-resolve loaded symbol tables when a used
+Subject: [PATCH 124/138] compiler: Re-resolve loaded symbol tables when a used
  unit is recompiled, patch from Pascal Riekenberg, issue #41970
 
 (cherry picked from commit a7b0e8a2652184f4e19af2063076ca416e256f20, without the two
