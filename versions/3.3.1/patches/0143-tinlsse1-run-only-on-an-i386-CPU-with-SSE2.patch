@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Wed, 25 Nov 2026 19:59:25 +0000
+Subject: [PATCH 143/143] tinlsse1: run only on an i386 CPU with SSE2
+
+The test compiles its floating-point code for SSE2 on i386. On a CPU
+without SSE2 it now exits 0 before the first such instruction, as
+tw7161 does (is_sse2_cpu from the mmx unit).
+---
+ tests/test/tinlsse1.pp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/tests/test/tinlsse1.pp b/tests/test/tinlsse1.pp
+index 184d7738..3867a9d7 100644
+--- a/tests/test/tinlsse1.pp
++++ b/tests/test/tinlsse1.pp
+@@ -10,6 +10,11 @@
+ 
+ program tinlsse1;
+ 
++{$ifdef cpui386}
++uses
++  mmx;
++{$endif}
++
+ function FloorD(X: Double): Double; inline;
+ begin
+   Result := Int(X);
+@@ -30,6 +35,11 @@ end;
+ var
+   R: Double;
+ begin
++{$ifdef cpui386}
++  { the program's floating-point code needs SSE2 }
++  if not is_sse2_cpu then
++    halt(0);
++{$endif}
+   R := Day(1000) - Other(1);
+   if R <> 93 then
+   begin

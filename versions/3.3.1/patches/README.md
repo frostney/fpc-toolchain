@@ -93,6 +93,16 @@ to go on. On win64 (0140, `rtl/win64/seh64.inc`, which aarch64-win64 shares) the
 entry as unwinding at all, so an exception with no handler that a finally block replaced stayed on the stack and
 was never freed (`tests/test/texcreplace1.pp`; it passes on x86_64-linux with and without these patches). 0141
 adds the test's case of an exception caught further out than the abandoned unwind's handler.
+0142 fixes how a call's result reaches the location its caller gave it, such as the result of an inlined function
+that assigns the call to it (`tcgcallnode.handle_return_value`, `compiler/ncgcal.pas`). For a result the call left
+in memory and a location in an MM register, it stored the register over the result instead of loading the result
+into it, so the caller read whatever that register held. A float result is left in memory there when it comes back
+in another kind of register than the one the compiler keeps its type in: in ST(0) on i386 compiled for SSE
+(`{$fputype sse2}` and later for Double), in r0/r1 on arm with a VFP fputype and a soft-float ABI (EABI, not
+`-CaEABIHF`; checked in the assembly). An inline function whose result is a call of another function, `Result :=
+FloorD(T / 10)`, returned 0 or a stale value (`tests/test/tinlsse1.pp`, on i386 at `-O-` to `-O4`). x86_64 returns
+Single and Double in xmm0 and aarch64 in d0 or s0, so neither reaches that copy. Upstream main still has it. 0143
+makes that test exit 0 on an i386 CPU without SSE2, as `tw7161.pp` does.
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 

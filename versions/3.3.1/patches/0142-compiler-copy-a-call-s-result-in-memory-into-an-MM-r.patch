@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Wed, 25 Nov 2026 19:40:13 +0000
+Subject: [PATCH 142/143] compiler: copy a call's result in memory into an
+ MM-register funcretnode, not the other way round
+
+tcgcallnode.handle_return_value copies a call's result into the location
+the caller provided (funcretnode), such as an inlined function's result.
+For a result left in memory with a funcretnode in an MM register it called
+a_loadmm_reg_ref(funcretnode's register, the result's reference), which
+writes the funcretnode over the result. An i386 build compiled for SSE2
+gets a Double result in ST(0) and stores it to memory, so an inline
+function whose result is a call of another function, such as
+Result := FloorD(T / 10) inlined into its caller, read whatever its result
+register held instead (0, or a stale value). It now loads the reference
+into the register (a_loadmm_ref_reg).
+
+tests/test/tinlsse1.pp fails on i386-win32 with -O1 before the change
+(-7.000 for 93) and passes after it.
+---
+ compiler/ncgcal.pas    |  2 +-
+ tests/test/tinlsse1.pp | 46 ++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 47 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test/tinlsse1.pp
+
+diff --git a/compiler/ncgcal.pas b/compiler/ncgcal.pas
+index 7ba2c324..5aa8cf64 100644
+--- a/compiler/ncgcal.pas
++++ b/compiler/ncgcal.pas
+@@ -706,7 +706,7 @@ implementation
+                       hlcg.g_concatcopy(current_asmdata.CurrAsmList,resultdef,location.reference,funcretnode.location.reference);
+                     LOC_CMMREGISTER,
+                     LOC_MMREGISTER:
+-                      hlcg.a_loadmm_reg_ref(current_asmdata.CurrAsmList,resultdef,resultdef,funcretnode.location.register,location.reference,nil);
++                      hlcg.a_loadmm_ref_reg(current_asmdata.CurrAsmList,resultdef,resultdef,location.reference,funcretnode.location.register,nil);
+                     else
+                       internalerror(200802121);
+                   end;
+diff --git a/tests/test/tinlsse1.pp b/tests/test/tinlsse1.pp
+new file mode 100644
+index 00000000..184d7738
+--- /dev/null
++++ b/tests/test/tinlsse1.pp
+@@ -0,0 +1,46 @@
++{ An inline function whose result is a call to another function: the call's
++  result, which an i386 build compiled for SSE2 receives in ST(0) and stores
++  to memory, must be copied to the inlined function's result, not the other
++  way round (tcgcallnode.handle_return_value, a funcretnode in an MM
++  register). }
++{$mode objfpc}
++{$ifdef cpui386}
++{$fputype sse2}
++{$endif}
++
++program tinlsse1;
++
++function FloorD(X: Double): Double; inline;
++begin
++  Result := Int(X);
++  if Result > X then
++    Result := Result - 1;
++end;
++
++function Day(T: Double): Double; inline;
++begin
++  Result := FloorD(T / 10);
++end;
++
++function Other(T: Double): Double; noinline;
++begin
++  Result := 7;
++end;
++
++var
++  R: Double;
++begin
++  R := Day(1000) - Other(1);
++  if R <> 93 then
++  begin
++    writeln('inlined result: ', R:0:3, ', expected 93');
++    halt(1);
++  end;
++  R := Day(-15) + Other(1);
++  if R <> 5 then
++  begin
++    writeln('inlined result: ', R:0:3, ', expected 5');
++    halt(2);
++  end;
++  writeln('ok');
++end.
