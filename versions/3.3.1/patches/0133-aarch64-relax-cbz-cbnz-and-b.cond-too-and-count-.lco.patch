@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Tue, 24 Nov 2026 05:59:13 +0000
-Subject: [PATCH 133/140] aarch64: relax cbz, cbnz and b.cond too, and count
+Subject: [PATCH 133/141] aarch64: relax cbz, cbnz and b.cond too, and count
  .lcomm and entry symbols
 
 A rewrite adds a b, which moves the code after it, so a cbz, cbnz or

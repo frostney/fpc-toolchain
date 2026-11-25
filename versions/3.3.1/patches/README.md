@@ -80,17 +80,19 @@ handle: a file open with `fmShareExclusive` could be opened again in the same pr
 `fmShareExclusive`. The loop now keeps the `errno` of each `fpflock` call (`tests/test/units/classes/tfsharelock.pp`,
 on Linux, Darwin, FreeBSD, OpenBSD and NetBSD; `tests/test/units/sysutils/tfile2.pp` failed on Darwin too). 0136-0138
 limit that test to those targets and give each run a temporary file of its own, created with `O_EXCL`.
-0139-0140 fix the Windows exception handling that upstream's 7a76e3ff (FPC #41950, in this base) gave the
-exception object stack: a handler links an exception's entry before it unwinds, and an exception that a finally
-block raises during that unwind replaces it, so the replaced entry and object are released once the replacement is
-caught. On i386-win32 (0139, `rtl/win32/seh32.inc`) that happened only when the replacement was caught at or beyond
+0139-0141 fix the Windows exception handling that upstream's 7a76e3ff (FPC #41950, in this base) gave the
+exception object stack: a handler links an exception's entry before it unwinds, and an exception that escapes a
+finally block during that unwind abandons it, so once that exception is caught the abandoned entry leaves the stack
+and its object is freed unless it was acquired. An exception caught inside the finally block leaves the unwind to
+go on. On i386-win32 (0139, `rtl/win32/seh32.inc`) that happened only when the replacement was caught at or beyond
 the frame the replaced exception unwound to. Caught before it, the entry, which lives in the stack frame of the
 handler that started the unwind, stayed on the stack after that frame was gone, and the next exception a handler
 caught walked it: an access violation in `ReleaseAbandonedExceptions`, or a hang. The entry now records where its
 unwind runs, as on win64: a catch above that point abandons the unwind, a catch inside the finally block leaves it
 to go on. On win64 (0140, `rtl/win64/seh64.inc`, which aarch64-win64 shares) the outermost handler did not mark its
 entry as unwinding at all, so an exception with no handler that a finally block replaced stayed on the stack and
-was never freed (`tests/test/texcreplace1.pp`; it passes on x86_64-linux with and without these patches).
+was never freed (`tests/test/texcreplace1.pp`; it passes on x86_64-linux with and without these patches). 0141
+adds the test's case of an exception caught further out than the abandoned unwind's handler.
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 

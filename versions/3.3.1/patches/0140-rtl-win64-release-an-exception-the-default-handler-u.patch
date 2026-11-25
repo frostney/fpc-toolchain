@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Wed, 25 Nov 2026 01:14:21 +0000
-Subject: [PATCH 140/140] rtl: win64: release an exception the default handler
+Subject: [PATCH 140/141] rtl: win64: release an exception the default handler
  unwinds for when a finally block replaces it
 
 The outermost handler pushes an unhandled exception on the exception
