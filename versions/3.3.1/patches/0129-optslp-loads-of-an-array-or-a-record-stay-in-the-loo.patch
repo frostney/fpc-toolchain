@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Tue, 24 Nov 2026 02:03:27 +0000
-Subject: [PATCH 129/138] optslp: loads of an array or a record stay in the
+Subject: [PATCH 129/141] optslp: loads of an array or a record stay in the
  loop
 
 do_hoist_invariant_loads moved a field load that is an array or a record

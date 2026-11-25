@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Wed, 25 Nov 2026 01:26:01 +0000
+Subject: [PATCH 141/141] texcreplace1: a replacement caught beyond the
+ original's handler, and what is freed
+
+Add the case of an exception from a finally block caught further out than
+the handler the replaced exception unwound to, which must not run. The
+header now says what the release does: an exception that escapes the
+finally block abandons the unwind, whose exception leaves the stack and
+is freed unless it was acquired; one caught inside the block leaves the
+unwind to go on.
+---
+ tests/test/texcreplace1.pp | 39 ++++++++++++++++++++++++++++++++++----
+ 1 file changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/tests/test/texcreplace1.pp b/tests/test/texcreplace1.pp
+index 1c8ccca1..cc2188d1 100644
+--- a/tests/test/texcreplace1.pp
++++ b/tests/test/texcreplace1.pp
+@@ -1,7 +1,8 @@
+-{ an exception raised in a finally block replaces the one whose unwind ran the
+-  block: wherever the replacement is caught, the replaced exception is freed
+-  and leaves no entry on the exception object stack (RaiseList), so later
+-  exceptions are handled normally. On i386-win32, an entry was left behind when
++{ an exception that escapes a finally block abandons the unwind that ran the
++  block: wherever it is caught, the exception of that unwind leaves the
++  exception object stack (RaiseList), and its object is freed unless it was
++  acquired, so later exceptions are handled normally. An exception caught
++  inside the finally block leaves the unwind to go on. On i386-win32, an entry was left behind when
+   the replacement was caught before the frame the replaced exception unwound
+   to; it lived in a handler's dead stack frame, and the next exception that a
+   handler caught crashed or hung in the RTL. }
+@@ -77,6 +78,32 @@ begin
+     fail('replacement caught before the original''s handler');
+ end;
+ 
++{ the replacement is caught beyond the handler the original unwinds to,
++  which must not run }
++procedure caughtbeyond;
++begin
++  trace:='';
++  try
++    try
++      try
++        raise EOriginal.Create('original');
++      finally
++        trace:=trace + 'finally;';
++        raise EReplacement.Create('replacement');
++      end;
++    except
++      on e: EOriginal do
++        trace:=trace + 'original''s handler;';
++    end;
++    trace:=trace + 'after;';
++  except
++    on e: EReplacement do
++      trace:=trace + 'caught ' + e.message + ';';
++  end;
++  if trace<>'finally;caught replacement;' then
++    fail('replacement caught beyond the original''s handler');
++end;
++
+ { the same, with no handler for the original: it unwinds to the outermost
+   frame, so this must not run inside a try statement }
+ procedure caughtbeforeunhandled;
+@@ -175,6 +202,10 @@ begin
+   checkclean('exception raised in an except block, after the second case');
+   caughtat;
+   checkclean('replacement caught by the original''s handler');
++  caughtbeyond;
++  checkclean('replacement caught beyond the original''s handler');
++  raiseinexcept;
++  checkclean('exception raised in an except block, after the fourth case');
+   caughtinside;
+   checkclean('exception caught inside the finally block');
+   raiseinexcept;

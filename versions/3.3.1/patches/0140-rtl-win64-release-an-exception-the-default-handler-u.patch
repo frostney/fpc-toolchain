@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Wed, 25 Nov 2026 01:14:21 +0000
+Subject: [PATCH 140/141] rtl: win64: release an exception the default handler
+ unwinds for when a finally block replaces it
+
+The outermost handler pushes an unhandled exception on the exception
+object stack and unwinds to the outermost frame, but left the entry's
+UnwindFrame nil, so ReleaseAbandonedExceptions never released it: when a
+finally block on the way raised an exception that a handler caught, the
+replaced exception and its entry stayed on the stack (RaiseList) and the
+object was never freed. Mark the entry as unwinding from the handler, as
+__FPC_specific_handler does.
+---
+ rtl/win64/seh64.inc | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/rtl/win64/seh64.inc b/rtl/win64/seh64.inc
+index 1b9e7ac3..86ae02b4 100644
+--- a/rtl/win64/seh64.inc
++++ b/rtl/win64/seh64.inc
+@@ -545,6 +545,9 @@ begin
+     end;
+ {$endif CPUX86_64}
+     PushException(rec,context,obj,True,frame);
++    { the unwind runs from here: a finally block that raises an exception caught
++      before the outermost frame abandons it, and the entry with it }
++    ExceptObjectStack^.UnwindFrame:=@obj;
+     RtlUnwindEx(frame, @L1, @rec, nil, dispatch.ContextRecord, dispatch.HistoryTable);
+   end
+   else if (rec.ExceptionFlags and EXCEPTION_TARGET_UNWIND)<>0 then
