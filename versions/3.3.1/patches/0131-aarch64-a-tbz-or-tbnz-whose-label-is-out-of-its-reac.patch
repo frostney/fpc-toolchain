@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Tue, 24 Nov 2026 05:31:07 +0000
-Subject: [PATCH 131/141] aarch64: a tbz or tbnz whose label is out of its
+Subject: [PATCH 131/142] aarch64: a tbz or tbnz whose label is out of its
  reach becomes the opposite test over a b
 
 tbz and tbnz reach +-32 KiB. The peephole optimizer forms them from a test of one bit and a b.eq or
