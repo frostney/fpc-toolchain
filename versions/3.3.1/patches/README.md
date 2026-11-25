@@ -101,7 +101,8 @@ in another kind of register than the one the compiler keeps its type in: in ST(0
 (`{$fputype sse2}` and later for Double), in r0/r1 on arm with a VFP fputype and a soft-float ABI (EABI, not
 `-CaEABIHF`; checked in the assembly). An inline function whose result is a call of another function, `Result :=
 FloorD(T / 10)`, returned 0 or a stale value (`tests/test/tinlsse1.pp`, on i386 at `-O-` to `-O4`). x86_64 returns
-Single and Double in xmm0 and aarch64 in d0 or s0, so neither reaches that copy. Upstream main still has it.
+Single and Double in xmm0 and aarch64 in d0 or s0, so neither reaches that copy. Upstream main still has it. 0143
+makes that test exit 0 on an i386 CPU without SSE2, as `tw7161.pp` does.
 `toolchain.conf` pins the resulting tree
 (`FPC_EXPECT_TREE`), so the build fails if the base or the series drifts.
 

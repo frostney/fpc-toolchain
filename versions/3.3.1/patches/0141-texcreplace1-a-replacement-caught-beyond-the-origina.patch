@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Wed, 25 Nov 2026 01:26:01 +0000
-Subject: [PATCH 141/142] texcreplace1: a replacement caught beyond the
+Subject: [PATCH 141/143] texcreplace1: a replacement caught beyond the
  original's handler, and what is freed
 
 Add the case of an exception from a finally block caught further out than

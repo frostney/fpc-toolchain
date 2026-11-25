@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Wed, 25 Nov 2026 19:40:13 +0000
-Subject: [PATCH 142/142] compiler: copy a call's result in memory into an
+Subject: [PATCH 142/143] compiler: copy a call's result in memory into an
  MM-register funcretnode, not the other way round
 
 tcgcallnode.handle_return_value copies a call's result into the location
