@@ -1,0 +1,302 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Stein <johannesstein@freeze-dev.com>
+Date: Wed, 25 Nov 2026 01:14:21 +0000
+Subject: [PATCH 139/140] rtl: win32: release an exception a finally block
+ replaced wherever the replacement is caught
+
+An exception handler links the exception's entry on the exception object
+stack before it unwinds, and an exception that a finally block raises
+during that unwind replaces it. ReleaseAbandonedExceptions then removed
+the replaced entry only when the replacement was caught at or beyond the
+frame the replaced exception unwound to (UnwindFrame was that frame).
+Caught before it, at a handler between the finally block and that frame,
+the entry stayed on the stack, although it lives in the dead stack frame
+of the handler that had started the unwind, and the replaced object was
+never freed. RaiseList showed it after the replacement was handled, and
+the next exception a handler caught walked it: an access violation in
+ReleaseAbandonedExceptions or a hang.
+
+UnwindFrame now records where the unwind runs, the entry's own address
+in its handler, as win64 does: a catch at a frame above it abandons the
+unwind, a catch inside the finally block lies below it and leaves the
+unwind to go on.
+---
+ rtl/inc/objpash.inc        |   4 +-
+ rtl/win32/seh32.inc        |  26 ++++--
+ tests/test/texcreplace1.pp | 183 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 203 insertions(+), 10 deletions(-)
+ create mode 100644 tests/test/texcreplace1.pp
+
+diff --git a/rtl/inc/objpash.inc b/rtl/inc/objpash.inc
+index 24001b1b..1710df6a 100644
+--- a/rtl/inc/objpash.inc
++++ b/rtl/inc/objpash.inc
+@@ -529,8 +529,8 @@
+          Framecount : Longint;
+          Frames     : PCodePointer;
+          { setjmp exceptions: parent of the exception frame the exception unwinds to;
+-           win64 SEH: stack position of the unwind in progress, nil once it reached
+-           its target }
++           win32 and win64 SEH: stack position of the unwind in progress, nil once
++           it reached its target }
+          UnwindFrame : Pointer;
+ {$ifdef FPC_USE_WIN32_SEH}
+          SEHFrame   : Pointer;
+diff --git a/rtl/win32/seh32.inc b/rtl/win32/seh32.inc
+index ebc7447a..40312884 100644
+--- a/rtl/win32/seh32.inc
++++ b/rtl/win32/seh32.inc
+@@ -143,13 +143,18 @@ end;
+ 
+ 
+ { Link aExc on top of the exception object stack for the handler established at
+-  aFrame, unwinding to aUnwindFrame (nil when no unwind is in progress). }
+-procedure LinkExceptEntry(var aExc: TExceptObject; aFrame, aRec, aUnwindFrame: Pointer);
++  aFrame. aExc is a local of the handler that links it; when aUnwinding, that
++  handler is about to unwind, and the entry's own address marks where on the
++  stack that unwind runs. }
++procedure LinkExceptEntry(var aExc: TExceptObject; aFrame, aRec: Pointer; aUnwinding: Boolean);
+ begin
+   aExc.Refcount:=0;
+   aExc.SEHFrame:=aFrame;
+   aExc.ExceptRec:=aRec;
+-  aExc.UnwindFrame:=aUnwindFrame;
++  if aUnwinding then
++    aExc.UnwindFrame:=@aExc
++  else
++    aExc.UnwindFrame:=nil;
+   aExc.Next:=ExceptObjectStack;
+   ExceptObjectStack:=@aExc;
+ end;
+@@ -180,8 +185,13 @@ end;
+ 
+ 
+ { Remove the entries below the top of the exception object stack whose unwind
+-  targets a frame at or above aFrame, freeing their frames and the exception
+-  objects that were not acquired. }
++  was in progress deeper on the stack than aFrame, freeing their frames and the
++  exception objects that were not acquired. A handler that catches at aFrame
++  resumes there and drops the stack below it, with any unwind running there:
++  that of an exception a finally block replaced, whether the replacement is
++  caught at the frame the unwind targets, beyond it or before it. An exception
++  caught inside the finally block, at a frame deeper than the unwind, leaves
++  that unwind to go on. }
+ procedure ReleaseAbandonedExceptions(aFrame: Pointer);
+ var
+   lTop, lPrev, lEntry: PExceptObject;
+@@ -259,7 +269,7 @@ begin
+       Exc.Frames:=PCodePointer(rec.ExceptionInformation[3]);
+       Exc.FrameCount:=ptruint(rec.ExceptionInformation[2]);
+       code:=217;
+-      LinkExceptEntry(Exc,@frame,@rec,@frame);
++      LinkExceptEntry(Exc,@frame,@rec,true);
+     end;
+ 
+     RtlUnwind(@frame,nil,@rec,nil);
+@@ -288,7 +298,7 @@ begin
+         Halt(code);
+       end;
+       Exc.FrameCount:=GetBacktrace(context,nil,Exc.Frames);
+-      LinkExceptEntry(Exc,@frame,@rec,nil);
++      LinkExceptEntry(Exc,@frame,@rec,false);
+     end
+     else
+       Exc.UnwindFrame:=nil;
+@@ -365,7 +375,7 @@ begin
+     Exc.Framecount:=Longint(PtrUInt(rec.ExceptionInformation[2]));
+     Exc.Frames:=rec.ExceptionInformation[3];
+   end;
+-  LinkExceptEntry(Exc,@frame,@rec,@frame);
++  LinkExceptEntry(Exc,@frame,@rec,true);
+ 
+   asm
+     movl %ebx,_oldebx
+diff --git a/tests/test/texcreplace1.pp b/tests/test/texcreplace1.pp
+new file mode 100644
+index 00000000..1c8ccca1
+--- /dev/null
++++ b/tests/test/texcreplace1.pp
+@@ -0,0 +1,183 @@
++{ an exception raised in a finally block replaces the one whose unwind ran the
++  block: wherever the replacement is caught, the replaced exception is freed
++  and leaves no entry on the exception object stack (RaiseList), so later
++  exceptions are handled normally. On i386-win32, an entry was left behind when
++  the replacement was caught before the frame the replaced exception unwound
++  to; it lived in a handler's dead stack frame, and the next exception that a
++  handler caught crashed or hung in the RTL. }
++program texcreplace1;
++
++{$mode objfpc}
++
++uses
++  sysutils;
++
++type
++  ECounted = class(Exception)
++  public
++    constructor Create(const aMsg: string);
++    destructor Destroy; override;
++  end;
++  EOriginal = class(ECounted);
++  EReplacement = class(ECounted);
++
++var
++  live: longint = 0;
++  trace: string;
++
++constructor ECounted.Create(const aMsg: string);
++begin
++  inherited Create(aMsg);
++  inc(live);
++end;
++
++destructor ECounted.Destroy;
++begin
++  dec(live);
++  inherited Destroy;
++end;
++
++procedure fail(const what: string);
++begin
++  writeln('error: ', what, ' (trace: ', trace, ')');
++  halt(1);
++end;
++
++{ the exception object stack is empty and every exception object is freed }
++procedure checkclean(const what: string);
++begin
++  if RaiseList<>nil then
++    fail(what + ': an entry is left on the exception object stack');
++  if live<>0 then
++    fail(what + ': ' + inttostr(live) + ' exception object(s) not freed');
++end;
++
++{ the replacement is caught before the frame the original unwinds to }
++procedure caughtbefore;
++begin
++  trace:='';
++  try
++    try
++      try
++        raise EOriginal.Create('original');
++      finally
++        trace:=trace + 'finally;';
++        raise EReplacement.Create('replacement');
++      end;
++    except
++      on e: EReplacement do
++        trace:=trace + 'caught ' + e.message + ';';
++    end;
++    trace:=trace + 'after;';
++  except
++    on e: EOriginal do
++      trace:=trace + 'outer caught ' + e.message + ';';
++  end;
++  if trace<>'finally;caught replacement;after;' then
++    fail('replacement caught before the original''s handler');
++end;
++
++{ the same, with no handler for the original: it unwinds to the outermost
++  frame, so this must not run inside a try statement }
++procedure caughtbeforeunhandled;
++begin
++  trace:='';
++  try
++    try
++      raise EOriginal.Create('original');
++    finally
++      trace:=trace + 'finally;';
++      raise EReplacement.Create('replacement');
++    end;
++  except
++    on e: EReplacement do
++      trace:=trace + 'caught ' + e.message + ';';
++  end;
++  if trace<>'finally;caught replacement;' then
++    fail('replacement caught, original unhandled');
++end;
++
++{ the replacement is caught by the original's handler }
++procedure caughtat;
++begin
++  trace:='';
++  try
++    try
++      raise EOriginal.Create('original');
++    finally
++      trace:=trace + 'finally;';
++      raise EReplacement.Create('replacement');
++    end;
++  except
++    on e: ECounted do
++      trace:=trace + 'caught ' + e.message + ';';
++  end;
++  if trace<>'finally;caught replacement;' then
++    fail('replacement caught by the original''s handler');
++end;
++
++{ an exception caught inside the finally block leaves the original's unwind
++  to go on to its handler }
++procedure caughtinside;
++begin
++  trace:='';
++  try
++    try
++      raise EOriginal.Create('original');
++    finally
++      try
++        raise EReplacement.Create('inner');
++      except
++        on e: EReplacement do
++          trace:=trace + 'inner caught ' + e.message + ';';
++      end;
++      if live<>1 then
++        fail('caught inside the finally block: the original was freed');
++    end;
++  except
++    on e: EOriginal do
++      trace:=trace + 'caught ' + e.message + ';';
++  end;
++  if trace<>'inner caught inner;caught original;' then
++    fail('exception caught inside the finally block');
++end;
++
++{ an exception raised in an except block and caught outside it }
++procedure raiseinexcept;
++begin
++  trace:='';
++  try
++    try
++      raise EOriginal.Create('original');
++    except
++      on e: EOriginal do
++        begin
++          trace:=trace + 'caught ' + e.message + ';';
++          raise EReplacement.Create('replacement');
++        end;
++    end;
++  except
++    on e: EReplacement do
++      trace:=trace + 'caught ' + e.message + ';';
++  end;
++  if trace<>'caught original;caught replacement;' then
++    fail('exception raised in an except block');
++end;
++
++begin
++  caughtbefore;
++  checkclean('replacement caught before the original''s handler');
++  raiseinexcept;
++  checkclean('exception raised in an except block, after the first case');
++  caughtbeforeunhandled;
++  checkclean('replacement caught, original unhandled');
++  raiseinexcept;
++  checkclean('exception raised in an except block, after the second case');
++  caughtat;
++  checkclean('replacement caught by the original''s handler');
++  caughtinside;
++  checkclean('exception caught inside the finally block');
++  raiseinexcept;
++  checkclean('exception raised in an except block');
++  writeln('ok');
++end.

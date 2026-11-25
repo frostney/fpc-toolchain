@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Johannes Stein <johannesstein@freeze-dev.com>
 Date: Tue, 24 Nov 2026 20:51:46 +0000
-Subject: [PATCH 135/138] rtl: unix: DoFileLocking keeps fpflock's errno across
+Subject: [PATCH 135/140] rtl: unix: DoFileLocking keeps fpflock's errno across
  the Sleep of its retry loop
 
 DoFileLocking retries a lock that fails with EAGAIN after Sleep(1), and
