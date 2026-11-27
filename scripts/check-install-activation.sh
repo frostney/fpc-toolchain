@@ -8,7 +8,9 @@
 # an mv that has neither -T nor -h.
 # After each, toolchains/<version> must point at the expected build, nothing may be left beside it or
 # inside another build, and fpc-<version> must run that build. The link must also have been renamed over,
-# never removed, except with that last mv: an rm on PATH logs what install.sh removes. Needs no network.
+# never removed or linked onto, except with that last mv: rm and ln on PATH log what install.sh removes and
+# where it links. Last, a build whose compiler reports another identity must fail to install and leave the
+# active build as it was. Needs no network.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -31,13 +33,16 @@ standin() {
   echo "$dir"
 }
 
-# rm that logs each path it is given, then removes it
+# rm that logs "rm PATH" for each path it is given, and ln that logs "ln TARGET" for the link it makes
 mkdir "$work/watch"
-printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done >> "%s"\nexec %s "$@"\n' "$work/rm.log" "$(command -v rm)" > "$work/watch/rm"
-chmod +x "$work/watch/rm"
+printf '#!/bin/sh\nfor a in "$@"; do printf "rm %%s\\n" "$a"; done >> "%s"\nexec %s "$@"\n' \
+  "$work/watch.log" "$(command -v rm)" > "$work/watch/rm"
+printf '#!/bin/sh\nfor a in "$@"; do last=$a; done\nprintf "ln %%s\\n" "$last" >> "%s"\nexec %s "$@"\n' \
+  "$work/watch.log" "$(command -v ln)" > "$work/watch/ln"
+chmod +x "$work/watch/rm" "$work/watch/ln"
 
 install() {
-  : > "$work/rm.log"
+  : > "$work/watch.log"
   PATH=$work/watch:$PATH sh "$here/install.sh" --root "$root" --host test-host "$@" > "$work/out.txt" 2>&1 \
     || { cat "$work/out.txt"; exit 1; }
 }
@@ -49,10 +54,11 @@ expect_active() { # VERSION IDENTITY STEP [relinked: the link was removed and li
   if [ -n "$stray" ]; then echo "FAIL $3: leftover $stray"; fails=$((fails + 1)); fi
   ran=$("$root/bin/fpc-$1" -iW)
   if [ "$ran" != "$2" ]; then echo "FAIL $3: fpc-$1 runs $ran, expected $2"; fails=$((fails + 1)); fi
-  removed=no; grep -qxF "$root/toolchains/$1" "$work/rm.log" && removed=yes
-  if [ "$removed" = yes ] && [ "${4:-}" != relinked ]; then
-    echo "FAIL $3: toolchains/$1 was removed and linked again, not renamed over"; fails=$((fails + 1))
-  elif [ "$removed" = no ] && [ "${4:-}" = relinked ]; then
+  relinked=no
+  grep -qxF -e "rm $root/toolchains/$1" -e "ln $root/toolchains/$1" "$work/watch.log" && relinked=yes
+  if [ "$relinked" = yes ] && [ "${4:-}" != relinked ]; then
+    echo "FAIL $3: toolchains/$1 was removed or linked onto, not renamed over"; fails=$((fails + 1))
+  elif [ "$relinked" = no ] && [ "${4:-}" = relinked ]; then
     echo "FAIL $3: toolchains/$1 was not linked again by the fallback"; fails=$((fails + 1))
   fi
 }
@@ -68,6 +74,14 @@ mkdir "$work/shim"
 printf '#!/bin/sh\ncase " $* " in *" -fT "*|*" -fh "*) exit 1 ;; esac\nexec %s "$@"\n' "$(command -v mv)" > "$work/shim/mv"
 chmod +x "$work/shim/mv"
 PATH=$work/shim:$PATH install --from-dir "$work/src/3.3.1+2"; expect_active 3.3.1 3.3.1+2 'without mv -T or -h' relinked
+
+# A build whose compiler reports another identity: install.sh fails and 3.3.1+2 stays active.
+bad=$(standin 3.3.1+4); printf '#!/bin/sh\necho 3.3.1+0\n' > "$bad/lib/fpc/3.3.1/ppcx64"
+: > "$work/watch.log"
+if sh "$here/install.sh" --root "$root" --host test-host --from-dir "$bad" > "$work/out.txt" 2>&1; then
+  echo "FAIL a build that reports another identity: install.sh exited 0"; fails=$((fails + 1))
+fi
+expect_active 3.3.1 3.3.1+2 'a build that reports another identity'
 
 if [ $fails -gt 0 ]; then echo "$fails activation check(s) failed"; exit 1; fi
 echo "install.sh activation checks passed"
