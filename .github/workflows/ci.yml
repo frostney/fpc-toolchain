@@ -40,6 +40,18 @@ jobs:
       - name: Source + series give the pinned tree
         run: scripts/fetch-source.sh ${{ matrix.version }} "$RUNNER_TEMP/src"
 
+  # install.sh makes a new build of an installed version the active one, with GNU mv on Linux and BSD mv on macOS.
+  activation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.sh activation
+        run: sh scripts/check-install-activation.sh
+
   # The installers retry a network failure and stop at once on a release that does not exist. No archive is
   # downloaded: a proxy on a closed port stands in for an unreachable network, and github.com answers 404
   # for release 0.0.0-b1.

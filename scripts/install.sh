@@ -247,8 +247,12 @@ ln -sfn ../../etc "$dest.new/lib/fpc/etc"
 # --- activate ---------------------------------------------------------------------------------------
 rm -rf "$dest"; mv "$dest.new" "$dest"
 if [ $activate = 1 ]; then
-  ln -sfn "$bident" "$root/toolchains/$ver.new" && mv -f "$root/toolchains/$ver.new" "$root/toolchains/$ver" 2>/dev/null \
-    || { rm -f "$root/toolchains/$ver"; ln -s "$bident" "$root/toolchains/$ver"; }
+  # Rename the new link over the old one. A plain `mv` would follow an existing <ver> link to its directory
+  # and move the new link into the old build, leaving that one active: -T (GNU) and -h (BSD, macOS) stop it.
+  ln -sfn "$bident" "$root/toolchains/$ver.new"
+  mv -fT "$root/toolchains/$ver.new" "$root/toolchains/$ver" 2>/dev/null \
+    || mv -fh "$root/toolchains/$ver.new" "$root/toolchains/$ver" 2>/dev/null \
+    || { rm -f "$root/toolchains/$ver" "$root/toolchains/$ver.new"; ln -s "$bident" "$root/toolchains/$ver"; }
 fi
 
 regen_shims() {
