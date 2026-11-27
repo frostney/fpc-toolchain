@@ -248,7 +248,8 @@ ln -sfn ../../etc "$dest.new/lib/fpc/etc"
 rm -rf "$dest"; mv "$dest.new" "$dest"
 if [ $activate = 1 ]; then
   # Rename the new link over the old one. A plain `mv` would follow an existing <ver> link to its directory
-  # and move the new link into the old build, leaving that one active: -T (GNU) and -h (BSD, macOS) stop it.
+  # and move the new link into the old build, leaving that one active: -T (GNU coreutils, recent BusyBox) and
+  # -h (macOS, FreeBSD) stop it. An mv with neither, such as OpenBSD's, removes the link and links again.
   ln -sfn "$bident" "$root/toolchains/$ver.new"
   mv -fT "$root/toolchains/$ver.new" "$root/toolchains/$ver" 2>/dev/null \
     || mv -fh "$root/toolchains/$ver.new" "$root/toolchains/$ver" 2>/dev/null \
