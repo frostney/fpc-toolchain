@@ -245,10 +245,21 @@ mkdir -p "$dest.new/etc"
 ln -sfn ../../etc "$dest.new/lib/fpc/etc"
 
 # --- activate ---------------------------------------------------------------------------------------
+# check the staged build before it replaces anything: a build that fails here leaves every installed build,
+# and the version's active one, as they were (-iW reads no units, so the staged path does not matter)
+reject() { rm -rf "$dest.new"; die "$@"; }
+"$dest.new/bin/fpc" -n "@$dest.new/etc/fpc.cfg" -iW >/dev/null 2>&1 || reject "installed compiler does not run"
+got=$("$dest.new/lib/fpc/$ver/$(cd "$dest.new/lib/fpc/$ver" && ls ppcx64 ppca64 2>/dev/null | head -n 1)" -iW) || got=
+[ "$got" = "$bident" ] || reject "compiler reports $got, expected $bident"
 rm -rf "$dest"; mv "$dest.new" "$dest"
 if [ $activate = 1 ]; then
-  ln -sfn "$bident" "$root/toolchains/$ver.new" && mv -f "$root/toolchains/$ver.new" "$root/toolchains/$ver" 2>/dev/null \
-    || { rm -f "$root/toolchains/$ver"; ln -s "$bident" "$root/toolchains/$ver"; }
+  # Rename the new link over the old one. A plain `mv` would follow an existing <ver> link to its directory
+  # and move the new link into the old build, leaving that one active: -T (GNU coreutils, recent BusyBox) and
+  # -h (macOS, FreeBSD) stop it. An mv with neither, such as OpenBSD's, removes the link and links again.
+  ln -sfn "$bident" "$root/toolchains/$ver.new"
+  mv -fT "$root/toolchains/$ver.new" "$root/toolchains/$ver" 2>/dev/null \
+    || mv -fh "$root/toolchains/$ver.new" "$root/toolchains/$ver" 2>/dev/null \
+    || { rm -f "$root/toolchains/$ver" "$root/toolchains/$ver.new"; ln -s "$bident" "$root/toolchains/$ver"; }
 fi
 
 regen_shims() {
@@ -289,9 +300,6 @@ for h in fpc-toolchain fpc-sysroot.sh; do
 done
 
 echo "installed $bident -> $dest"
-"$dest/bin/fpc" -n "@$cfg" -iW >/dev/null 2>&1 || die "installed compiler does not run"
-got=$("$dest/lib/fpc/$ver/$(cd "$dest/lib/fpc/$ver" && ls ppcx64 ppca64 2>/dev/null | head -n 1)" -iW)
-[ "$got" = "$bident" ] || die "compiler reports $got, expected $bident"
 case ":$PATH:" in *":$root/bin:"*) ;; *) echo "add $root/bin to PATH (fpc-$ver, fpc -V$ver)" >&2 ;; esac
 for c in "$HOME/.fpc.cfg" ./fpc.cfg; do
   [ -f "$c" ] && echo "warning: $c exists and takes precedence over the toolchain's fpc.cfg for plain fpc/ppc calls (fpc-$ver front-ends ignore it)" >&2
