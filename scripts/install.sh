@@ -245,12 +245,13 @@ mkdir -p "$dest.new/etc"
 ln -sfn ../../etc "$dest.new/lib/fpc/etc"
 
 # --- activate ---------------------------------------------------------------------------------------
+# check the staged build before it replaces anything: a build that fails here leaves every installed build,
+# and the version's active one, as they were (-iW reads no units, so the staged path does not matter)
+reject() { rm -rf "$dest.new"; die "$@"; }
+"$dest.new/bin/fpc" -n "@$dest.new/etc/fpc.cfg" -iW >/dev/null 2>&1 || reject "installed compiler does not run"
+got=$("$dest.new/lib/fpc/$ver/$(cd "$dest.new/lib/fpc/$ver" && ls ppcx64 ppca64 2>/dev/null | head -n 1)" -iW) || got=
+[ "$got" = "$bident" ] || reject "compiler reports $got, expected $bident"
 rm -rf "$dest"; mv "$dest.new" "$dest"
-# check the build where it now lives, before it becomes the active one: a build that fails here leaves the
-# version's active build as it was
-"$dest/bin/fpc" -n "@$cfg" -iW >/dev/null 2>&1 || die "installed compiler does not run"
-got=$("$dest/lib/fpc/$ver/$(cd "$dest/lib/fpc/$ver" && ls ppcx64 ppca64 2>/dev/null | head -n 1)" -iW)
-[ "$got" = "$bident" ] || die "compiler reports $got, expected $bident"
 if [ $activate = 1 ]; then
   # Rename the new link over the old one. A plain `mv` would follow an existing <ver> link to its directory
   # and move the new link into the old build, leaving that one active: -T (GNU coreutils, recent BusyBox) and

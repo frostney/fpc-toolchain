@@ -9,8 +9,8 @@
 # After each, toolchains/<version> must point at the expected build, nothing may be left beside it or
 # inside another build, and fpc-<version> must run that build. The link must also have been renamed over,
 # never removed or linked onto, except with that last mv: rm and ln on PATH log what install.sh removes and
-# where it links. Last, a build whose compiler reports another identity must fail to install and leave the
-# active build as it was. Needs no network.
+# where it links. Last, a build whose compiler reports another identity, and a reinstall of the active build
+# whose front end does not run, must fail to install and leave the active build as it was. Needs no network.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -52,7 +52,7 @@ expect_active() { # VERSION IDENTITY STEP [relinked: the link was removed and li
   if [ "$got" != "$2" ]; then echo "FAIL $3: toolchains/$1 -> $got, expected $2"; fails=$((fails + 1)); fi
   stray=$(find "$root/toolchains" -mindepth 1 -maxdepth 2 -name "$1.new")
   if [ -n "$stray" ]; then echo "FAIL $3: leftover $stray"; fails=$((fails + 1)); fi
-  ran=$("$root/bin/fpc-$1" -iW)
+  ran=$("$root/bin/fpc-$1" -iW 2>&1) || ran="a failure (exit $?)"
   if [ "$ran" != "$2" ]; then echo "FAIL $3: fpc-$1 runs $ran, expected $2"; fails=$((fails + 1)); fi
   relinked=no
   grep -qxF -e "rm $root/toolchains/$1" -e "ln $root/toolchains/$1" "$work/watch.log" && relinked=yes
@@ -82,6 +82,17 @@ if sh "$here/install.sh" --root "$root" --host test-host --from-dir "$bad" > "$w
   echo "FAIL a build that reports another identity: install.sh exited 0"; fails=$((fails + 1))
 fi
 expect_active 3.3.1 3.3.1+2 'a build that reports another identity'
+
+# A reinstall of the active 3.3.1+2 whose front end does not run: install.sh fails before it replaces the
+# active build's directory, so fpc-3.3.1 still runs the original.
+same=$work/src/same/3.3.1+2; mkdir -p "$work/src/same"; cp -R "$work/src/3.3.1+2" "$same"
+printf '#!/bin/sh\nexit 1\n' > "$same/bin/fpc"
+: > "$work/watch.log"
+if sh "$here/install.sh" --root "$root" --host test-host --from-dir "$same" > "$work/out.txt" 2>&1; then
+  echo "FAIL a reinstall of the active build that does not run: install.sh exited 0"; fails=$((fails + 1))
+fi
+expect_active 3.3.1 3.3.1+2 'a reinstall of the active build that does not run'
+if [ -e "$root/toolchains/3.3.1+2.new" ]; then echo "FAIL a rejected build left 3.3.1+2.new"; fails=$((fails + 1)); fi
 
 if [ $fails -gt 0 ]; then echo "$fails activation check(s) failed"; exit 1; fi
 echo "install.sh activation checks passed"
